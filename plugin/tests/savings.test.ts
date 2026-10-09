@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { DEFAULT_CONFIG } from '../hooks/config'
-import { addConsult, addStep, cost, emptyLedger, PRICES, report, savings } from '../hooks/savings'
+import { addConsult, addStep, asUsage, cost, emptyLedger, PRICES, report, savings } from '../hooks/savings'
 
 const U = { input_tokens: 2_000, output_tokens: 1_000, cache_read_input_tokens: 40_000, cache_creation_input_tokens: 3_000 }
 
@@ -60,7 +60,7 @@ test('main loop writes cost the 1h price, agent steps the 5m price', async () =>
 
 test('consults add to the real cost and can turn savings negative', async () => {
   let l = addStep(emptyLedger(), U, 'haiku', 'opus', true)
-  for (let i = 0; i < 20; i++) l = addConsult(l, 8_000, 2_000, 'opus')
+  for (let i = 0; i < 20; i++) l = addConsult(l, { promptChars: 8_000, replyChars: 2_000 }, 'opus')
   expect(l.consults).toBe(20)
   expect(savings(l).low).toBeLessThan(0)
   expect(report(l, 'opus')).toContain('senior consults: 20')
@@ -77,6 +77,40 @@ test('custom prices and prudent ratio are honoured', async () => {
   // prudent column: half the tokens on the baseline instead of 65%
   const half = cost({ input_tokens: 1000, output_tokens: 500, cache_read_input_tokens: 20000, cache_creation_input_tokens: 1500 }, cfg.prices.opus)
   expect(Math.abs(cus.baselineLow - half) < 1e-9).toBe(true)
-  const consult = addConsult(emptyLedger(), 4000, 400, 'sonnet', cfg)
+  const consult = addConsult(emptyLedger(), { promptChars: 4000, replyChars: 400 }, 'sonnet', cfg)
   expect(Math.abs(consult.consultCost - (1000 * 2 + 100 * 10) / 1e6) < 1e-12).toBe(true)
+})
+
+test('a consult with a usage report is priced like a request, with the 5-minute write price', async () => {
+  // opus: 2k*4 + 1k*20 + 40k*0.2 + 3k*5 = 51000 / 1e6; the 1-hour write price would give 0.059
+  const l = addConsult(emptyLedger(), { usage: U, promptChars: 1, replyChars: 1 }, 'opus')
+  expect(near(l.consultCost, 0.051)).toBe(true)
+  expect(near(l.actual, 0.051)).toBe(true)
+  expect(l.consults).toBe(1)
+})
+
+test('a consult without usage keeps the character estimate', async () => {
+  // about 4 characters per token: 8000 chars in = 2000 tokens at 4, 2000 chars out = 500 tokens at 20
+  const l = addConsult(emptyLedger(), { usage: undefined, promptChars: 8_000, replyChars: 2_000 }, 'opus')
+  expect(near(l.consultCost, (2_000 * 4 + 500 * 20) / 1e6)).toBe(true)
+  expect(l.consults).toBe(1)
+})
+
+test('a consult with zero usage still counts as a consult', async () => {
+  const l = addConsult(emptyLedger(), { usage: use(0, 0, 0, 0), promptChars: 8_000, replyChars: 2_000 }, 'opus')
+  expect(l.consults).toBe(1)
+  expect(l.consultCost).toBe(0)
+})
+
+test('asUsage accepts a complete usage object of numbers only', async () => {
+  const good = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+  expect(asUsage(good)).toEqual(good)
+  expect(asUsage({ ...good, extra: 'ignored' })).toEqual(good)
+  expect(asUsage(undefined)).toBe(undefined)
+  expect(asUsage(null)).toBe(undefined)
+  expect(asUsage('usage')).toBe(undefined)
+  expect(asUsage({ output_tokens: 5 })).toBe(undefined)
+  expect(asUsage({ ...good, input_tokens: '10' })).toBe(undefined)
+  expect(asUsage({ ...good, output_tokens: NaN })).toBe(undefined)
+  expect(asUsage({ ...good, cache_read_input_tokens: -1 })).toBe(undefined)
 })

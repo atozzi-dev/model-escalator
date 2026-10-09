@@ -5,7 +5,7 @@ import { afterHelp, canAskForHelp, countStep, dossier, escalated, isSilent, mark
 import { categorize, recommend, record, type Stats } from './learning'
 import { createQueue } from './queue'
 import { parseSnapshot, type Snapshot } from './state'
-import { addConsult, addIntervention, addStep, emptyLedger, report, statusLine, type Ledger, type Usage } from './savings'
+import { addConsult, addIntervention, addStep, asUsage, emptyLedger, report, statusLine, type Ledger, type Usage } from './savings'
 
 export const HELP_TOOL = 'mcp__model-escalator__ask_for_help'
 const STATS_KEY = 'stats'
@@ -462,7 +462,8 @@ async function consult($: EngineInterface, s: AgentState, extra = ''): Promise<s
       await $.ui.log(`senior consult gave no advice: ${why} output_tokens=${r?.usage?.output_tokens ?? '-'}`, { to: 'debug' })
     } catch { /* diagnostics only */ }
   }
-  ledger = addConsult(ledger, prompt.length + SENIOR_SYSTEM.length, advice.length, tierOf(config.senior), config)
+  const usage = typeof reply === 'string' ? undefined : asUsage(reply.usage)
+  ledger = addConsult(ledger, { usage, promptChars: prompt.length + SENIOR_SYSTEM.length, replyChars: advice.length }, tierOf(config.senior), config)
   if (!advice) return tag('Still stuck. List three different hypotheses and test the cheapest one first.')
   return tag(`Advice from a senior model:
 ${advice}`)
