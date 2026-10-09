@@ -13,6 +13,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Agents that keep making model requests without any progress now climb the escalation ladder too, after a generous number of requests.
 - Agents that go silent for `stallMinutes` (default 10) are reported in the log, the status line and a toast, and get a note on their next tool call; a tool call still running counts as activity for three times that window.
 - `ask_for_help` tool: a tracked agent that is stuck can ask for the senior consult directly, once per grace window; in observe mode the request is only logged.
+- Seven A/B eval cases (easy to hard) with hidden acceptance tests, tamper-proof test checks and a quality judge, to compare the escalation ladder against an all-strong-model baseline.
 - Learned evidence fades over time (`learningHalfLifeDays`, default 30, 0 never forgets), and `/escalator stats` shows readable counters with the age of each entry instead of raw JSON.
 - Notice in the main conversation, read by the lead, when an agent is swapped to a stronger model, its swap target is unavailable, or it needs a human (option `notifyLead`, on by default, at most 10 per session).
 - Optional effort step (`effortStep`, off by default): before a model swap, a stuck agent keeps its model and its requests carry a higher effort (one step up, at least `effortBoost`); skipped for models without effort, dropped after a swap, not counted as an escalation for learning.
