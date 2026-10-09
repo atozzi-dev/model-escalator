@@ -1,12 +1,18 @@
 import type { Tier } from './detector'
 
-// USD per million tokens. Opus 5.5 and Sonnet 5.5 are Anthropic list prices (Oct 2026).
-// Haiku uses Haiku 4.5 list prices as a placeholder: check the pricing page and override in config.
-export type Price = { input: number; output: number; cacheRead: number; cacheWrite: number }
+// USD per million tokens, Anthropic API list prices (Oct 2026), checked against /cost.
+// Cache writes cost 1.25x input for the 5-minute TTL and 2x input for the 1-hour TTL.
+// `longContext` replaces the rates when one request's total input exceeds its threshold.
+export type Rates = { input: number; output: number; cacheRead: number; cacheWrite5m: number; cacheWrite1h: number }
+export type Price = Rates & { longContext?: Rates & { threshold: number } }
+export type CacheTtl = '5m' | '1h'
 export const PRICES: Record<Tier, Price> = {
-  opus: { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 },
-  sonnet: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
-  haiku: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
+  opus: { input: 4, output: 20, cacheRead: 0.2, cacheWrite5m: 5, cacheWrite1h: 8 },
+  sonnet: { input: 2, output: 10, cacheRead: 0.2, cacheWrite5m: 2.5, cacheWrite1h: 4 },
+  haiku: {
+    input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite5m: 0.125, cacheWrite1h: 0.2,
+    longContext: { threshold: 100_000, input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite5m: 0.625, cacheWrite1h: 1 },
+  },
 }
 
 export type Usage = {
@@ -16,9 +22,12 @@ export type Usage = {
   cache_creation_input_tokens: number
 }
 
-export function cost(u: Usage, p: Price): number {
-  return (u.input_tokens * p.input + u.output_tokens * p.output +
-    u.cache_read_input_tokens * p.cacheRead + u.cache_creation_input_tokens * p.cacheWrite) / 1e6
+export function cost(u: Usage, p: Price, ttl: CacheTtl = '5m'): number {
+  const total = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
+  const r: Rates = p.longContext && total > p.longContext.threshold ? p.longContext : p
+  const write = ttl === '1h' ? r.cacheWrite1h : r.cacheWrite5m
+  return (u.input_tokens * r.input + u.output_tokens * r.output +
+    u.cache_read_input_tokens * r.cacheRead + u.cache_creation_input_tokens * write) / 1e6
 }
 
 function scale(u: Usage, k: number): Usage {
@@ -46,15 +55,18 @@ export function emptyLedger(): Ledger {
 }
 
 // One model request. `isAgent` false for the lead: it counts the same in both columns.
+// The usage report has no TTL split: the main loop writes the cache with the 1-hour TTL,
+// subagents and teammates with the 5-minute one.
 export function addStep(l: Ledger, u: Usage, tier: Tier, baseline: Tier, isAgent: boolean): Ledger {
-  const c = cost(u, PRICES[tier])
+  const ttl: CacheTtl = isAgent ? '5m' : '1h'
+  const c = cost(u, PRICES[tier], ttl)
   const row = l.byTier[tier] ?? { steps: 0, cost: 0 }
   const same = !isAgent || tier === baseline
   return {
     ...l,
     actual: l.actual + c,
-    baselineHigh: l.baselineHigh + (same ? c : cost(u, PRICES[baseline])),
-    baselineLow: l.baselineLow + (same ? c : cost(scale(u, PRUDENT_TOKEN_RATIO), PRICES[baseline])),
+    baselineHigh: l.baselineHigh + (same ? c : cost(u, PRICES[baseline], ttl)),
+    baselineLow: l.baselineLow + (same ? c : cost(scale(u, PRUDENT_TOKEN_RATIO), PRICES[baseline], ttl)),
     agentSteps: l.agentSteps + (isAgent ? 1 : 0),
     byTier: { ...l.byTier, [tier]: { steps: row.steps + 1, cost: row.cost + c } },
   }
