@@ -1,6 +1,7 @@
 // Pure logic: no $ calls, so it is unit-testable in isolation.
 
 import { DEFAULT_CONFIG, type Config } from './config'
+import { exitCodes, parseTestRuns } from './testparse'
 
 export type Tier = 'haiku' | 'sonnet' | 'opus'
 export const LADDER: readonly Tier[] = ['haiku', 'sonnet', 'opus']
@@ -85,18 +86,32 @@ export function normalizePath(p: string): string {
   return f !== t || /^[a-z]:\//i.test(f) ? f.toLowerCase() : f
 }
 
-export type Observation ={ tool: string; ok: boolean; text: string; summary: string }
+export type Observation = { tool: string; ok: boolean; text: string; summary: string }
 
 export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT_CONFIG): { state: AgentState; action?: Action } {
   const s: AgentState = { ...prev, errorCounts: { ...prev.errorCounts }, editCounts: { ...prev.editCounts }, log: [...prev.log] }
   s.stepsSinceAction++
   let progress = false
 
-  if (!ob.ok) {
+  // Failing counts per test run in the output; plain text without a recognised summary falls back
+  // to the first "N failed" it mentions.
+  const runs = parseTestRuns(ob.text)
+  const counts = runs.length > 0 ? runs.map(r => r.failed) : [failingTests(ob.text)].filter((n): n is number => n !== undefined)
+
+  // Failed attempts in this output. An isError result is one attempt. A loop (or `; echo "exit=$?"`)
+  // can hide failures behind ok=true, so every failing run and every non-zero exit marker counts as
+  // well. The largest of the three wins, they are never summed, so one failed attempt weighs once
+  // here (plus once below when its failing count does not drop).
+  const failedRuns = runs.filter(r => r.failed > 0).length
+  const badExits = exitCodes(ob.text).filter(c => c !== 0).length
+  const attempts = Math.max(ob.ok ? 0 : 1, failedRuns, badExits)
+  if (attempts > 0) {
     const sig = normalizeError(ob.text)
-    const n = (s.errorCounts[sig] ?? 0) + 1
-    s.errorCounts[sig] = n
-    s.score += n >= 2 ? 1 : 0.25
+    for (let i = 0; i < attempts; i++) {
+      const n = (s.errorCounts[sig] ?? 0) + 1
+      s.errorCounts[sig] = n
+      s.score += n >= 2 ? 1 : 0.25
+    }
   }
 
   // Oscillation: the same file edited again and again without progress, whatever the errors say.
@@ -107,10 +122,18 @@ export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT
     s.editCounts[key] = edits + 1
   }
 
-  const failing = failingTests(ob.text)
-  if (failing !== undefined) {
-    if (failing === 0 || (s.lastFailing !== undefined && failing < s.lastFailing)) progress = true
-    else if (s.lastFailing !== undefined && failing >= s.lastFailing) s.score += 1
+  // Runs are applied in order. Progress wipes the score; later runs of the same output that do not
+  // improve on the new baseline count again, so only the end state decides whether the call was progress.
+  for (const failing of counts) {
+    if (failing === 0 || (s.lastFailing !== undefined && failing < s.lastFailing)) {
+      progress = true
+      s.score = 0
+      s.errorCounts = {}
+      s.editCounts = {}
+    } else if (s.lastFailing !== undefined) {
+      s.score += 1
+      progress = false
+    }
     s.lastFailing = failing
   }
 
