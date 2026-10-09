@@ -10,34 +10,34 @@ const steps = (s: AgentState, n: number): AgentState => {
 }
 const fail = (text = 'Error: boom') => ({ tool: 'Bash', ok: false, text, summary: 'npm test' })
 
-test('the idle defaults are 20 requests and 0.5 per request, and are parsed from options', async () => {
-  expect(DEFAULT_CONFIG.idleSteps).toBe(20)
-  expect(DEFAULT_CONFIG.idleWeight).toBe(0.5)
+test('the idle defaults are 40 requests and 0.25 per request, and are parsed from options', async () => {
+  expect(DEFAULT_CONFIG.idleSteps).toBe(40)
+  expect(DEFAULT_CONFIG.idleWeight).toBe(0.25)
   expect(parseConfig({ idleSteps: '7' }).idleSteps).toBe(7)
-  expect(parseConfig({ idleSteps: '0' }).idleSteps).toBe(20)
-  expect(parseConfig({ idleSteps: 'x' }).idleSteps).toBe(20)
+  expect(parseConfig({ idleSteps: '0' }).idleSteps).toBe(40)
+  expect(parseConfig({ idleSteps: 'x' }).idleSteps).toBe(40)
   expect(parseConfig({ idleWeight: '2' }).idleWeight).toBe(2)
-  expect(parseConfig({ idleWeight: '-1' }).idleWeight).toBe(0.5)
+  expect(parseConfig({ idleWeight: '-1' }).idleWeight).toBe(0.25)
 })
 
-test('the first twenty requests without progress add nothing', async () => {
-  const s = steps(newAgent('a', 'x', 'haiku', 't'), 20)
-  expect(s.stepsSinceProgress).toBe(20)
+test('the first forty requests without progress add nothing', async () => {
+  const s = steps(newAgent('a', 'x', 'haiku', 't'), 40)
+  expect(s.stepsSinceProgress).toBe(40)
   expect(s.score).toBe(0)
 })
 
-test('from the 21st request on, each request adds the idle weight', async () => {
-  expect(steps(newAgent('a', 'x', 'haiku', 't'), 21).score).toBe(0.5)
-  expect(steps(newAgent('a', 'x', 'haiku', 't'), 23).score).toBe(1.5)
+test('from the 41st request on, each request adds the idle weight', async () => {
+  expect(steps(newAgent('a', 'x', 'haiku', 't'), 41).score).toBe(0.25)
+  expect(steps(newAgent('a', 'x', 'haiku', 't'), 43).score).toBe(0.75)
 })
 
 test('a tool call that makes progress resets the request counter and the score', async () => {
-  let s = steps(newAgent('a', 'x', 'opus', 't'), 25)
-  expect(s.score).toBe(2.5)
+  let s = steps(newAgent('a', 'x', 'opus', 't'), 45)
+  expect(s.score).toBe(1.25)
   s = observe(s, { tool: 'Bash', ok: true, text: '10 passed', summary: 'npm test' }).state
   expect(s.stepsSinceProgress).toBe(0)
   expect(s.score).toBe(0)
-  expect(steps(s, 20).score).toBe(0)
+  expect(steps(s, 40).score).toBe(0)
 })
 
 test('a failing tool call is not progress: the request counter keeps running', async () => {
@@ -92,19 +92,19 @@ async function run(on: any, $: any, mode: string | undefined, requests: number):
 }
 
 test('an agent that only makes requests gets a nudge at its next tool call once the allowance is exceeded', async ($, on) => {
-  // 26 requests: 6 past the allowance, 3.0 points, which is the haiku threshold.
-  const r = await run(on, $, undefined, 26)
+  // 52 requests: 12 past the allowance, 12 x 0.25 = 3.0 points, which is the haiku threshold.
+  const r = await run(on, $, undefined, 52)
   expect(r.notes.length).toBe(1)
   expect(r.notes[0]).toContain('repeating the same failing step')
 })
 
 test('no nudge while the requests are still within the idle allowance', async ($, on) => {
-  const r = await run(on, $, undefined, 25)
+  const r = await run(on, $, undefined, 51)
   expect(r.notes.length).toBe(0)
 })
 
 test('observe mode logs the idle nudge it would send, and sends nothing', async ($, on) => {
-  const r = await run(on, $, 'observe', 26)
+  const r = await run(on, $, 'observe', 52)
   expect(r.notes.length).toBe(0)
   expect(r.logs.some((l) => l.includes('would nudge'))).toBe(true)
 })

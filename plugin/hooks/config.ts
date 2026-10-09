@@ -44,8 +44,10 @@ export const DEFAULT_CONFIG: Config = {
   prices: DEFAULT_PRICES,
   prudentTokenRatio: 0.65,
   oscillationEdits: 3,
-  idleSteps: 20,
-  idleWeight: 0.5,
+  // Provisional: the only progress signal today is failing tests dropping, so long tasks without tests
+  // need headroom. Recalibrate on the observe-week data before relying on these values.
+  idleSteps: 40,
+  idleWeight: 0.25,
   verifyCommand: '',
   verifyTimeoutSeconds: 120,
   modelIds: { haiku: 'claude-haiku-5-5', sonnet: 'claude-sonnet-5-5', opus: 'claude-opus-5-5' },
