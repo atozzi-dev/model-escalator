@@ -1,0 +1,164 @@
+{
+  "schemaVersion": 1,
+  "claudeVersion": "2.1.295",
+  "startedAt": "2026-10-09T10:00:00Z",
+  "durationSeconds": 600,
+  "costUsd": 0,
+  "partial": false,
+  "suite": {
+    "root": "plugin",
+    "ablation": "none",
+    "threshold": 1
+  },
+  "cases": [
+    {
+      "name": "alpha",
+      "dir": "evals/alpha",
+      "source": "plugin",
+      "promptMarkdown": "",
+      "runsPerCase": 3,
+      "graders": [],
+      "arms": {
+        "with": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 10,
+            "costUsd": 0.4,
+            "judgeCostUsd": 0.01,
+            "durationSeconds": 60,
+            "startedAt": "2026-10-09T10:00:00Z",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "tests-pass",
+                "passed": true,
+                "weight": 3,
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 10,
+            "costUsd": 0.4,
+            "judgeCostUsd": 0.01,
+            "durationSeconds": 60,
+            "startedAt": "2026-10-09T10:00:00Z",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "tests-pass",
+                "passed": true,
+                "weight": 3,
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 10,
+            "costUsd": 0.4,
+            "judgeCostUsd": 0.01,
+            "durationSeconds": 60,
+            "startedAt": "2026-10-09T10:00:00Z",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "tests-pass",
+                "passed": true,
+                "weight": 3,
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 1,
+        "passRate": 1
+      }
+    },
+    {
+      "name": "beta",
+      "dir": "evals/beta",
+      "source": "plugin",
+      "promptMarkdown": "",
+      "runsPerCase": 3,
+      "graders": [],
+      "arms": {
+        "with": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 10,
+            "judgeCostUsd": 0.01,
+            "durationSeconds": 60,
+            "startedAt": "2026-10-09T10:00:00Z",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "tests-pass",
+                "passed": true,
+                "weight": 3,
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 0.8,
+            "passed": false,
+            "turns": 10,
+            "judgeCostUsd": 0.01,
+            "durationSeconds": 60,
+            "startedAt": "2026-10-09T10:00:00Z",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "tests-pass",
+                "passed": false,
+                "weight": 3,
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 0.9,
+            "passed": false,
+            "turns": 10,
+            "judgeCostUsd": 0.01,
+            "durationSeconds": 60,
+            "startedAt": "2026-10-09T10:00:00Z",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "tests-pass",
+                "passed": false,
+                "weight": 3,
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 0.9,
+        "passRate": 1
+      }
+    }
+  ],
+  "aggregates": {
+    "casesTotal": 2,
+    "casesPassed": 2,
+    "overallScore": 1,
+    "overallPassRate": 1
+  }
+}

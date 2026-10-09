@@ -44,6 +44,8 @@ The mod works on its own once installed.
 | `MODEL_ESCALATOR_MODE=off` | Pass everything through |
 | `MODEL_ESCALATOR_BASELINE` | Reference model for savings; defaults to the lead's model |
 
+To compare the two arms of the A/B evals case by case (score, cost, verdict), run `node scripts/ab-compare.mjs baseline.json active.json`; see [plugin/evals/README.md](plugin/evals/README.md).
+
 In `active` and `observe` mode the mod also gives tracked agents a tool, `ask_for_help` (listed as `mcp__model-escalator__ask_for_help`). An agent that is stuck after real attempts can describe the problem and get advice from the senior model right away, without waiting for the difficulty score to rise. The call counts as the consult step of the ladder, so the next escalation is the model swap (or the effort step, when `effortStep` is on), and an agent can ask at most once per grace window. In `observe` mode the call is only noted and logged.
 
 ## Configuration

@@ -88,11 +88,22 @@ Limits: the hashes catch edited tests whatever tool edited them, but not a delib
 
 ## Reading the results
 
-For each case compare, between the two JSON files:
+Compare the two JSON files with the script at the repository root (Node 22 or later, no dependencies):
 
-- **mean score** over the runs, and the mean of `tests-pass` alone (correctness without the judge's noise);
-- **spread** across runs: a case that flips between pass and fail needs more runs before any conclusion;
-- **cost per run** (`cost_usd`, which includes the judge) and turns.
+```bash
+node scripts/ab-compare.mjs plugin/evals/results/baseline.json plugin/evals/results/active.json \
+  --tolerance 5 --markdown ab-report.md
+```
+
+It prints one row per case with:
+
+- **mean score** (0 to 100) and standard deviation over the runs, per arm, and the score difference in points: a case that flips between pass and fail shows a large deviation and needs more runs before any conclusion;
+- **mean cost per run** per arm (`costUsd` of the JSON) and the cost difference in percent; runs without cost data show `n/a`;
+- a **verdict**: `OK` when the active score is within `--tolerance` points (default 5) of the baseline and the cost is lower, `WORSE` when the score drops more, `COSTLIER` when the score holds but the cost does not go down, `NO COST` when a cost is missing, `MISSING` when the case is in one file only.
+
+A totals row gives the mean score, the cost per run summed over the cases and the saving in percent. The exit code is 0 when every case is `OK`, 1 otherwise and 2 on bad input, so it can gate a pipeline. `--markdown <file>` writes the same table as Markdown for a pull request. Errored runs are counted with their score and listed in a note.
+
+For correctness without the judge's noise, also look at the `tests-pass` grader alone in the JSON.
 
 The ladder is acceptable when, case by case and on the whole suite, the active score stays within your chosen tolerance of the baseline (for example 5 percentage points) and the cost goes down. Expect the easy cases to save the most with no escalation at all, and the hard cases to show escalations: there the saving may be small or negative, and the score is what matters. A hard case where both arms fail says nothing about the ladder. The JSON cost, measured by the eval runner, is the reference for the comparison, not the mod's own estimate.
 
