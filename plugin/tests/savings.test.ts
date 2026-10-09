@@ -1,4 +1,5 @@
 import { expect, test } from 'claude-code/testing'
+import { DEFAULT_CONFIG } from '../hooks/config'
 import { addConsult, addStep, cost, emptyLedger, PRICES, report, savings } from '../hooks/savings'
 
 const U = { input_tokens: 2_000, output_tokens: 1_000, cache_read_input_tokens: 40_000, cache_creation_input_tokens: 3_000 }
@@ -63,4 +64,19 @@ test('consults add to the real cost and can turn savings negative', async () => 
   expect(l.consults).toBe(20)
   expect(savings(l).low).toBeLessThan(0)
   expect(report(l, 'opus')).toContain('senior consults: 20')
+})
+
+test('custom prices and prudent ratio are honoured', async () => {
+  const cfg = { ...DEFAULT_CONFIG, prudentTokenRatio: 0.5,
+    prices: { ...DEFAULT_CONFIG.prices, opus: { ...DEFAULT_CONFIG.prices.opus, input: 8, output: 40, cacheRead: 0.4, cacheWrite5m: 10 } } }
+  // opus doubled: 2k*8 + 1k*40 + 40k*0.4 + 3k*10 = 102000 / 1e6
+  expect(Math.abs(cost(U, cfg.prices.opus) - 0.102) < 1e-9).toBe(true)
+  const def = addStep(emptyLedger(), U, 'sonnet', 'opus', true)
+  const cus = addStep(emptyLedger(), U, 'sonnet', 'opus', true, cfg)
+  expect(cus.baselineHigh).toBeGreaterThan(def.baselineHigh)
+  // prudent column: half the tokens on the baseline instead of 65%
+  const half = cost({ input_tokens: 1000, output_tokens: 500, cache_read_input_tokens: 20000, cache_creation_input_tokens: 1500 }, cfg.prices.opus)
+  expect(Math.abs(cus.baselineLow - half) < 1e-9).toBe(true)
+  const consult = addConsult(emptyLedger(), 4000, 400, 'sonnet', cfg)
+  expect(Math.abs(consult.consultCost - (1000 * 2 + 100 * 10) / 1e6) < 1e-12).toBe(true)
 })

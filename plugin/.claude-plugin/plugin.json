@@ -5,5 +5,55 @@
   "author": { "name": "Alessandro Tozzi", "email": "261738626+atozzi-dev@users.noreply.github.com" },
   "repository": "https://github.com/atozzi-dev/model-escalator",
   "license": "MIT",
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "thresholdHaiku": {
+      "type": "number",
+      "title": "Haiku difficulty threshold",
+      "description": "Difficulty score at which an agent that started on Haiku gets the next intervention.",
+      "default": 3
+    },
+    "thresholdSonnet": {
+      "type": "number",
+      "title": "Sonnet difficulty threshold",
+      "description": "Difficulty score at which an agent that started on Sonnet gets the next intervention.",
+      "default": 4
+    },
+    "thresholdOpus": {
+      "type": "number",
+      "title": "Opus difficulty threshold",
+      "description": "Difficulty score at which an agent that started on Opus gets the next intervention.",
+      "default": 6
+    },
+    "graceSteps": {
+      "type": "number",
+      "title": "Grace steps",
+      "description": "Steps to wait after an intervention before the next one.",
+      "default": 4
+    },
+    "seniorModel": {
+      "type": "string",
+      "title": "Senior model",
+      "description": "Model asked for advice at the consult level (alias or full id).",
+      "default": "opus"
+    },
+    "levels": {
+      "type": "string",
+      "title": "Enabled levels",
+      "description": "Comma-separated escalation levels, from: nudge, consult, swap, human. Disabled levels are skipped.",
+      "default": "nudge,consult,swap,human"
+    },
+    "prudentTokenRatio": {
+      "type": "number",
+      "title": "Prudent token ratio",
+      "description": "Share of the tokens a stronger baseline model is assumed to need, used for the prudent savings estimate (0 to 1).",
+      "default": 0.65
+    },
+    "prices": {
+      "type": "string",
+      "title": "Price overrides",
+      "description": "Optional JSON overriding USD per million token rates, e.g. {\"sonnet\":{\"input\":3,\"output\":15}}. Rates: input, output, cacheRead, cacheWrite5m, cacheWrite1h.",
+      "default": ""
+    }
+  }
 }

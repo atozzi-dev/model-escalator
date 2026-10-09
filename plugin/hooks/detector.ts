@@ -1,10 +1,11 @@
 // Pure logic: no $ calls, so it is unit-testable in isolation.
 
+import { DEFAULT_CONFIG, type Config } from './config'
+
 export type Tier = 'haiku' | 'sonnet' | 'opus'
 export const LADDER: readonly Tier[] = ['haiku', 'sonnet', 'opus']
 
 export type Action = 'nudge' | 'consult' | 'swap' | 'human'
-const ACTIONS: readonly Action[] = ['nudge', 'consult', 'swap', 'human']
 
 export type AgentState = {
   id: string
@@ -21,24 +22,11 @@ export type AgentState = {
   tokens: number
 }
 
-export const CONFIG = {
-  threshold: { haiku: 3, sonnet: 4, opus: 6 } as Record<Tier, number>,
-  grace: 4,
-  logSize: 12,
-}
-
 export function tierOf(model: string | undefined): Tier {
   const m = (model ?? '').toLowerCase()
   if (m.includes('haiku')) return 'haiku'
   if (m.includes('opus') || m.includes('mythos') || m.includes('fable')) return 'opus'
   return 'sonnet'
-}
-
-// Full model ids the engine accepts on a request. Overridden by ids seen at runtime.
-export const DEFAULT_MODEL_IDS: Record<Tier, string> = {
-  haiku: 'claude-haiku-5-5',
-  sonnet: 'claude-sonnet-5-5',
-  opus: 'claude-opus-5-5',
 }
 
 export type ObservedModels = Partial<Record<Tier, string>>
@@ -54,8 +42,8 @@ export function rememberModel(seen: ObservedModels, model: string | undefined): 
 }
 
 // Full model id to send for a tier: the one observed in this session, else the default.
-export function resolveModelId(seen: ObservedModels, tier: Tier): string {
-  return seen[tier] ?? DEFAULT_MODEL_IDS[tier]
+export function resolveModelId(seen: ObservedModels, tier: Tier, ids: Record<Tier, string> = DEFAULT_CONFIG.modelIds): string {
+  return seen[tier] ?? ids[tier]
 }
 
 export function nextTier(t: Tier): Tier {
@@ -89,7 +77,7 @@ export function failingTests(text: string): number | undefined {
 
 export type Observation = { tool: string; ok: boolean; text: string; summary: string }
 
-export function observe(prev: AgentState, ob: Observation): { state: AgentState; action?: Action } {
+export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT_CONFIG): { state: AgentState; action?: Action } {
   const s: AgentState = { ...prev, errorCounts: { ...prev.errorCounts }, log: [...prev.log] }
   s.stepsSinceAction++
   let progress = false
@@ -109,7 +97,7 @@ export function observe(prev: AgentState, ob: Observation): { state: AgentState;
   }
 
   s.log.push(`${ob.tool}: ${ob.summary.slice(0, 120)} -> ${ob.ok ? 'ok' : 'ERR ' + normalizeError(ob.text).slice(0, 100)}`)
-  if (s.log.length > CONFIG.logSize) s.log.splice(0, s.log.length - CONFIG.logSize)
+  if (s.log.length > cfg.logSize) s.log.splice(0, s.log.length - cfg.logSize)
 
   if (progress) {
     s.score = 0
@@ -117,9 +105,9 @@ export function observe(prev: AgentState, ob: Observation): { state: AgentState;
     return { state: s }
   }
 
-  const due = s.level === 0 || s.stepsSinceAction >= CONFIG.grace
-  if (s.score >= CONFIG.threshold[s.tier] && due && s.level < ACTIONS.length) {
-    const action = ACTIONS[s.level]!
+  const due = s.level === 0 || s.stepsSinceAction >= cfg.grace
+  if (s.score >= cfg.threshold[s.tier] && due && s.level < cfg.levels.length) {
+    const action = cfg.levels[s.level]!
     s.level++
     s.score = 0
     s.stepsSinceAction = 0
@@ -127,6 +115,12 @@ export function observe(prev: AgentState, ob: Observation): { state: AgentState;
     return { state: s, action }
   }
   return { state: s }
+}
+
+// True once an agent got past the swap level (or past the last one when swap is disabled).
+export function escalated(s: AgentState, levels: readonly Action[]): boolean {
+  const i = levels.indexOf('swap')
+  return i >= 0 ? s.level > i : s.level >= levels.length
 }
 
 export function dossier(s: AgentState): string {

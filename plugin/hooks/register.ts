@@ -1,13 +1,13 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
-import { dossier, newAgent, observe, rememberModel, resolveModelId, tierOf, type Action, type AgentState, type ObservedModels, type Tier } from './detector'
+import { DEFAULT_CONFIG, parseConfig, type Config } from './config'
+import { dossier, escalated, newAgent, observe, rememberModel, resolveModelId, tierOf, type Action, type AgentState, type ObservedModels, type Tier } from './detector'
 import { categorize, recommend, record, type Stats } from './learning'
 import { parseSnapshot, type Snapshot } from './state'
 import { addConsult, addIntervention, addStep, emptyLedger, report, statusLine, type Ledger, type Usage } from './savings'
 
 const STATS_KEY = 'stats'
 const SESSIONS_KEY = 'sessions'
-const SENIOR = 'opus'
 const SENIOR_SYSTEM =
   'You advise a junior coding agent that is stuck. Read its attempts, name the most likely root cause, ' +
   'and give at most 5 concrete next steps. Do not repeat what already failed. Be brief.'
@@ -27,6 +27,9 @@ let seenModels: ObservedModels = {}
 
 // Per-session tag that authenticates our notes.
 let sessionTag = newTag()
+
+// Tunables, built once from the plugin options when the module loads.
+let config: Config = DEFAULT_CONFIG
 
 // Restores the module state to its defaults. Used by tests so each one starts clean.
 export function resetState(): void {
@@ -86,7 +89,9 @@ export function readMode(v: string | undefined): Mode {
   return v === 'observe' || v === 'baseline' || v === 'off' ? v : 'active'
 }
 
-export const register: Register = (on) => {
+export const register: Register = (on, options) => {
+  config = parseConfig(options)
+
   on('session.start', async ($, e, next) => {
     // $.state is session-scoped: a snapshot there means this is a reload of the module, not a new session.
     let saved: Snapshot | undefined
@@ -165,7 +170,7 @@ export const register: Register = (on) => {
     try {
       const { state, action } = observe(a, {
         tool: e.tool, ok: r.isError !== true, text: textOf(r), summary: summarize(e as unknown as Record<string, unknown>),
-      })
+      }, config)
       if (!action) { agents.set(id, state); await save($); return r }
       ledger = addIntervention(ledger, action)
       if (mode === 'observe') {
@@ -189,10 +194,10 @@ export const register: Register = (on) => {
     const a = e.agentId ? agents.get(e.agentId) : undefined
     seenModels = rememberModel(seenModels, e.model)
     const swap = mode === 'active' && a !== undefined && a.tier !== a.startTier
-    const r = yield* next(swap ? { ...e, model: resolveModelId(seenModels, a!.tier) } : e)
+    const r = yield* next(swap ? { ...e, model: resolveModelId(seenModels, a!.tier, config.modelIds) } : e)
     seenModels = rememberModel(seenModels, r.usage?.model)
     if (mode !== 'off' && r.usage) {
-      ledger = addStep(ledger, r.usage as Usage, tierOf(r.usage.model), baseline, Boolean(e.agentId))
+      ledger = addStep(ledger, r.usage as Usage, tierOf(r.usage.model), baseline, Boolean(e.agentId), config)
     }
     await save($)
     return r
@@ -206,7 +211,7 @@ export const register: Register = (on) => {
       try {
         if (mode !== 'baseline') {
           const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
-          await $.store.set(STATS_KEY, record(stats, a.category, a.startTier, a.level >= 3, 0))
+          await $.store.set(STATS_KEY, record(stats, a.category, a.startTier, escalated(a, config.levels), 0))
         }
         agents.set(id, { ...a, level: 0, score: 0, stepsSinceAction: 0 })
         await save($)
@@ -242,7 +247,7 @@ async function act($: EngineInterface, s: AgentState, action: Action): Promise<s
       const prompt = dossier(s)
       // The engine answers { isAnswered, text, usage }; the published 2.1.277 types (used by CI)
       // still say string, hence the wider local type.
-      const reply = await $.model.complete({ model: SENIOR, system: SENIOR_SYSTEM, prompt, maxTokens: 2000 }) as ModelReply
+      const reply = await $.model.complete({ model: config.senior, system: SENIOR_SYSTEM, prompt, maxTokens: 2000 }) as ModelReply
       const advice = typeof reply === 'string' ? reply : reply.isAnswered ? reply.text : ''
       if (!advice) {
         try {
@@ -251,7 +256,7 @@ async function act($: EngineInterface, s: AgentState, action: Action): Promise<s
           await $.ui.log(`senior consult gave no advice: ${why} output_tokens=${r?.usage?.output_tokens ?? '-'}`, { to: 'debug' })
         } catch { /* diagnostics only */ }
       }
-      ledger = addConsult(ledger, prompt.length + SENIOR_SYSTEM.length, advice.length, tierOf(SENIOR))
+      ledger = addConsult(ledger, prompt.length + SENIOR_SYSTEM.length, advice.length, tierOf(config.senior), config)
       if (!advice) return tag('Still stuck. List three different hypotheses and test the cheapest one first.')
       return tag(`Advice from a senior model:
 ${advice}`)
