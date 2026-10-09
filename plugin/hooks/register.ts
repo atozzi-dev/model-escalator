@@ -150,6 +150,8 @@ export const register: Register = (on) => {
   })
 }
 
+type ModelReply = string | { isAnswered: true; text: string } | { isAnswered: false }
+
 async function act($: EngineInterface, s: AgentState, action: Action): Promise<string> {
   await $.ui.log(`${s.id} (${s.category}): ${action}`)
   switch (action) {
@@ -158,10 +160,10 @@ async function act($: EngineInterface, s: AgentState, action: Action): Promise<s
         'state one new hypothesis, and try a different approach.'
     case 'consult': {
       const prompt = dossier(s)
-      const reply: unknown = await $.model.complete({ model: SENIOR, system: SENIOR_SYSTEM, prompt, maxTokens: 600 })
-      // Types for 2.1.277 say string; the 2.1.295 engine answers { isAnswered, text }.
-      const advice = typeof reply === 'string' ? reply
-        : (reply as { isAnswered?: boolean; text?: string })?.isAnswered ? (reply as { text: string }).text : ''
+      // The engine answers { isAnswered, text, usage }; the published 2.1.277 types (used by CI)
+      // still say string, hence the wider local type.
+      const reply = await $.model.complete({ model: SENIOR, system: SENIOR_SYSTEM, prompt, maxTokens: 600 }) as ModelReply
+      const advice = typeof reply === 'string' ? reply : reply.isAnswered ? reply.text : ''
       ledger = addConsult(ledger, prompt.length + SENIOR_SYSTEM.length, advice.length, tierOf(SENIOR))
       if (!advice) return '[supervisor] Still stuck. List three different hypotheses and test the cheapest one first.'
       return `[supervisor] Advice from a senior model:\n${advice}`

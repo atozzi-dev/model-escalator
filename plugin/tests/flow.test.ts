@@ -57,6 +57,25 @@ test('history of escalations upgrades the next spawn of the same kind', async ($
   expect(spawnModels[5]).toBe('sonnet')
 })
 
+test('senior consult that is not answered degrades to the generic nudge', async ($, on) => {
+  mock.store(on)
+  let n = 0
+  on('agent.spawn', (_$, e) => ({ model: e.model ?? 'haiku', agentId: 'd' + ++n }))
+  on('tool.call', () => ({ isError: true, result: 'Error: boom', text: 'Error: boom' }) as never)
+  on('model.complete', () => ({ value: { isAnswered: false, reason: 'api-error', usage: { input_tokens: 0, output_tokens: 0 } } }) as never)
+  for (const k of ['ui.log', 'ui.toast', 'ui.status'] as const) on(k, () => ({ value: undefined }) as never)
+
+  const { agentId } = await $.agent.spawn({ prompt: 'p', description: 'fix db test', subagentType: 'general-purpose', model: 'haiku' } as never) as { agentId: string }
+  const notes: string[] = []
+  for (let i = 0; i < 12; i++) {
+    const r = await $.tool.call({ tool: 'Bash', command: 'npm test', agentId } as never) as { context?: readonly string[] }
+    for (const c of r.context ?? []) notes.push(c)
+  }
+  expect(notes.length).toBe(3)
+  expect(notes[1]).toContain('Still stuck')
+  expect(notes[1]).not.toContain('Advice from a senior model')
+})
+
 test('meters requests and reports savings through /escalator', async ($, on) => {
   mock.store(on)
   on('agent.spawn', (_$, e) => ({ model: e.model ?? 'haiku', agentId: 'c1' }))
