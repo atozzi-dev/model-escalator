@@ -145,7 +145,8 @@ test('a senior consult is priced from the usage the reply reports', async ($, on
 test('an empty senior reply still counts its reported usage', async ($, on) => {
   const r = await consultThenReport($, on, { value: { isAnswered: false, reason: 'empty-reply', usage: { input_tokens: 500_000, output_tokens: 20, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } })
   expect(r.notes[1]).toContain('Still stuck')
-  expect(r.text).toContain('senior consults: 1, $2.00')
+  // Both calls (opus $2.00, then the retry on sonnet $1.00) are counted at their own price.
+  expect(r.text).toContain('senior consults: 2, $3.00')
 })
 
 test('a malformed senior usage is ignored and the character estimate is used', async ($, on) => {

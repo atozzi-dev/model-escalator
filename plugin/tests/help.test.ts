@@ -113,7 +113,7 @@ test('an empty reply falls back to the generic note and still moves the level', 
   const id = await spawn($)
   const out = await ask($, id)
   expect(out).toContain('three different hypotheses')
-  expect(h.consults).toBe(1)
+  expect(h.consults).toBe(2)   // the refused consult is retried once on the other senior model
   const notes = await stuck($, id)
   expect(notes[0]).toContain('stronger model')
 })

@@ -1,7 +1,7 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config'
-import { afterHelp, canAskForHelp, countStep, dossier, escalated, isSilent, markStall, newAgent, observe, rememberModel, resolveModelId, tierOf, toolEnd, toolStart, touch, type Action, type AgentState, type ObservedModels, type Tier } from './detector'
+import { afterHelp, canAskForHelp, countStep, dossier, escalated, isSilent, markStall, newAgent, observe, otherSenior, rememberModel, resolveModelId, shortDossier, skipGrace, tierOf, toolEnd, toolStart, touch, type Action, type AgentState, type ObservedModels, type Tier } from './detector'
 import { categorize, recommend, record, type Stats } from './learning'
 import { createQueue } from './queue'
 import { parseSnapshot, type Snapshot } from './state'
@@ -450,23 +450,46 @@ async function act($: EngineInterface, s: AgentState, action: Action): Promise<s
 // Asks the senior model about the agent and returns the tagged note for it. `extra` is the agent's own
 // account of the problem (help tool), added to the dossier. Falls back to a generic note without advice.
 async function consult($: EngineInterface, s: AgentState, extra = ''): Promise<string> {
-  const prompt = dossier(s) + extra
-  // The engine answers { isAnswered, text, usage }; the published 2.1.277 types (used by CI)
-  // still say string, hence the wider local type.
-  const reply = await $.model.complete({ model: config.senior, system: SENIOR_SYSTEM, prompt, maxTokens: 2000 }) as ModelReply
-  const advice = typeof reply === 'string' ? reply : reply.isAnswered ? reply.text : ''
+  let advice = await askSenior($, config.senior, dossier(s) + extra)
+  if (!advice) {
+    // A refusal (often the safety classifier) is intermittent and model dependent: one retry on the other
+    // senior model, with a shorter dossier.
+    advice = await askSenior($, otherSenior(config.senior), shortDossier(s) + extra)
+  }
   if (!advice) {
     try {
-      const r = typeof reply === 'string' ? undefined : reply
-      const why = r && !r.isAnswered ? `reason=${r.reason ?? 'unknown'} status=${r.status ?? '-'} error=${r.error ?? '-'}` : 'reason=empty-text'
-      await $.ui.log(`senior consult gave no advice: ${why} output_tokens=${r?.usage?.output_tokens ?? '-'}`, { to: 'debug' })
+      await $.ui.log(`${s.id} (${s.category}): consult refused twice`, { to: 'debug' })
+      await $.ui.log(`${s.id} (${s.category}): consult refused twice`)
     } catch { /* diagnostics only */ }
+    // Nothing was given to the agent: the next ladder step must not wait a full grace window.
+    const cur = agents.get(s.id)
+    if (cur) agents.set(s.id, skipGrace(cur, config))
+    return tag('Still stuck. List three different hypotheses and test the cheapest one first.')
   }
-  const usage = typeof reply === 'string' ? undefined : asUsage(reply.usage)
-  ledger = addConsult(ledger, { usage, promptChars: prompt.length + SENIOR_SYSTEM.length, replyChars: advice.length }, tierOf(config.senior), config)
-  if (!advice) return tag('Still stuck. List three different hypotheses and test the cheapest one first.')
   return tag(`Advice from a senior model:
 ${advice}`)
+}
+
+// One senior call, recorded in the ledger. Returns the advice, or '' when the model gave none. Never throws.
+async function askSenior($: EngineInterface, model: string, prompt: string): Promise<string> {
+  try {
+    // The engine answers { isAnswered, text, usage }; the published 2.1.277 types (used by CI)
+    // still say string, hence the wider local type.
+    const reply = await $.model.complete({ model, system: SENIOR_SYSTEM, prompt, maxTokens: 2000 }) as ModelReply
+    const advice = typeof reply === 'string' ? reply : reply.isAnswered ? reply.text : ''
+    if (!advice) {
+      try {
+        const r = typeof reply === 'string' ? undefined : reply
+        const why = r && !r.isAnswered ? `reason=${r.reason ?? 'unknown'} status=${r.status ?? '-'} error=${r.error ?? '-'}` : 'reason=empty-text'
+        await $.ui.log(`senior consult (${model}) gave no advice: ${why} output_tokens=${r?.usage?.output_tokens ?? '-'}`, { to: 'debug' })
+      } catch { /* diagnostics only */ }
+    }
+    const usage = typeof reply === 'string' ? undefined : asUsage(reply.usage)
+    ledger = addConsult(ledger, { usage, promptChars: prompt.length + SENIOR_SYSTEM.length, replyChars: advice.length }, tierOf(model), config)
+    return advice
+  } catch {
+    return ''
+  }
 }
 
 const clip = (v: unknown, n: number): string => (typeof v === 'string' ? v.trim().slice(0, n) : '')

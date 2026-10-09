@@ -254,3 +254,22 @@ export function dossier(s: AgentState): string {
     ...s.log.map(l => '- ' + l),
   ].join('\n')
 }
+
+// The senior model to retry a refused consult on: the other one of opus and sonnet (never haiku).
+export function otherSenior(senior: string): 'opus' | 'sonnet' {
+  return tierOf(senior) === 'opus' ? 'sonnet' : 'opus'
+}
+
+// The dossier cut to its task line and the last `attempts` attempts: a shorter prompt for the retry.
+export function shortDossier(s: AgentState, attempts = 5): string {
+  return [
+    `Task: ${s.task}`,
+    `Recent attempts (last ${attempts}, oldest first):`,
+    ...s.log.slice(-attempts).map(l => '- ' + l),
+  ].join('\n')
+}
+
+// After a refused consult nothing was given to the agent: the next ladder step is due without a grace window.
+export function skipGrace(s: AgentState, cfg: Config = DEFAULT_CONFIG): AgentState {
+  return { ...s, stepsSinceAction: Math.max(s.stepsSinceAction, cfg.grace) }
+}
