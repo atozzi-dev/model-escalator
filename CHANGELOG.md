@@ -13,6 +13,11 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Agents that keep making model requests without any progress now climb the escalation ladder too, after a generous number of requests.
 - Agents that go silent for `stallMinutes` (default 10) are reported in the log, the status line and a toast, and get a note on their next tool call; a tool call still running counts as activity for three times that window.
 - `ask_for_help` tool: a tracked agent that is stuck can ask for the senior consult directly, once per grace window; in observe mode the request is only logged.
+- Optional effort step (`effortStep`, off by default): before a model swap, a stuck agent keeps its model and its requests carry a higher effort (one step up, at least `effortBoost`); skipped for models without effort, dropped after a swap, not counted as an escalation for learning.
+- Optional de-escalation: with `deescalateAfter` set, an agent that was swapped to a stronger model goes back one tier after that many progress signals, at most once per run (off by default).
+- An agent that reaches the human level is paused: its further tool calls, `ask_for_help` included, are refused until you resume it with `/escalator resume <id>` (or `resume all`). `/escalator` lists paused agents; the `pauseAtHuman` option (default on) turns the pause off.
+- `modelIds` option and broader model id recognition, so swaps pick the right ids on Amazon Bedrock, Vertex and gateways.
+- Swap targets the account does not allow are handled: the step is sent again on the previous model, that model is not tried again in the session, the agent moves to the human level with a notice, and a refused senior model is skipped for consults.
 - Senior consults are capped per agent (`maxConsultsPerAgent`, default 3), per session (`maxConsultsPerSession`, default 20) and by dollar budget (`consultBudgetUsd`, default off); a stopped consult falls through to the next ladder level.
 
 ### Changed
@@ -26,6 +31,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ### Fixed
 
+- A paused agent can still hand back its report and use `SendMessage` and the task-list tools, so the human-level summary reaches the lead; `/escalator resume` reminds you to message an agent that already ended its turn.
 - A slow command that is still running and then succeeds no longer earns the agent a "not making progress" note; the stall is only reported to the lead.
 - Agents already on the top model no longer get a swap step or a false "you run on a stronger model" note.
 - Learned statistics no longer lose updates when several agents finish at the same time: all store writes go through a single queue.

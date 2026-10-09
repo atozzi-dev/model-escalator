@@ -25,6 +25,11 @@ declare module 'claude-code' {
           stalled?: boolean
           recentErrors?: string[]
           consults?: number
+          paused?: boolean
+          progressSignals?: number
+          deescalated?: boolean
+          effortSeen?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | number | null
+          effortBoosted?: boolean
         }[]
         ledger: {
           actual: number
@@ -41,6 +46,8 @@ declare module 'claude-code' {
         mode: 'active' | 'observe' | 'baseline' | 'off'
         baseline: 'haiku' | 'sonnet' | 'opus'
         baselinePinned: boolean
+        blockedTiers?: ('haiku' | 'sonnet' | 'opus')[]
+        refusedSeniors?: ('haiku' | 'sonnet' | 'opus')[]
       }
     }
   }

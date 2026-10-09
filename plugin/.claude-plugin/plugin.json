@@ -85,6 +85,12 @@
       "description": "Optional JSON overriding USD per million token rates, e.g. {\"sonnet\":{\"input\":3,\"output\":15}}. Rates: input, output, cacheRead, cacheWrite5m, cacheWrite1h.",
       "default": ""
     },
+    "modelIds": {
+      "type": "string",
+      "title": "Model ids",
+      "description": "Optional JSON with the full model id to send on a swap, per tier, e.g. {\"sonnet\":\"us.anthropic.claude-sonnet-...\",\"opus\":\"...\"}. Needed on Bedrock, Vertex or a gateway when swaps report a model not available. Beats ids seen in the session and the defaults.",
+      "default": ""
+    },
     "maxConsultsPerAgent": {
       "type": "number",
       "title": "Consults per agent",
@@ -96,6 +102,30 @@
       "title": "Consults per session",
       "description": "Senior consults across all agents of the session, with the same counting. 0 allows none.",
       "default": 20
+    },
+    "pauseAtHuman": {
+      "type": "boolean",
+      "title": "Pause at the human level",
+      "description": "When an agent reaches the human level, refuse all its further tool calls until you resume it with /escalator resume <id> (or all). Off keeps the note only.",
+      "default": true
+    },
+    "deescalateAfter": {
+      "type": "number",
+      "title": "Return to a cheaper model after progress",
+      "description": "Progress signals (failing tests dropping or reaching 0) after which an agent that was swapped up goes back one tier, once per run. Off by default: returning to a cheaper model rewrites the prompt cache and may bring the block back. 0 is off.",
+      "default": 0
+    },
+    "effortStep": {
+      "type": "boolean",
+      "title": "Raise the effort before a model swap",
+      "description": "Adds a level between the senior consult and the model swap: the stuck agent keeps its model and its requests carry a higher effort (one step above their own, at least the effort boost) until its next swap. Skipped for a model that takes no effort or a request already at max. Off by default until measured: a higher effort costs more output tokens and a change of effort rewrites the prompt cache.",
+      "default": false
+    },
+    "effortBoost": {
+      "type": "string",
+      "title": "Effort boost",
+      "description": "Lowest effort the effort level raises a request to: low, medium, high, xhigh or max. The request always goes at least one step above its own effort.",
+      "default": "high"
     },
     "consultBudgetUsd": {
       "type": "number",

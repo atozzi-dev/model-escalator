@@ -1,6 +1,6 @@
 // Pure: every tunable of the mod, parsed from the plugin's options. Invalid values fall back to the defaults.
 
-import type { Action, Tier } from './detector'
+import type { Action, Effort, Tier } from './detector'
 
 export type Rates = { input: number; output: number; cacheRead: number; cacheWrite5m: number; cacheWrite1h: number }
 export type Price = Rates & { longContext?: Rates & { threshold: number } }
@@ -15,7 +15,8 @@ export type Config = {
   prices: Record<Tier, Price>       // USD per million tokens
   prudentTokenRatio: number         // fraction of tokens the baseline model would need
   modelIds: Record<Tier, string>    // full ids sent on a swap when none was observed
-  verifyCommand: string             // optional check run at the end of each tracked agent's run; empty = off
+  modelOverrides: Partial<Record<Tier, string>>  // explicit ids from the modelIds option; beat observed ids and defaults
+  verifyCommand: string           // optional check run at the end of each tracked agent's run; empty = off
   verifyTimeoutSeconds: number      // how long the check may run before it counts as failed (at most 600)
   oscillationEdits: number          // edits of one file tolerated since the last progress; each further edit adds to the score
   idleSteps: number                 // model requests tolerated without progress
@@ -24,6 +25,10 @@ export type Config = {
   maxConsultsPerAgent: number       // senior consults one agent may get; a refused call and its retry count once; 0 = none
   maxConsultsPerSession: number     // senior consults across all agents of the session; 0 = none
   consultBudgetUsd: number          // USD the senior calls may cost in the session; 0 = no limit
+  deescalateAfter: number           // progress signals after which a swapped agent goes back one tier; 0 = off
+  pauseAtHuman: boolean             // refuse the tool calls of an agent that reached the human level until it is resumed
+  effortStep: boolean               // adds the effort level between consult and swap
+  effortBoost: Effort               // lowest effort the effort level raises a request to (it always goes at least one step up)
 }
 
 // USD per million tokens, Anthropic API list prices (Oct 2026), checked against /cost.
@@ -39,6 +44,9 @@ export const DEFAULT_PRICES: Record<Tier, Price> = {
 }
 
 export const ALL_LEVELS: readonly Action[] = ['nudge', 'consult', 'swap', 'human']
+// Every level in escalation order. `effort` is switched by the effortStep option alone, never by `levels`.
+const LEVEL_ORDER: readonly Action[] = ['nudge', 'consult', 'effort', 'swap', 'human']
+const EFFORT_NAMES: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 
 export const DEFAULT_CONFIG: Config = {
   threshold: { haiku: 3, sonnet: 4, opus: 6 },
@@ -58,6 +66,11 @@ export const DEFAULT_CONFIG: Config = {
   maxConsultsPerAgent: 3,
   maxConsultsPerSession: 20,
   consultBudgetUsd: 0,
+  pauseAtHuman: true,
+  deescalateAfter: 0,
+  effortStep: false,
+  effortBoost: 'high',
+  modelOverrides: {},
   verifyCommand: '',
   verifyTimeoutSeconds: 120,
   modelIds: { haiku: 'claude-haiku-5-5', sonnet: 'claude-sonnet-5-5', opus: 'claude-opus-5-5' },
@@ -75,11 +88,30 @@ function positive(v: unknown, fallback: number): number {
   return n !== undefined && n > 0 ? n : fallback
 }
 
+// A boolean option: a real boolean, or the strings "true" / "false"; anything else keeps the default.
+function bool(v: unknown, fallback: boolean): boolean {
+  if (typeof v === 'boolean') return v
+  const t = typeof v === 'string' ? v.trim().toLowerCase() : ''
+  return t === 'true' ? true : t === 'false' ? false : fallback
+}
+
+// `effort` is accepted as a name so a list naming it stays valid, but it is ignored here: effortStep adds it.
 function parseLevels(v: unknown, fallback: readonly Action[]): readonly Action[] {
   if (typeof v !== 'string' || v.trim() === '') return fallback
   const names = v.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
-  if (names.length === 0 || names.some((n) => !ALL_LEVELS.includes(n as Action))) return fallback
-  return ALL_LEVELS.filter((l) => names.includes(l))
+  if (names.length === 0 || names.some((n) => !LEVEL_ORDER.includes(n as Action))) return fallback
+  const levels = ALL_LEVELS.filter((l) => names.includes(l))
+  return levels.length > 0 ? levels : fallback
+}
+
+// The enabled levels in escalation order, with the effort level between consult and swap when it is on.
+function withEffort(levels: readonly Action[], on: boolean): readonly Action[] {
+  return on ? LEVEL_ORDER.filter((l) => l === 'effort' || levels.includes(l)) : levels
+}
+
+function parseEffort(v: unknown, fallback: Effort): Effort {
+  const t = typeof v === 'string' ? v.trim().toLowerCase() : ''
+  return EFFORT_NAMES.includes(t as Effort) ? (t as Effort) : fallback
 }
 
 function parseMaxTier(v: unknown, fallback: Tier): Tier {
@@ -123,6 +155,21 @@ function parsePrices(v: unknown, base: Record<Tier, Price>): Record<Tier, Price>
   return { haiku: mergePrice(base.haiku, o.haiku), sonnet: mergePrice(base.sonnet, o.sonnet), opus: mergePrice(base.opus, o.opus) }
 }
 
+// `modelIds` is a JSON object keyed by tier: {"sonnet":"us.anthropic.claude-sonnet-..."}. Entries that are not
+// non-empty strings, and unknown keys, are ignored; malformed JSON gives no overrides.
+function parseModelIds(v: unknown): Partial<Record<Tier, string>> {
+  if (typeof v !== 'string' || v.trim() === '') return {}
+  let obj: unknown
+  try { obj = JSON.parse(v) } catch { return {} }
+  if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) return {}
+  const out: Partial<Record<Tier, string>> = {}
+  for (const t of ['haiku', 'sonnet', 'opus'] as const) {
+    const id = (obj as Raw)[t]
+    if (typeof id === 'string' && id.trim() !== '' && id.length <= 200) out[t] = id.trim()
+  }
+  return out
+}
+
 // Splits a command line into an argument vector: spaces separate, single or double quotes group.
 // There is no shell, so no pipes, redirects or variable expansion. An unbalanced quote yields [] (nothing runs).
 export function splitCommand(line: string): string[] {
@@ -164,6 +211,8 @@ export function parseConfig(raw: Raw | undefined): Config {
     const perAgent = num(o.maxConsultsPerAgent)
     const perSession = num(o.maxConsultsPerSession)
     const budget = num(o.consultBudgetUsd)
+    const deesc = num(o.deescalateAfter)
+    const effortStep = bool(o.effortStep, d.effortStep)
     return {
       ...d,
       threshold: {
@@ -179,13 +228,18 @@ export function parseConfig(raw: Raw | undefined): Config {
       verifyTimeoutSeconds: vt !== undefined && vt > 0 ? Math.min(vt, 600) : d.verifyTimeoutSeconds,
       grace: grace !== undefined && grace >= 0 ? Math.floor(grace) : d.grace,
       senior: senior !== '' && senior.length <= 100 ? senior : d.senior,
-      levels: parseLevels(o.levels, d.levels),
+      levels: withEffort(parseLevels(o.levels, d.levels), effortStep),
       maxTier: parseMaxTier(o.maxTier, d.maxTier),
       prices: parsePrices(o.prices, d.prices),
+      modelOverrides: parseModelIds(o.modelIds),
       prudentTokenRatio: ratio !== undefined && ratio > 0 && ratio <= 1 ? ratio : d.prudentTokenRatio,
       maxConsultsPerAgent: perAgent !== undefined && perAgent >= 0 ? Math.floor(perAgent) : d.maxConsultsPerAgent,
       maxConsultsPerSession: perSession !== undefined && perSession >= 0 ? Math.floor(perSession) : d.maxConsultsPerSession,
       consultBudgetUsd: budget !== undefined && budget >= 0 ? budget : d.consultBudgetUsd,
+      pauseAtHuman: bool(o.pauseAtHuman, d.pauseAtHuman),
+      deescalateAfter: deesc !== undefined && deesc >= 1 ? Math.floor(deesc) : d.deescalateAfter,
+      effortStep,
+      effortBoost: parseEffort(o.effortBoost, d.effortBoost),
     }
   } catch {
     return d

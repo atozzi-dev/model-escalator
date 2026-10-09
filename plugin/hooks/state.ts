@@ -1,4 +1,4 @@
-import { MAX_ERROR_TEXT, MAX_RECENT_ERRORS, type AgentState, type ObservedModels, type Tier } from './detector'
+import { EFFORTS, MAX_ERROR_TEXT, MAX_RECENT_ERRORS, type AgentState, type ObservedModels, type Tier } from './detector'
 import type { Ledger } from './savings'
 
 // Pure: the session state that must survive a module reload. The host keeps `$.state` for the session
@@ -11,6 +11,8 @@ export type Snapshot = {
   mode: 'active' | 'observe' | 'baseline' | 'off'
   baseline: Tier
   baselinePinned: boolean
+  blockedTiers: Tier[]      // tiers the account refused as a swap target this session
+  refusedSeniors: Tier[]    // tiers refused for senior consults this session
 }
 
 const MODES = ['active', 'observe', 'baseline', 'off']
@@ -35,6 +37,13 @@ export function parseSnapshot(v: unknown): Snapshot | undefined {
     if (typeof a.running !== 'boolean') delete live.running
     if (typeof a.stalled !== 'boolean') delete live.stalled
     if (typeof a.helped !== 'boolean') delete live.helped
+    if (typeof a.paused !== 'boolean') delete live.paused
+    if (typeof a.deescalated !== 'boolean') delete live.deescalated
+    if (typeof a.effortBoosted !== 'boolean') delete live.effortBoosted
+    // The last request's effort: a level of the scale, a finite number, or null (the model takes none).
+    const e = a.effortSeen
+    if (!(e === null || EFFORTS.includes(e as never) || (typeof e === 'number' && Number.isFinite(e)))) delete live.effortSeen
+    if (typeof a.progressSignals !== 'number' || !Number.isInteger(a.progressSignals) || a.progressSignals < 0) delete live.progressSignals
     // Senior consults of the agent: a whole, non-negative count; anything else is dropped (counts as none).
     if (typeof a.consults !== 'number' || !Number.isInteger(a.consults) || a.consults < 0) delete live.consults
     // The ring of full error texts: kept only as an array of strings, and cut to its bounds.
@@ -43,5 +52,7 @@ export function parseSnapshot(v: unknown): Snapshot | undefined {
     } else delete live.recentErrors
     return live
   })
-  return { ...v, agents } as unknown as Snapshot
+  // Snapshots saved before blocked models existed have no such lists; a malformed one counts as empty.
+  const tiers = (x: unknown): Tier[] => (Array.isArray(x) ? [...new Set(x.filter((t): t is Tier => TIERS.includes(t as string)))] : [])
+  return { ...v, agents, blockedTiers: tiers(v.blockedTiers), refusedSeniors: tiers(v.refusedSeniors) } as unknown as Snapshot
 }

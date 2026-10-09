@@ -6,7 +6,20 @@ import { exitCodes, parseTestRuns } from './testparse'
 export type Tier = 'haiku' | 'sonnet' | 'opus'
 export const LADDER: readonly Tier[] = ['haiku', 'sonnet', 'opus']
 
-export type Action = 'nudge' | 'consult' | 'swap' | 'human'
+export type Action = 'nudge' | 'consult' | 'effort' | 'swap' | 'human'
+
+// The effort scale of a model request, lowest first. A request may also carry a number, or no effort at all
+// (a model that takes none): neither can be raised.
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
+
+// The effort to send instead of `current`: one step above it, and at least `floor`. Undefined when it cannot be
+// raised: no effort (the model takes none), a number, an unknown value, or already at the top of the scale.
+export function raiseEffort(current: unknown, floor: Effort): Effort | undefined {
+  const i = EFFORTS.indexOf(current as Effort)
+  if (i < 0 || i === EFFORTS.length - 1) return undefined
+  return EFFORTS[Math.max(i + 1, EFFORTS.indexOf(floor))]
+}
 
 export type AgentState = {
   id: string
@@ -31,6 +44,11 @@ export type AgentState = {
   helped?: boolean                      // asked for help through the tool at least once
   recentErrors?: string[]               // full text (cut) of the last failed calls, oldest first, for the senior dossier
   consults?: number                     // senior consult actions for this agent (a refused call and its retry count once)
+  paused?: boolean                      // stopped at the human level: its tool calls are refused until the user resumes it
+  progressSignals?: number              // progress signals since the last swap (or de-escalation), counted only while the agent runs above its start tier
+  deescalated?: boolean                 // already returned to a cheaper tier in this run: never again until the run is over
+  effortSeen?: Effort | number | null   // effort of the agent's last model request as the engine set it; null when it had none
+  effortBoosted?: boolean               // the effort level acted: its requests carry a raised effort until the next swap
 }
 
 export function tierOf(model: string | undefined): Tier {
@@ -40,21 +58,37 @@ export function tierOf(model: string | undefined): Tier {
   return 'sonnet'
 }
 
-export type ObservedModels = Partial<Record<Tier, string>>
+export type ObservedModels = Partial<Record<Tier, string>> & { leadShape?: string }
 
-// Remembers a resolved full id (never a bare alias such as "sonnet") under its own tier.
-export function rememberModel(seen: ObservedModels, model: string | undefined): ObservedModels {
+// Provider shape of an id: whatever precedes "claude-" ("us.anthropic." on Bedrock, "" for first-party and Vertex ids).
+const shapeOf = (lower: string): string => lower.slice(0, lower.indexOf('claude-'))
+
+// Remembers a resolved full id (never a bare alias such as "sonnet") under its own tier. Any provider prefix or
+// suffix is fine (Bedrock region prefixes, "anthropic.", "@date", "-v1:0", "[1m]"): the family word must follow "claude-".
+// `isLead` marks the id as the lead's own: its shape is then preferred, so a Bedrock lead keeps Bedrock-shaped targets
+// even when an id of another shape shows up later for the same tier.
+export function rememberModel(seen: ObservedModels, model: string | undefined, isLead = false): ObservedModels {
   const m = (model ?? '').trim()
   const lower = m.toLowerCase()
-  if (!lower.startsWith('claude-')) return seen
+  const at = lower.indexOf('claude-')
+  if (at < 0) return seen
   // Only the ladder's own families: fable/mythos/unknown ids must never become a swap target.
-  const tier = LADDER.find((t) => lower.includes(t))
-  return tier ? { ...seen, [tier]: m } : seen
+  if (lower.includes('fable') || lower.includes('mythos')) return seen
+  const tier = LADDER.find((t) => lower.indexOf(t, at + 7) >= 0)
+  if (!tier) return seen
+  const next: ObservedModels = { ...seen }
+  if (isLead) next.leadShape = shapeOf(lower)
+  const kept = seen[tier]
+  const keepsLead = kept !== undefined && next.leadShape !== undefined
+    && shapeOf(kept.toLowerCase()) === next.leadShape && shapeOf(lower) !== next.leadShape
+  if (!keepsLead) next[tier] = m
+  return next
 }
 
-// Full model id to send for a tier: the one observed in this session, else the default.
-export function resolveModelId(seen: ObservedModels, tier: Tier, ids: Record<Tier, string> = DEFAULT_CONFIG.modelIds): string {
-  return seen[tier] ?? ids[tier]
+// Full model id to send for a tier: the user's explicit id, else the one observed in this session, else the default.
+export function resolveModelId(seen: ObservedModels, tier: Tier, ids: Record<Tier, string> = DEFAULT_CONFIG.modelIds,
+  overrides: Partial<Record<Tier, string>> = {}): string {
+  return overrides[tier] ?? seen[tier] ?? ids[tier]
 }
 
 export const tierRank = (t: Tier): number => LADDER.indexOf(t)
@@ -100,16 +134,18 @@ export function normalizePath(p: string): string {
 // The action due at the current level, moving s.level past it. While the agent runs below `maxTier`,
 // the ladder keeps swapping one tier up instead of moving past the swap level. A swap that cannot happen
 // (swap disabled, or the agent already at `maxTier`) is skipped, and the next enabled level acts in its place.
-// A consult that is closed (a limit was reached) is skipped the same way: `skipped` reports it.
-function nextAction(s: AgentState, cfg: Config, consultOpen: boolean): { action?: Action; skipped: boolean } {
+// A consult that is closed (a limit was reached) is skipped the same way: `skipped` reports it. So is an effort
+// level that cannot act: the effort is already raised, or the agent's last request had none that can be raised.
+function nextAction(s: AgentState, cfg: Config, consultOpen: boolean, blocked: readonly Tier[]): { action?: Action; skipped: boolean } {
   const swapAt = cfg.levels.indexOf('swap')
-  const canSwap = swapAt >= 0 && tierRank(s.tier) < tierRank(cfg.maxTier)
+  const canSwap = swapAt >= 0 && tierRank(s.tier) < tierRank(allowedMax(cfg.maxTier, blocked))
   if (canSwap && s.level > swapAt) return { action: 'swap', skipped: false }   // level stays just past the swap
   let skipped = false
   while (s.level < cfg.levels.length) {
     const action = cfg.levels[s.level]!
     s.level++
     if (action === 'consult' && !consultOpen) { skipped = true; continue }
+    if (action === 'effort' && !canRaiseEffort(s, cfg)) continue
     if (action !== 'swap' || canSwap) return { action, skipped }
   }
   return { skipped }
@@ -141,7 +177,8 @@ export type Observation = { tool: string; ok: boolean; text: string; summary: st
 
 // `consultOpen` false means a limit forbids consults now: a consult due at this trigger is skipped to the next
 // enabled level, and `consultSkipped` tells the caller that a limit stopped it.
-export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT_CONFIG, consultOpen = true): { state: AgentState; action?: Action; consultSkipped?: boolean } {
+// `blocked` lists the tiers the account refused this session: a swap never reaches them, nor any tier above.
+export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT_CONFIG, consultOpen = true, blocked: readonly Tier[] = []): { state: AgentState; action?: Action; consultSkipped?: boolean; progress?: boolean } {
   const s: AgentState = { ...prev, errorCounts: { ...prev.errorCounts }, editCounts: { ...prev.editCounts }, log: [...prev.log] }
   s.stepsSinceAction++
   let progress = false
@@ -200,21 +237,28 @@ export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT
     s.stepsSinceProgress = 0
     s.errorCounts = {}
     s.editCounts = {}
-    return { state: s }
+    return { state: s, progress: true }
   }
 
   const due = s.level === 0 || s.stepsSinceAction >= cfg.grace
   if (s.score >= cfg.threshold[s.tier] && due) {
-    const pick = nextAction(s, cfg, consultOpen)
+    const pick = nextAction(s, cfg, consultOpen, blocked)
     if (pick.action) {
       s.score = 0
       s.stepsSinceAction = 0
-      if (pick.action === 'swap') s.tier = nextTier(s.tier)
+      // A swap drops a raised effort: the new model starts from the request's own effort.
+      if (pick.action === 'swap') { s.tier = nextTier(s.tier); s.progressSignals = 0; s.effortBoosted = false }
+      if (pick.action === 'effort') s.effortBoosted = true
       return { state: s, action: pick.action, consultSkipped: pick.skipped }
     }
     return { state: s, consultSkipped: pick.skipped }
   }
   return { state: s }
+}
+
+// The effort level may act: not yet raised on this tier, and the agent's last request carried an effort below the top.
+export function canRaiseEffort(s: AgentState, cfg: Config = DEFAULT_CONFIG): boolean {
+  return s.effortBoosted !== true && raiseEffort(s.effortSeen, cfg.effortBoost) !== undefined
 }
 
 // One model request of a tracked agent. Requests beyond the idle allowance without progress add to the score,
@@ -245,7 +289,7 @@ export const BUSY_FACTOR = 3
 // How long (ms) a running, not yet flagged agent has been silent, when that exceeds its window; else undefined.
 // An agent without a timestamp (old snapshot) or whose run is over is never silent.
 export function isSilent(s: AgentState, now: number, cfg: Config = DEFAULT_CONFIG): number | undefined {
-  if (!s.running || s.stalled || s.lastEventAt === undefined) return undefined
+  if (!s.running || s.stalled || s.paused || s.lastEventAt === undefined) return undefined
   const window = cfg.stallMinutes * 60_000 * ((s.inFlight ?? 0) > 0 ? BUSY_FACTOR : 1)
   const silent = now - s.lastEventAt
   return silent > window ? silent : undefined
@@ -259,13 +303,45 @@ export function markStall(s: AgentState, cfg: Config = DEFAULT_CONFIG): AgentSta
   return { ...s, stalled: true, score: Math.max(s.score, cfg.threshold[s.tier]) }
 }
 
+// The agent reached the human level: it is paused until the user resumes it.
+export function pauseAgent(s: AgentState): AgentState {
+  return { ...s, paused: true }
+}
+
+// The user resumed the agent: it keeps its tier and starts a fresh ladder (no score, no failure history, a fresh
+// grace window). With `now` it also counts as active then, so the pause itself is never read as silence.
+export function resumeAgent(s: AgentState, now?: number): AgentState {
+  const { paused: _paused, lastFailing: _lastFailing, ...rest } = s
+  const fresh: AgentState = { ...rest, score: 0, level: 0, stepsSinceAction: 0, stepsSinceProgress: 0, errorCounts: {}, editCounts: {}, stalled: false }
+  return now === undefined ? fresh : { ...fresh, lastEventAt: now }
+}
+
+// One progress signal of an agent. While it runs above its start tier (in `observe`, where the tier never
+// changes, while its ladder is past the swap level) signals are counted; at `deescalateAfter` the agent goes back
+// ONE tier, towards its start tier, with a fresh ladder: score 0, level just before the swap level (a new block
+// can swap again), a fresh grace window. `decided` reports the decision and `tier` is set only when the agent must
+// actually go back; `simulated` (observe) decides without touching the tier. Once per run (`deescalated`), never when paused.
+export function noteProgress(s: AgentState, cfg: Config = DEFAULT_CONFIG, simulated = false): { state: AgentState; decided?: boolean; tier?: Tier } {
+  const swapAt = cfg.levels.indexOf('swap')
+  if (cfg.deescalateAfter < 1 || s.paused || s.deescalated || swapAt < 0) return { state: s }
+  const above = simulated ? escalated(s, cfg.levels) : tierRank(s.tier) > tierRank(s.startTier)
+  if (!above) return { state: s }
+  const n = (s.progressSignals ?? 0) + 1
+  if (n < cfg.deescalateAfter) return { state: { ...s, progressSignals: n } }
+  const back = LADDER[Math.max(tierRank(s.startTier), tierRank(s.tier) - 1)]!
+  const state: AgentState = { ...s, tier: simulated ? s.tier : back, progressSignals: 0, deescalated: true,
+    score: 0, level: swapAt, stepsSinceAction: 0, errorCounts: {}, editCounts: {} }
+  return { state, decided: true, tier: simulated ? undefined : back }
+}
+
 // An agent may ask for help once per grace window: after a help call (or any intervention) it waits
 // for `grace` more tool calls.
 export function canAskForHelp(s: AgentState, cfg: Config = DEFAULT_CONFIG): boolean {
   return !s.helped || s.stepsSinceAction >= cfg.grace
 }
 
-// A help call jumps straight to the senior consult: the ladder continues after it (never moves back),
+// A help call jumps straight to the senior consult: the ladder continues after it (the effort level when it is on,
+// else the swap; never moves back),
 // the score restarts and a fresh grace window begins.
 export function afterHelp(s: AgentState, cfg: Config = DEFAULT_CONFIG): AgentState {
   const i = cfg.levels.indexOf('consult')
@@ -273,9 +349,16 @@ export function afterHelp(s: AgentState, cfg: Config = DEFAULT_CONFIG): AgentSta
 }
 
 // True once an agent got past the swap level (it swapped at least once, or had none to make) (or past the last one when swap is disabled).
+// A de-escalated agent moved its level back but did swap up in this run: it still counts.
+// A raised effort alone never counts: the agent kept its model, so the model was not shown to be too weak
+// (without swap, the end of the ladder is the last level other than effort).
 export function escalated(s: AgentState, levels: readonly Action[]): boolean {
+  if (s.deescalated === true) return true
   const i = levels.indexOf('swap')
-  return i >= 0 ? s.level > i : s.level >= levels.length
+  if (i >= 0) return s.level > i
+  let last = levels.length - 1
+  while (last >= 0 && levels[last] === 'effort') last--
+  return last >= 0 && s.level > last
 }
 
 // The senior model to retry a refused consult on: the other one of opus and sonnet (never haiku).
@@ -287,3 +370,62 @@ export function otherSenior(senior: string): 'opus' | 'sonnet' {
 export function skipGrace(s: AgentState, cfg: Config = DEFAULT_CONFIG): AgentState {
   return { ...s, stepsSinceAction: Math.max(s.stepsSinceAction, cfg.grace) }
 }
+
+// Blocked models: a tier the account refuses (not on the organisation's allowlist, or not offered to it) is
+// remembered for the session. It caps the ladder like `maxTier` does: the tier itself and all above are out.
+export function refuseTier(blocked: readonly Tier[], tier: Tier): Tier[] {
+  return blocked.includes(tier) ? [...blocked] : [...blocked, tier]
+}
+
+// The highest tier a swap may reach: `max`, or the one just below the lowest refused tier if that is lower.
+export function allowedMax(max: Tier, blocked: readonly Tier[]): Tier {
+  if (blocked.length === 0) return max
+  const lowest = Math.min(...blocked.map(tierRank))
+  return LADDER[Math.max(0, Math.min(tierRank(max), lowest - 1))]!
+}
+
+// The tier an agent should run on given the refused ones: its own tier, capped, never below where it started.
+export function usableTier(s: AgentState, blocked: readonly Tier[]): Tier {
+  const capped = LADDER[Math.min(tierRank(s.tier), tierRank(allowedMax('opus', blocked)))]!
+  return tierRank(capped) < tierRank(s.startTier) ? s.startTier : capped
+}
+
+// After a swap target was refused: the agent goes back to the tier that worked and its ladder moves to the
+// human level, due without a grace window. Without a human level it keeps its place.
+export function revertSwap(s: AgentState, to: Tier, cfg: Config = DEFAULT_CONFIG): AgentState {
+  const human = cfg.levels.indexOf('human')
+  return { ...s, tier: to, level: human >= 0 ? human : s.level, stepsSinceAction: Math.max(s.stepsSinceAction, cfg.grace) }
+}
+
+export type ModelFailure = { status?: number | null; error?: string; message?: string }
+
+// What an API failure says about the model: `model` when it is unusable for this account (unknown id, not
+// allowed, no permission) so retrying cannot help; `transient` for overload, rate limit, server errors and
+// dropped connections, which say nothing about the model; `unknown` when the failure carries no such sign.
+export function classifyFailure(f: ModelFailure): 'model' | 'transient' | 'unknown' {
+  const err = (f.error ?? '').toLowerCase()
+  const msg = (f.message ?? '').toLowerCase()
+  const status = typeof f.status === 'number' ? f.status : undefined
+  if (err === 'model_not_found') return 'model'
+  if (['rate_limit', 'overloaded', 'server_error', 'authentication_failed', 'billing_error'].includes(err)) return 'transient'
+  if (status !== undefined && (status === 429 || status >= 500)) return 'transient'
+  if (status === 404 || status === 403) return 'model'
+  if (/overload|rate.?limit|too many requests|\b(429|5\d\d)\b|timed? ?out|econn|socket|network/.test(msg)) return 'transient'
+  if (/not_found|not found|not allowed|allowlist|not available|invalid model|unknown model|permission|not have access|may not exist/.test(msg)) return 'model'
+  return status === 400 && /model/.test(msg) ? 'model' : 'unknown'
+}
+
+export const isModelRefusal = (f: ModelFailure): boolean => classifyFailure(f) === 'model'
+
+// The senior model for a consult: the configured one, else the other one, skipping refused tiers.
+export function pickSenior(senior: string, refused: readonly Tier[]): string | undefined {
+  if (!refused.includes(tierOf(senior))) return senior
+  const other = otherSenior(senior)
+  return refused.includes(other) ? undefined : other
+}
+
+// Tools a paused agent may still call: the ones it uses to report or communicate. Pausing at the human level asks the
+// agent to stop and summarise for a human, so refusing its hand-back would swallow the very report that is asked for.
+export const PAUSE_ALLOWED_TOOLS: readonly string[] = ['SubagentHandback', 'SendMessage', 'TaskList', 'TaskGet', 'TaskUpdate']
+
+export const isPauseAllowedTool = (tool: unknown): boolean => typeof tool === 'string' && PAUSE_ALLOWED_TOOLS.includes(tool)
