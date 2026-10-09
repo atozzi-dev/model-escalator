@@ -18,6 +18,17 @@ const agents = new Map<string, AgentState>()
 let ledger: Ledger = emptyLedger()
 let baseline: Tier = 'opus'
 let mode: Mode = 'active'
+// True when MODEL_ESCALATOR_BASELINE fixes the reference model: the lead's model must not override it.
+let baselinePinned = false
+
+// Restores the module state to its defaults. Used by tests so each one starts clean.
+export function resetState(): void {
+  agents.clear()
+  ledger = emptyLedger()
+  baseline = 'opus'
+  baselinePinned = false
+  mode = 'active'
+}
 
 function summarize(e: Record<string, unknown>): string {
   for (const k of ['command', 'file_path', 'pattern', 'url', 'query']) {
@@ -42,6 +53,7 @@ export const register: Register = (on) => {
     try {
       mode = readMode(await $.env.get('MODEL_ESCALATOR_MODE'))
       const b = await $.env.get('MODEL_ESCALATOR_BASELINE')
+      baselinePinned = Boolean(b)
       if (b) baseline = tierOf(b)
     } catch { /* defaults */ }
     const r = await next(e)
@@ -111,7 +123,7 @@ export const register: Register = (on) => {
 
   // 3. Swap the model of escalated agents, and meter every request's cost.
   on('turn.step', async function* ($, e, next) {
-    if (!e.agentId) baseline = tierOf(e.model)
+    if (!e.agentId && !baselinePinned) baseline = tierOf(e.model)
     const a = e.agentId ? agents.get(e.agentId) : undefined
     const swap = mode === 'active' && a !== undefined && a.tier !== a.startTier
     const r = yield* next(swap ? { ...e, model: a!.tier } : e)
