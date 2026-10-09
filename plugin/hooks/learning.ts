@@ -1,6 +1,8 @@
 import { LADDER, type Tier } from './detector'
 
-export type Cell = { runs: number; escalated: number; tokens: number }
+// `notAccepted` counts runs that were escalated or failed the verification gate (a run that did both counts once).
+// `failedVerify` and `notAccepted` are absent in stats stored before the gate existed: `notAccepted` then reads as `escalated`.
+export type Cell = { runs: number; escalated: number; tokens: number; failedVerify?: number; notAccepted?: number }
 export type Stats = Record<string, Partial<Record<Tier, Cell>>>
 
 const KEYWORDS: [RegExp, string][] = [
@@ -18,10 +20,16 @@ export function categorize(subagentType: string, description: string): string {
   return `${subagentType}:${hit ? hit[1] : 'other'}`
 }
 
-export function record(stats: Stats, category: string, tier: Tier, escalated: boolean, tokens: number): Stats {
+export function record(stats: Stats, category: string, tier: Tier, escalated: boolean, tokens: number, verifyFailed = false): Stats {
   const row = { ...(stats[category] ?? {}) }
   const c = row[tier] ?? { runs: 0, escalated: 0, tokens: 0 }
-  row[tier] = { runs: c.runs + 1, escalated: c.escalated + (escalated ? 1 : 0), tokens: c.tokens + tokens }
+  row[tier] = {
+    runs: c.runs + 1,
+    escalated: c.escalated + (escalated ? 1 : 0),
+    tokens: c.tokens + tokens,
+    failedVerify: (c.failedVerify ?? 0) + (verifyFailed ? 1 : 0),
+    notAccepted: (c.notAccepted ?? c.escalated) + (escalated || verifyFailed ? 1 : 0),
+  }
   return { ...stats, [category]: row }
 }
 
@@ -32,7 +40,7 @@ export function recommend(stats: Stats, category: string, requested: Tier): Tier
   let t = requested
   for (;;) {
     const c = stats[category]?.[t]
-    const bad = c !== undefined && c.runs >= LEARN.minRuns && c.escalated / c.runs > LEARN.maxEscalationRate
+    const bad = c !== undefined && c.runs >= LEARN.minRuns && (c.notAccepted ?? c.escalated) / c.runs > LEARN.maxEscalationRate
     const i = LADDER.indexOf(t)
     if (!bad || i === LADDER.length - 1) return t
     t = LADDER[i + 1]!

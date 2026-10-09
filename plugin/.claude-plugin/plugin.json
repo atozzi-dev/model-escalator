@@ -5,5 +5,79 @@
   "author": { "name": "Alessandro Tozzi", "email": "261738626+atozzi-dev@users.noreply.github.com" },
   "repository": "https://github.com/atozzi-dev/model-escalator",
   "license": "MIT",
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "thresholdHaiku": {
+      "type": "number",
+      "title": "Haiku difficulty threshold",
+      "description": "Difficulty score at which an agent that started on Haiku gets the next intervention.",
+      "default": 3
+    },
+    "thresholdSonnet": {
+      "type": "number",
+      "title": "Sonnet difficulty threshold",
+      "description": "Difficulty score at which an agent that started on Sonnet gets the next intervention.",
+      "default": 4
+    },
+    "thresholdOpus": {
+      "type": "number",
+      "title": "Opus difficulty threshold",
+      "description": "Difficulty score at which an agent that started on Opus gets the next intervention.",
+      "default": 6
+    },
+    "graceSteps": {
+      "type": "number",
+      "title": "Grace steps",
+      "description": "Steps to wait after an intervention before the next one.",
+      "default": 4
+    },
+    "oscillationEdits": {
+      "type": "number",
+      "title": "Edits before oscillation",
+      "description": "Edits of the same file without progress tolerated before each further edit raises the difficulty score.",
+      "default": 3
+    },
+    "stallMinutes": {
+      "type": "number",
+      "title": "Stall window (minutes)",
+      "description": "Minutes without any event after which a running agent is reported as stalled and gets the next ladder note on its next tool call. A tool call still running counts as activity until three times this long.",
+      "default": 10
+    },
+    "verifyCommand": {
+      "type": "string",
+      "title": "Verification command",
+      "description": "Optional check run at the end of each tracked agent's run (split on spaces, quotes group, no shell). A non-zero exit counts as a failed run for learning; a command that cannot start or times out is ignored. Empty turns it off.",
+      "default": ""
+    },
+    "verifyTimeoutSeconds": {
+      "type": "number",
+      "title": "Verification timeout (seconds)",
+      "description": "How long the verification command may run before it is abandoned and ignored (at most 600).",
+      "default": 120
+    },
+    "seniorModel": {
+      "type": "string",
+      "title": "Senior model",
+      "description": "Model asked for advice at the consult level (alias or full id).",
+      "default": "opus"
+    },
+    "levels": {
+      "type": "string",
+      "title": "Enabled levels",
+      "description": "Comma-separated escalation levels, from: nudge, consult, swap, human. Disabled levels are skipped.",
+      "default": "nudge,consult,swap,human"
+    },
+    "prudentTokenRatio": {
+      "type": "number",
+      "title": "Prudent token ratio",
+      "description": "Share of the tokens a stronger baseline model is assumed to need, used for the prudent savings estimate (0 to 1).",
+      "default": 0.65
+    },
+    "prices": {
+      "type": "string",
+      "title": "Price overrides",
+      "description": "Optional JSON overriding USD per million token rates, e.g. {\"sonnet\":{\"input\":3,\"output\":15}}. Rates: input, output, cacheRead, cacheWrite5m, cacheWrite1h.",
+      "default": ""
+    }
+  }
 }

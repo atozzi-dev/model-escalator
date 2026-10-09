@@ -4,8 +4,23 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Added
+
+- Plugin options for the difficulty thresholds, grace steps, edit oscillation count, senior model, enabled escalation levels, prudent token ratio and price overrides; defaults are unchanged.
+- Edit oscillation: editing the same file again and again without progress now raises an agent's difficulty score.
+- Test output is parsed run by run (jest, vitest, pytest, go test, cargo test and plain "N failed, M passed" summaries): a loop that repeats a failing test in one command, or a command that hides the failure behind a trailing exit marker, now weighs like separate failing attempts.
+- Optional `verifyCommand` and `verifyTimeoutSeconds` options: the mod runs your check (for example a test command) at the end of each tracked agent's run, and a failed check counts against that model for that kind of task when learning. A check that cannot start or times out is not counted against the model.
+- Agents that keep making model requests without any progress now climb the escalation ladder too, after a generous number of requests.
+- Agents that go silent for `stallMinutes` (default 10) are reported in the log, the status line and a toast, and get a note on their next tool call; a tool call still running counts as activity for three times that window.
+
+### Changed
+
+- Fork subagents keep their model and prompt and are no longer tracked, nudged or escalated.
+- The nudge note now reads "You are not making progress...", so it fits repeated failures, idle loops and stalls alike.
+
 ### Fixed
 
+- Learned statistics no longer lose updates when several agents finish at the same time: all store writes go through a single queue.
 - `MODEL_ESCALATOR_BASELINE` now stays the reference model instead of being overwritten by the lead's model on every request.
 - Hot model swap now sends a full model id (the one seen in the session, else the current default) instead of the bare alias, which the API rejected with a 404.
 - The senior consult now has a 2000-token cap and logs the reason and token usage to the debug log when it returns no advice.

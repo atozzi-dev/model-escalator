@@ -1,5 +1,6 @@
 import { expect, test } from 'claude-code/testing'
-import { failingTests, newAgent, normalizeError, observe, rememberModel, resolveModelId, type AgentState } from '../hooks/detector'
+import { DEFAULT_CONFIG, type Config } from '../hooks/config'
+import { escalated, failingTests, newAgent, normalizeError, observe, rememberModel, resolveModelId, type AgentState } from '../hooks/detector'
 
 const err = (text: string) => ({ tool: 'Bash', ok: false, text, summary: 'npm test' })
 const run = (s: AgentState, n: number, text: string) => {
@@ -66,4 +67,35 @@ test('rememberModel only keeps ids of the ladder families', async () => {
   }
   expect(rememberModel({}, 'claude-opus-5-5')).toEqual({ opus: 'claude-opus-5-5' })
   expect(rememberModel({}, 'Claude-Sonnet-5-5')).toEqual({ sonnet: 'Claude-Sonnet-5-5' })
+})
+
+const runWith = (s: AgentState, n: number, text: string, cfg: Config) => {
+  const actions: (string | undefined)[] = []
+  for (let i = 0; i < n; i++) { const r = observe(s, err(text), cfg); s = r.state; actions.push(r.action) }
+  return { s, actions }
+}
+
+test('a custom threshold and grace window change when the ladder moves', async () => {
+  const cfg = { ...DEFAULT_CONFIG, threshold: { haiku: 1, sonnet: 1, opus: 1 }, grace: 1 }
+  const custom = runWith(newAgent('a', 'x', 'haiku', 't'), 8, 'boom 1', cfg).actions
+  const def = run(newAgent('b', 'x', 'haiku', 't'), 8, 'boom 1').actions
+  expect(custom.findIndex(Boolean)).toBeLessThan(def.findIndex(Boolean))
+  expect(custom.filter(Boolean)).toEqual(['nudge', 'consult', 'swap', 'human'])
+  expect(def.filter(Boolean).length).toBeLessThan(4)
+})
+
+test('a disabled level is skipped by the ladder', async () => {
+  const cfg = { ...DEFAULT_CONFIG, levels: ['nudge', 'swap'] as const }
+  const { s, actions } = runWith(newAgent('a', 'x', 'haiku', 't'), 30, 'TypeError: x is undefined', cfg)
+  expect(actions.filter(Boolean)).toEqual(['nudge', 'swap'])
+  expect(s.tier).toBe('sonnet')
+  expect(escalated(s, cfg.levels)).toBe(true)
+  expect(escalated({ ...s, level: 1 }, cfg.levels)).toBe(false)
+  expect(escalated({ ...s, level: 3 }, DEFAULT_CONFIG.levels)).toBe(true)
+  expect(escalated({ ...s, level: 2 }, DEFAULT_CONFIG.levels)).toBe(false)
+})
+
+test('resolveModelId falls back to the configured ids', async () => {
+  const ids = { ...DEFAULT_CONFIG.modelIds, sonnet: 'claude-sonnet-x' }
+  expect(resolveModelId({}, 'sonnet', ids)).toBe('claude-sonnet-x')
 })

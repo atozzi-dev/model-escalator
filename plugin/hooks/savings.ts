@@ -1,19 +1,11 @@
+import { DEFAULT_CONFIG, DEFAULT_PRICES, type Config, type Price, type Rates } from './config'
 import type { Tier } from './detector'
 
-// USD per million tokens, Anthropic API list prices (Oct 2026), checked against /cost.
-// Cache writes cost 1.25x input for the 5-minute TTL and 2x input for the 1-hour TTL.
-// `longContext` replaces the rates when one request's total input exceeds its threshold.
-export type Rates = { input: number; output: number; cacheRead: number; cacheWrite5m: number; cacheWrite1h: number }
-export type Price = Rates & { longContext?: Rates & { threshold: number } }
+export type { Price, Rates }
+type Pricing = Pick<Config, 'prices' | 'prudentTokenRatio'>
+
 export type CacheTtl = '5m' | '1h'
-export const PRICES: Record<Tier, Price> = {
-  opus: { input: 4, output: 20, cacheRead: 0.2, cacheWrite5m: 5, cacheWrite1h: 8 },
-  sonnet: { input: 2, output: 10, cacheRead: 0.2, cacheWrite5m: 2.5, cacheWrite1h: 4 },
-  haiku: {
-    input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite5m: 0.125, cacheWrite1h: 0.2,
-    longContext: { threshold: 100_000, input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite5m: 0.625, cacheWrite1h: 1 },
-  },
-}
+export const PRICES: Record<Tier, Price> = DEFAULT_PRICES
 
 export type Usage = {
   input_tokens: number
@@ -37,7 +29,7 @@ function scale(u: Usage, k: number): Usage {
 
 // A stronger model usually needs fewer tokens for the same task. The prudent baseline
 // assumes it would use this fraction of the cheap model's tokens.
-export const PRUDENT_TOKEN_RATIO = 0.65
+export const PRUDENT_TOKEN_RATIO = DEFAULT_CONFIG.prudentTokenRatio
 
 export type Ledger = {
   actual: number          // what the session really spent (all loops, plus consults)
@@ -57,24 +49,24 @@ export function emptyLedger(): Ledger {
 // One model request. `isAgent` false for the lead: it counts the same in both columns.
 // The usage report has no TTL split: the main loop writes the cache with the 1-hour TTL,
 // subagents and teammates with the 5-minute one.
-export function addStep(l: Ledger, u: Usage, tier: Tier, baseline: Tier, isAgent: boolean): Ledger {
+export function addStep(l: Ledger, u: Usage, tier: Tier, baseline: Tier, isAgent: boolean, cfg: Pricing = DEFAULT_CONFIG): Ledger {
   const ttl: CacheTtl = isAgent ? '5m' : '1h'
-  const c = cost(u, PRICES[tier], ttl)
+  const c = cost(u, cfg.prices[tier], ttl)
   const row = l.byTier[tier] ?? { steps: 0, cost: 0 }
   const same = !isAgent || tier === baseline
   return {
     ...l,
     actual: l.actual + c,
-    baselineHigh: l.baselineHigh + (same ? c : cost(u, PRICES[baseline], ttl)),
-    baselineLow: l.baselineLow + (same ? c : cost(scale(u, PRUDENT_TOKEN_RATIO), PRICES[baseline], ttl)),
+    baselineHigh: l.baselineHigh + (same ? c : cost(u, cfg.prices[baseline], ttl)),
+    baselineLow: l.baselineLow + (same ? c : cost(scale(u, cfg.prudentTokenRatio), cfg.prices[baseline], ttl)),
     agentSteps: l.agentSteps + (isAgent ? 1 : 0),
     byTier: { ...l.byTier, [tier]: { steps: row.steps + 1, cost: row.cost + c } },
   }
 }
 
 // A senior consult has no usage report: estimate from text length (about 4 chars per token).
-export function addConsult(l: Ledger, promptChars: number, replyChars: number, tier: Tier): Ledger {
-  const c = cost({ input_tokens: promptChars / 4, output_tokens: replyChars / 4, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, PRICES[tier])
+export function addConsult(l: Ledger, promptChars: number, replyChars: number, tier: Tier, cfg: Pricing = DEFAULT_CONFIG): Ledger {
+  const c = cost({ input_tokens: promptChars / 4, output_tokens: replyChars / 4, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, cfg.prices[tier])
   return { ...l, actual: l.actual + c, consults: l.consults + 1, consultCost: l.consultCost + c }
 }
 
