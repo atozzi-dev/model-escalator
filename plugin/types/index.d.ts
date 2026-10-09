@@ -14,6 +14,7 @@ declare module 'claude-code' {
           level: number
           stepsSinceAction: number
           errorCounts: Record<string, number>
+          editCounts: Record<string, number>
           lastFailing?: number
           log: string[]
           tokens: number

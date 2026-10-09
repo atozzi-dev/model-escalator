@@ -17,6 +17,7 @@ export type AgentState = {
   level: number
   stepsSinceAction: number
   errorCounts: Record<string, number>
+  editCounts: Record<string, number>   // edits per normalised file path since the last progress
   lastFailing?: number
   log: string[]
   tokens: number
@@ -54,7 +55,7 @@ export function nextTier(t: Tier): Tier {
 export function newAgent(id: string, category: string, model: string | undefined, task: string): AgentState {
   const t = tierOf(model)
   return { id, category, task: task.slice(0, 2000), startTier: t, tier: t, score: 0, level: 0,
-    stepsSinceAction: 0, errorCounts: {}, log: [], tokens: 0 }
+    stepsSinceAction: 0, errorCounts: {}, editCounts: {}, log: [], tokens: 0 }
 }
 
 // Strips what changes between identical failures: numbers, paths, hex ids, spacing.
@@ -75,10 +76,19 @@ export function failingTests(text: string): number | undefined {
   return undefined
 }
 
-export type Observation = { tool: string; ok: boolean; text: string; summary: string }
+const EDIT_TOOLS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']
+
+// One key per file: forward slashes, case-folded for Windows-style paths (case-insensitive file systems).
+export function normalizePath(p: string): string {
+  const t = p.trim()
+  const f = t.replace(/\\/g, '/')
+  return f !== t || /^[a-z]:\//i.test(f) ? f.toLowerCase() : f
+}
+
+export type Observation ={ tool: string; ok: boolean; text: string; summary: string }
 
 export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT_CONFIG): { state: AgentState; action?: Action } {
-  const s: AgentState = { ...prev, errorCounts: { ...prev.errorCounts }, log: [...prev.log] }
+  const s: AgentState = { ...prev, errorCounts: { ...prev.errorCounts }, editCounts: { ...prev.editCounts }, log: [...prev.log] }
   s.stepsSinceAction++
   let progress = false
 
@@ -87,6 +97,14 @@ export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT
     const n = (s.errorCounts[sig] ?? 0) + 1
     s.errorCounts[sig] = n
     s.score += n >= 2 ? 1 : 0.25
+  }
+
+  // Oscillation: the same file edited again and again without progress, whatever the errors say.
+  if (EDIT_TOOLS.includes(ob.tool) && ob.summary) {
+    const key = normalizePath(ob.summary)
+    const edits = s.editCounts[key] ?? 0
+    if (edits >= cfg.oscillationEdits) s.score += 1
+    s.editCounts[key] = edits + 1
   }
 
   const failing = failingTests(ob.text)
@@ -102,6 +120,7 @@ export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT
   if (progress) {
     s.score = 0
     s.errorCounts = {}
+    s.editCounts = {}
     return { state: s }
   }
 

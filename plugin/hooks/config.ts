@@ -14,6 +14,7 @@ export type Config = {
   prices: Record<Tier, Price>       // USD per million tokens
   prudentTokenRatio: number         // fraction of tokens the baseline model would need
   modelIds: Record<Tier, string>    // full ids sent on a swap when none was observed
+  oscillationEdits: number          // edits of one file tolerated since the last progress; each further edit adds to the score
 }
 
 // USD per million tokens, Anthropic API list prices (Oct 2026), checked against /cost.
@@ -38,6 +39,7 @@ export const DEFAULT_CONFIG: Config = {
   levels: ALL_LEVELS,
   prices: DEFAULT_PRICES,
   prudentTokenRatio: 0.65,
+  oscillationEdits: 3,
   modelIds: { haiku: 'claude-haiku-5-5', sonnet: 'claude-sonnet-5-5', opus: 'claude-opus-5-5' },
 }
 
@@ -102,6 +104,7 @@ export function parseConfig(raw: Raw | undefined): Config {
   try {
     const ratio = num(o.prudentTokenRatio)
     const grace = num(o.graceSteps)
+    const osc = num(o.oscillationEdits)
     const senior = typeof o.seniorModel === 'string' ? o.seniorModel.trim() : ''
     return {
       ...d,
@@ -110,6 +113,7 @@ export function parseConfig(raw: Raw | undefined): Config {
         sonnet: positive(o.thresholdSonnet, d.threshold.sonnet),
         opus: positive(o.thresholdOpus, d.threshold.opus),
       },
+      oscillationEdits: osc !== undefined && osc >= 1 ? Math.floor(osc) : d.oscillationEdits,
       grace: grace !== undefined && grace >= 0 ? Math.floor(grace) : d.grace,
       senior: senior !== '' && senior.length <= 100 ? senior : d.senior,
       levels: parseLevels(o.levels, d.levels),
