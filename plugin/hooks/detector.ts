@@ -28,6 +28,7 @@ export type AgentState = {
   inFlight?: number                     // tool calls started and not yet finished
   running?: boolean                     // true from the first event of a run until turn.complete
   stalled?: boolean                     // already flagged as silent; cleared by any event
+  helped?: boolean                      // asked for help through the tool at least once
 }
 
 export function tierOf(model: string | undefined): Tier {
@@ -203,6 +204,19 @@ export function isSilent(s: AgentState, now: number, cfg: Config = DEFAULT_CONFI
 // Flags the agent and raises its score to its threshold, so its next tool call earns the next ladder note.
 export function markStall(s: AgentState, cfg: Config = DEFAULT_CONFIG): AgentState {
   return { ...s, stalled: true, score: Math.max(s.score, cfg.threshold[s.tier]) }
+}
+
+// An agent may ask for help once per grace window: after a help call (or any intervention) it waits
+// for `grace` more tool calls.
+export function canAskForHelp(s: AgentState, cfg: Config = DEFAULT_CONFIG): boolean {
+  return !s.helped || s.stepsSinceAction >= cfg.grace
+}
+
+// A help call jumps straight to the senior consult: the ladder continues after it (never moves back),
+// the score restarts and a fresh grace window begins.
+export function afterHelp(s: AgentState, cfg: Config = DEFAULT_CONFIG): AgentState {
+  const i = cfg.levels.indexOf('consult')
+  return { ...s, helped: true, level: i >= 0 ? Math.max(s.level, i + 1) : s.level, score: 0, stepsSinceAction: 0 }
 }
 
 // True once an agent got past the swap level (or past the last one when swap is disabled).

@@ -1,12 +1,13 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config'
-import { countStep, dossier, escalated, isSilent, markStall, newAgent, observe, rememberModel, resolveModelId, tierOf, toolEnd, toolStart, touch, type Action, type AgentState, type ObservedModels, type Tier } from './detector'
+import { afterHelp, canAskForHelp, countStep, dossier, escalated, isSilent, markStall, newAgent, observe, rememberModel, resolveModelId, tierOf, toolEnd, toolStart, touch, type Action, type AgentState, type ObservedModels, type Tier } from './detector'
 import { categorize, recommend, record, type Stats } from './learning'
 import { createQueue } from './queue'
 import { parseSnapshot, type Snapshot } from './state'
 import { addConsult, addIntervention, addStep, emptyLedger, report, statusLine, type Ledger, type Usage } from './savings'
 
+export const HELP_TOOL = 'mcp__model-escalator__ask_for_help'
 const STATS_KEY = 'stats'
 const SESSIONS_KEY = 'sessions'
 const SENIOR_SYSTEM =
@@ -166,6 +167,24 @@ export const register: Register = (on, options) => {
       } catch { /* no stall detection, everything else works */ }
     }
     const r = await next(e)
+    if (watching()) {
+      try {
+        await $.tool.register({
+          name: 'ask_for_help',
+          description: 'Ask a senior model for advice when you are blocked. Use it only after you made real attempts ' +
+            'that failed, not as a first step. Say what blocks you and what you already tried.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              problem: { type: 'string', description: 'What is blocking you.' },
+              tried: { type: 'string', description: 'What you already tried.' },
+            },
+            required: ['problem'],
+          },
+          isDeferred: false,
+        })
+      } catch { /* the tool is optional: the ladder works without it */ }
+    }
     try {
       await $.command.register({ name: 'escalator', description: 'Model escalator: savings report and stats', argumentHint: '[report|stats|reset]' })
     } catch { /* name taken: the report stays reachable through the status line */ }
@@ -213,8 +232,16 @@ export const register: Register = (on, options) => {
     return r
   })
 
+  // The help tool: a tracked agent asks for the senior consult directly. Answered here, never passed on.
+  on('tool.call', { tool: HELP_TOOL as never }, async ($, e) => {
+    const ev = e as unknown as Record<string, unknown>
+    const text = await handleHelp($, ev, typeof ev.agentId === 'string' ? ev.agentId : undefined)
+    return { result: text } as never
+  })
+
   // 2. Every tool call of a watched agent updates its difficulty score.
   on('tool.call', async ($, e, next) => {
+    if ((e.tool as string) === HELP_TOOL) return next(e)
     const id = e.agentId
     const tracked = watching() && id !== undefined && agents.has(id)
     if (tracked) mark(id, await clockNow($), toolStart)
@@ -408,24 +435,8 @@ async function act($: EngineInterface, s: AgentState, action: Action): Promise<s
     case 'nudge':
       return tag('You are not making progress. Pause: re-read the last error or result in full, ' +
         'state one new hypothesis, then continue with a different approach.')
-    case 'consult': {
-      const prompt = dossier(s)
-      // The engine answers { isAnswered, text, usage }; the published 2.1.277 types (used by CI)
-      // still say string, hence the wider local type.
-      const reply = await $.model.complete({ model: config.senior, system: SENIOR_SYSTEM, prompt, maxTokens: 2000 }) as ModelReply
-      const advice = typeof reply === 'string' ? reply : reply.isAnswered ? reply.text : ''
-      if (!advice) {
-        try {
-          const r = typeof reply === 'string' ? undefined : reply
-          const why = r && !r.isAnswered ? `reason=${r.reason ?? 'unknown'} status=${r.status ?? '-'} error=${r.error ?? '-'}` : 'reason=empty-text'
-          await $.ui.log(`senior consult gave no advice: ${why} output_tokens=${r?.usage?.output_tokens ?? '-'}`, { to: 'debug' })
-        } catch { /* diagnostics only */ }
-      }
-      ledger = addConsult(ledger, prompt.length + SENIOR_SYSTEM.length, advice.length, tierOf(config.senior), config)
-      if (!advice) return tag('Still stuck. List three different hypotheses and test the cheapest one first.')
-      return tag(`Advice from a senior model:
-${advice}`)
-    }
+    case 'consult':
+      return consult($, s)
     case 'swap':
       await $.ui.toast(`${s.category}: switched to ${s.tier}`)
       return tag(`From your next step you run on a stronger model (${s.tier}). Re-assess the problem from scratch.`)
@@ -433,5 +444,58 @@ ${advice}`)
       await $.ui.toast(`${s.category}: needs a human`)
       await $.ui.status(`stuck: ${s.category} (${s.id})`)
       return tag('Stop now. Summarize what you tried and what blocks you, and end your turn so a human can step in.')
+  }
+}
+
+// Asks the senior model about the agent and returns the tagged note for it. `extra` is the agent's own
+// account of the problem (help tool), added to the dossier. Falls back to a generic note without advice.
+async function consult($: EngineInterface, s: AgentState, extra = ''): Promise<string> {
+  const prompt = dossier(s) + extra
+  // The engine answers { isAnswered, text, usage }; the published 2.1.277 types (used by CI)
+  // still say string, hence the wider local type.
+  const reply = await $.model.complete({ model: config.senior, system: SENIOR_SYSTEM, prompt, maxTokens: 2000 }) as ModelReply
+  const advice = typeof reply === 'string' ? reply : reply.isAnswered ? reply.text : ''
+  if (!advice) {
+    try {
+      const r = typeof reply === 'string' ? undefined : reply
+      const why = r && !r.isAnswered ? `reason=${r.reason ?? 'unknown'} status=${r.status ?? '-'} error=${r.error ?? '-'}` : 'reason=empty-text'
+      await $.ui.log(`senior consult gave no advice: ${why} output_tokens=${r?.usage?.output_tokens ?? '-'}`, { to: 'debug' })
+    } catch { /* diagnostics only */ }
+  }
+  ledger = addConsult(ledger, prompt.length + SENIOR_SYSTEM.length, advice.length, tierOf(config.senior), config)
+  if (!advice) return tag('Still stuck. List three different hypotheses and test the cheapest one first.')
+  return tag(`Advice from a senior model:
+${advice}`)
+}
+
+const clip = (v: unknown, n: number): string => (typeof v === 'string' ? v.trim().slice(0, n) : '')
+
+// Answers a call of the help tool. Never throws: the agent always gets a text back.
+async function handleHelp($: EngineInterface, input: Record<string, unknown>, id: string | undefined): Promise<string> {
+  try {
+    const a = id ? agents.get(id) : undefined
+    if (!id || !a || mode === 'off' || mode === 'baseline') return 'Help is not available for this agent.'
+    if (mode === 'observe') {
+      await $.ui.log(`${id} (${a.category}): would consult (asked for help)`)
+      ledger = addIntervention(ledger, 'ask')
+      await save($)
+      return 'Request noted.'
+    }
+    if (!canAskForHelp(a, config)) return tag('You already consulted a senior model a moment ago: try that advice first.')
+    // Count the call and move the ladder before the (slow) model call, so a second call cannot slip in.
+    agents.set(id, afterHelp(a, config))
+    ledger = addIntervention(ledger, 'ask')
+    await $.ui.log(`${id} (${a.category}): asked for help`)
+    const problem = clip(input.problem, 2000)
+    const tried = clip(input.tried, 2000)
+    const extra = `
+The agent asks for help.
+Problem: ${problem || '(not given)'}` + (tried ? `
+What it tried: ${tried}` : '')
+    const note = await consult($, agents.get(id) ?? a, extra)
+    await save($)
+    return note
+  } catch {
+    return 'Help is not available right now.'
   }
 }

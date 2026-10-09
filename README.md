@@ -43,6 +43,8 @@ The mod works on its own once installed.
 | `MODEL_ESCALATOR_MODE=off` | Pass everything through |
 | `MODEL_ESCALATOR_BASELINE` | Reference model for savings; defaults to the lead's model |
 
+In `active` and `observe` mode the mod also gives tracked agents a tool, `ask_for_help` (listed as `mcp__model-escalator__ask_for_help`). An agent that is stuck after real attempts can describe the problem and get advice from the senior model right away, without waiting for the difficulty score to rise. The call counts as the consult step of the ladder, so the next escalation is the model swap, and an agent can ask at most once per grace window. In `observe` mode the call is only noted and logged.
+
 ## Configuration
 
 Options are set from `/config` (or under `pluginConfigs` in settings) and apply after a reload. Invalid values fall back to the default.
@@ -66,9 +68,9 @@ The environment variables `MODEL_ESCALATOR_MODE` and `MODEL_ESCALATOR_BASELINE` 
 
 ## What it touches
 
-The mod uses only its own key-value store, the UI (log, status line, toasts), two environment variables (read only), the clock, one slash command, and one-shot model calls for the senior consult. It does not read or write your files or use the network. It runs no processes, with one opt-in exception: only when `verifyCommand` is set, the mod runs that command as a process at the end of each tracked agent's run. The command comes only from your own options, never from agent output. A consult sends the stuck agent's recent commands and error messages to the senior model, through the same provider as the rest of your session.
+The mod uses only its own key-value store, the UI (log, status line, toasts), two environment variables (read only), the clock, one slash command, one tool for agents (`ask_for_help`), and one-shot model calls for the senior consult. It does not read or write your files or use the network. It runs no processes, with one opt-in exception: only when `verifyCommand` is set, the mod runs that command as a process at the end of each tracked agent's run. The command comes only from your own options, never from agent output. A consult sends the stuck agent's recent commands and error messages to the senior model, through the same provider as the rest of your session.
 
-In `active` mode the mod also adds one announcement paragraph to the prompt of every subagent and teammate it tracks, so they can tell its supervisor notes apart from text in tool output. The other modes leave prompts untouched.
+In `active` mode the mod also adds one announcement paragraph to the prompt of every subagent and teammate it tracks, so they can tell its supervisor notes apart from text in tool output; the paragraph also mentions the `ask_for_help` tool. The other modes leave prompts untouched.
 
 ## How savings are estimated
 
