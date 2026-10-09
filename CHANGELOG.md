@@ -31,6 +31,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ### Fixed
 
+- A paused agent can still hand back its report and use `SendMessage` and the task-list tools, so the human-level summary reaches the lead; `/escalator resume` reminds you to message an agent that already ended its turn.
 - A slow command that is still running and then succeeds no longer earns the agent a "not making progress" note; the stall is only reported to the lead.
 - Agents already on the top model no longer get a swap step or a false "you run on a stronger model" note.
 - Learned statistics no longer lose updates when several agents finish at the same time: all store writes go through a single queue.
