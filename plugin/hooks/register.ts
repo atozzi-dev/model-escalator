@@ -230,8 +230,10 @@ export const register: Register = (on, options) => {
         sessionTag = newTag()
         unavailableToasted = false
         leadNotices = 0
-        mode = readMode(await $.env.get('MODEL_ESCALATOR_MODE'))
-        const b = await $.env.get('MODEL_ESCALATOR_BASELINE')
+        // `claude plugin eval` only forwards EVAL_* variables to its runs: those are the fallback for an unset or empty plain one.
+        // ($.env.get needs literal names, so the reads are spelled out.)
+        mode = readMode((await $.env.get('MODEL_ESCALATOR_MODE')) || (await $.env.get('EVAL_MODEL_ESCALATOR_MODE')) || undefined)
+        const b = (await $.env.get('MODEL_ESCALATOR_BASELINE')) || (await $.env.get('EVAL_MODEL_ESCALATOR_BASELINE'))
         baselinePinned = Boolean(b)
         if (b) baseline = tierOf(b)
       } catch { /* defaults */ }

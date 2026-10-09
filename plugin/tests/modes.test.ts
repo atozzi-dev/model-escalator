@@ -141,3 +141,22 @@ test('off: everything passes through untouched', async ($, on) => {
   expect(out).toContain('Interventions: none')
   expect(await escalator($, 'stats')).not.toContain('startTier')
 })
+
+test('eval-safe variables: EVAL_MODEL_ESCALATOR_* set the mode and the baseline', async ($, on) => {
+  const h = wire(on, { EVAL_MODEL_ESCALATOR_MODE: 'baseline', EVAL_MODEL_ESCALATOR_BASELINE: 'sonnet' })
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'haiku')
+  expect(h.spawnModels[0]).toBe('sonnet')
+  expect(await escalator($)).toContain('Mode: baseline')
+})
+
+test('eval-safe variables: the plain variables win when both are set, an empty one falls back', async ($, on) => {
+  const h = wire(on, {
+    MODEL_ESCALATOR_MODE: 'observe', EVAL_MODEL_ESCALATOR_MODE: 'baseline',
+    MODEL_ESCALATOR_BASELINE: '', EVAL_MODEL_ESCALATOR_BASELINE: 'opus',
+  })
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'haiku')
+  expect(h.spawnModels[0]).toBe('haiku')
+  expect(await escalator($)).toContain('Mode: observe')
+})
