@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { failingTests, newAgent, normalizeError, observe, type AgentState } from '../hooks/detector'
+import { failingTests, newAgent, normalizeError, observe, rememberModel, resolveModelId, type AgentState } from '../hooks/detector'
 
 const err = (text: string) => ({ tool: 'Bash', ok: false, text, summary: 'npm test' })
 const run = (s: AgentState, n: number, text: string) => {
@@ -38,4 +38,24 @@ test('fewer failing tests is progress and resets the score', async () => {
   expect(s.score).toBeGreaterThan(0)
   s = observe(s, { tool: 'Bash', ok: false, text: '2 failed', summary: 'npm test' }).state
   expect(s.score).toBe(0)
+})
+
+test('resolveModelId falls back to full default ids', async () => {
+  expect(resolveModelId({}, 'haiku')).toBe('claude-haiku-5-5')
+  expect(resolveModelId({}, 'sonnet')).toBe('claude-sonnet-5-5')
+  expect(resolveModelId({}, 'opus')).toBe('claude-opus-5-5')
+})
+
+test('resolveModelId prefers ids observed at runtime', async () => {
+  const seen = rememberModel({}, 'claude-sonnet-5-5-20261001')
+  expect(resolveModelId(seen, 'sonnet')).toBe('claude-sonnet-5-5-20261001')
+  expect(resolveModelId(seen, 'opus')).toBe('claude-opus-5-5')
+})
+
+test('rememberModel ignores bare aliases and empty values', async () => {
+  for (const m of ['sonnet', 'opus', 'haiku', 'Sonnet', '', undefined]) {
+    expect(rememberModel({}, m)).toEqual({})
+  }
+  const seen = rememberModel({}, 'claude-haiku-5-5')
+  expect(seen).toEqual({ haiku: 'claude-haiku-5-5' })
 })

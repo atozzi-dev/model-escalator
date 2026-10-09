@@ -1,5 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { dossier, newAgent, observe, tierOf, type Action, type AgentState, type Tier } from './detector'
+import { dossier, newAgent, observe, rememberModel, resolveModelId, tierOf, type Action, type AgentState, type ObservedModels, type Tier } from './detector'
 import { categorize, recommend, record, type Stats } from './learning'
 import { addConsult, addIntervention, addStep, emptyLedger, report, statusLine, type Ledger, type Usage } from './savings'
 
@@ -20,6 +20,8 @@ let baseline: Tier = 'opus'
 let mode: Mode = 'active'
 // True when MODEL_ESCALATOR_BASELINE fixes the reference model: the lead's model must not override it.
 let baselinePinned = false
+// Full model ids seen on turn.step requests and results, per tier: what a swap must send.
+let seenModels: ObservedModels = {}
 
 // Restores the module state to its defaults. Used by tests so each one starts clean.
 export function resetState(): void {
@@ -27,6 +29,7 @@ export function resetState(): void {
   ledger = emptyLedger()
   baseline = 'opus'
   baselinePinned = false
+  seenModels = {}
   mode = 'active'
 }
 
@@ -125,8 +128,10 @@ export const register: Register = (on) => {
   on('turn.step', async function* ($, e, next) {
     if (!e.agentId && !baselinePinned) baseline = tierOf(e.model)
     const a = e.agentId ? agents.get(e.agentId) : undefined
+    seenModels = rememberModel(seenModels, e.model)
     const swap = mode === 'active' && a !== undefined && a.tier !== a.startTier
-    const r = yield* next(swap ? { ...e, model: a!.tier } : e)
+    const r = yield* next(swap ? { ...e, model: resolveModelId(seenModels, a!.tier) } : e)
+    seenModels = rememberModel(seenModels, r.usage?.model)
     if (mode !== 'off' && r.usage) {
       ledger = addStep(ledger, r.usage as Usage, tierOf(r.usage.model), baseline, Boolean(e.agentId))
     }
@@ -162,7 +167,7 @@ export const register: Register = (on) => {
   })
 }
 
-type ModelReply = string | { isAnswered: true; text: string } | { isAnswered: false }
+type ModelReply = string | { isAnswered: true; text: string; usage?: { output_tokens?: number } } | { isAnswered: false; reason?: string; status?: number | null; error?: string; usage?: { output_tokens?: number } }
 
 async function act($: EngineInterface, s: AgentState, action: Action): Promise<string> {
   await $.ui.log(`${s.id} (${s.category}): ${action}`)
@@ -174,8 +179,15 @@ async function act($: EngineInterface, s: AgentState, action: Action): Promise<s
       const prompt = dossier(s)
       // The engine answers { isAnswered, text, usage }; the published 2.1.277 types (used by CI)
       // still say string, hence the wider local type.
-      const reply = await $.model.complete({ model: SENIOR, system: SENIOR_SYSTEM, prompt, maxTokens: 600 }) as ModelReply
+      const reply = await $.model.complete({ model: SENIOR, system: SENIOR_SYSTEM, prompt, maxTokens: 2000 }) as ModelReply
       const advice = typeof reply === 'string' ? reply : reply.isAnswered ? reply.text : ''
+      if (!advice) {
+        try {
+          const r = typeof reply === 'string' ? undefined : reply
+          const why = r && !r.isAnswered ? `reason=${r.reason ?? 'unknown'} status=${r.status ?? '-'} error=${r.error ?? '-'}` : 'reason=empty-text'
+          await $.ui.log(`senior consult gave no advice: ${why} output_tokens=${r?.usage?.output_tokens ?? '-'}`, { to: 'debug' })
+        } catch { /* diagnostics only */ }
+      }
       ledger = addConsult(ledger, prompt.length + SENIOR_SYSTEM.length, advice.length, tierOf(SENIOR))
       if (!advice) return '[supervisor] Still stuck. List three different hypotheses and test the cheapest one first.'
       return `[supervisor] Advice from a senior model:\n${advice}`

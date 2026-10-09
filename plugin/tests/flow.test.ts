@@ -32,7 +32,7 @@ test('stuck cheap agent: nudge, senior consult, then hot swap of the model', asy
 
   const drain = async (st: { result: Promise<unknown> } & AsyncIterable<unknown>) => { for await (const _ of st) { /* chunks */ } return st.result }
   await drain($.turn.step({ turnId: 't1', index: 0, model: 'haiku', messageCount: 3, agentId } as never) as never)
-  expect(stepModels.at(-1)).toBe('sonnet')
+  expect(stepModels.at(-1)).toBe('claude-sonnet-5-5')
   await drain($.turn.step({ turnId: 'm1', index: 0, model: 'opus', messageCount: 3 } as never) as never)
   expect(stepModels.at(-1)).toBe('opus')
 })

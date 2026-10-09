@@ -34,6 +34,27 @@ export function tierOf(model: string | undefined): Tier {
   return 'sonnet'
 }
 
+// Full model ids the engine accepts on a request. Overridden by ids seen at runtime.
+export const DEFAULT_MODEL_IDS: Record<Tier, string> = {
+  haiku: 'claude-haiku-5-5',
+  sonnet: 'claude-sonnet-5-5',
+  opus: 'claude-opus-5-5',
+}
+
+export type ObservedModels = Partial<Record<Tier, string>>
+
+// Remembers a resolved full id (never a bare alias such as "sonnet") under its tier.
+export function rememberModel(seen: ObservedModels, model: string | undefined): ObservedModels {
+  const m = (model ?? '').trim()
+  if (!m.toLowerCase().startsWith('claude-')) return seen
+  return { ...seen, [tierOf(m)]: m }
+}
+
+// Full model id to send for a tier: the one observed in this session, else the default.
+export function resolveModelId(seen: ObservedModels, tier: Tier): string {
+  return seen[tier] ?? DEFAULT_MODEL_IDS[tier]
+}
+
 export function nextTier(t: Tier): Tier {
   const i = LADDER.indexOf(t)
   return LADDER[Math.min(i + 1, LADDER.length - 1)]!
