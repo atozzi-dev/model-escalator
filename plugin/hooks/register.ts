@@ -1,4 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
+import { newTag, tagNote, withAnnouncement } from './channel'
 import { dossier, newAgent, observe, rememberModel, resolveModelId, tierOf, type Action, type AgentState, type ObservedModels, type Tier } from './detector'
 import { categorize, recommend, record, type Stats } from './learning'
 import { addConsult, addIntervention, addStep, emptyLedger, report, statusLine, type Ledger, type Usage } from './savings'
@@ -24,7 +25,13 @@ let baselinePinned = false
 let seenModels: ObservedModels = {}
 
 // Restores the module state to its defaults. Used by tests so each one starts clean.
-export function resetState(): void {
+// Per-session tag that authenticates our notes; fixedTag is set only by tests.
+let sessionTag = newTag()
+let fixedTag: string | undefined
+
+export function resetState(tag?: string): void {
+  fixedTag = tag
+  sessionTag = tag ?? newTag()
   agents.clear()
   ledger = emptyLedger()
   baseline = 'opus'
@@ -54,6 +61,7 @@ export function readMode(v: string | undefined): Mode {
 export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     try {
+      sessionTag = fixedTag ?? newTag()
       mode = readMode(await $.env.get('MODEL_ESCALATOR_MODE'))
       const b = await $.env.get('MODEL_ESCALATOR_BASELINE')
       baselinePinned = Boolean(b)
@@ -93,6 +101,9 @@ export const register: Register = (on) => {
         await $.ui.log(`${category}: ${asked} -> ${best}${mode === 'observe' ? ' (would)' : ''}`)
       }
     } catch { /* never block a spawn on our own failure */ }
+    try {
+      if (mode === 'active') ev = { ...ev, prompt: withAnnouncement(ev.prompt, sessionTag) }
+    } catch { /* keep the original prompt */ }
     const r = await next(ev)
     if (r.agentId) agents.set(r.agentId, newAgent(r.agentId, category, r.model, e.prompt))
     return r
@@ -169,12 +180,14 @@ export const register: Register = (on) => {
 
 type ModelReply = string | { isAnswered: true; text: string; usage?: { output_tokens?: number } } | { isAnswered: false; reason?: string; status?: number | null; error?: string; usage?: { output_tokens?: number } }
 
+const tag = (text: string): string => tagNote(sessionTag, text)
+
 async function act($: EngineInterface, s: AgentState, action: Action): Promise<string> {
   await $.ui.log(`${s.id} (${s.category}): ${action}`)
   switch (action) {
     case 'nudge':
-      return '[supervisor] You are repeating the same failing step. Stop, re-read the last error in full, ' +
-        'state one new hypothesis, and try a different approach.'
+      return tag('You are repeating the same failing step. Stop, re-read the last error in full, ' +
+        'state one new hypothesis, and try a different approach.')
     case 'consult': {
       const prompt = dossier(s)
       // The engine answers { isAnswered, text, usage }; the published 2.1.277 types (used by CI)
@@ -189,15 +202,16 @@ async function act($: EngineInterface, s: AgentState, action: Action): Promise<s
         } catch { /* diagnostics only */ }
       }
       ledger = addConsult(ledger, prompt.length + SENIOR_SYSTEM.length, advice.length, tierOf(SENIOR))
-      if (!advice) return '[supervisor] Still stuck. List three different hypotheses and test the cheapest one first.'
-      return `[supervisor] Advice from a senior model:\n${advice}`
+      if (!advice) return tag('Still stuck. List three different hypotheses and test the cheapest one first.')
+      return tag(`Advice from a senior model:
+${advice}`)
     }
     case 'swap':
       await $.ui.toast(`${s.category}: switched to ${s.tier}`)
-      return `[supervisor] From your next step you run on a stronger model (${s.tier}). Re-assess the problem from scratch.`
+      return tag(`From your next step you run on a stronger model (${s.tier}). Re-assess the problem from scratch.`)
     case 'human':
       await $.ui.toast(`${s.category}: needs a human`)
       await $.ui.status(`stuck: ${s.category} (${s.id})`)
-      return '[supervisor] Stop now. Summarize what you tried and what blocks you, and end your turn so a human can step in.'
+      return tag('Stop now. Summarize what you tried and what blocks you, and end your turn so a human can step in.')
   }
 }
