@@ -17,6 +17,8 @@ export type Config = {
   verifyCommand: string             // optional check run at the end of each tracked agent's run; empty = off
   verifyTimeoutSeconds: number      // how long the check may run before it counts as failed (at most 600)
   oscillationEdits: number          // edits of one file tolerated since the last progress; each further edit adds to the score
+  idleSteps: number                 // model requests tolerated without progress
+  idleWeight: number                // score added by each model request past idleSteps
 }
 
 // USD per million tokens, Anthropic API list prices (Oct 2026), checked against /cost.
@@ -42,6 +44,8 @@ export const DEFAULT_CONFIG: Config = {
   prices: DEFAULT_PRICES,
   prudentTokenRatio: 0.65,
   oscillationEdits: 3,
+  idleSteps: 20,
+  idleWeight: 0.5,
   verifyCommand: '',
   verifyTimeoutSeconds: 120,
   modelIds: { haiku: 'claude-haiku-5-5', sonnet: 'claude-sonnet-5-5', opus: 'claude-opus-5-5' },
@@ -135,6 +139,8 @@ export function parseConfig(raw: Raw | undefined): Config {
     const ratio = num(o.prudentTokenRatio)
     const grace = num(o.graceSteps)
     const osc = num(o.oscillationEdits)
+    const idle = num(o.idleSteps)
+    const idleW = num(o.idleWeight)
     const vt = num(o.verifyTimeoutSeconds)
     const vc = typeof o.verifyCommand === 'string' ? o.verifyCommand.trim() : ''
     const senior = typeof o.seniorModel === 'string' ? o.seniorModel.trim() : ''
@@ -146,6 +152,8 @@ export function parseConfig(raw: Raw | undefined): Config {
         opus: positive(o.thresholdOpus, d.threshold.opus),
       },
       oscillationEdits: osc !== undefined && osc >= 1 ? Math.floor(osc) : d.oscillationEdits,
+      idleSteps: idle !== undefined && idle >= 1 ? Math.floor(idle) : d.idleSteps,
+      idleWeight: idleW !== undefined && idleW >= 0 ? idleW : d.idleWeight,
       verifyCommand: vc.length <= 1000 ? vc : d.verifyCommand,
       verifyTimeoutSeconds: vt !== undefined && vt > 0 ? Math.min(vt, 600) : d.verifyTimeoutSeconds,
       grace: grace !== undefined && grace >= 0 ? Math.floor(grace) : d.grace,

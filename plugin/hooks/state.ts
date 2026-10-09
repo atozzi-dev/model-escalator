@@ -24,7 +24,10 @@ export function parseSnapshot(v: unknown): Snapshot | undefined {
   if (typeof v.sessionTag !== 'string' || !MODES.includes(v.mode as string) || !TIERS.includes(v.baseline as string)) return undefined
   if (typeof v.baselinePinned !== 'boolean') return undefined
   if (!v.agents.every((a) => isObj(a) && typeof a.id === 'string')) return undefined
-  // Snapshots saved before edit counts existed have no such field on their agents.
-  const agents = v.agents.map((a: Record<string, unknown>) => (isObj(a.editCounts) ? a : { ...a, editCounts: {} }))
+  // Snapshots saved before edit counts or the request counter existed have no such fields on their agents.
+  const agents = v.agents.map((a: Record<string, unknown>) => {
+    const withEdits = isObj(a.editCounts) ? a : { ...a, editCounts: {} }
+    return typeof a.stepsSinceProgress === 'number' ? withEdits : { ...withEdits, stepsSinceProgress: 0 }
+  })
   return { ...v, agents } as unknown as Snapshot
 }

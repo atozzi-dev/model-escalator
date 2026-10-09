@@ -13,6 +13,7 @@ declare module 'claude-code' {
           score: number
           level: number
           stepsSinceAction: number
+          stepsSinceProgress: number
           errorCounts: Record<string, number>
           editCounts: Record<string, number>
           lastFailing?: number

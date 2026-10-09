@@ -1,7 +1,7 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config'
-import { dossier, escalated, newAgent, observe, rememberModel, resolveModelId, tierOf, type Action, type AgentState, type ObservedModels, type Tier } from './detector'
+import { countStep, dossier, escalated, newAgent, observe, rememberModel, resolveModelId, tierOf, type Action, type AgentState, type ObservedModels, type Tier } from './detector'
 import { categorize, recommend, record, type Stats } from './learning'
 import { createQueue } from './queue'
 import { parseSnapshot, type Snapshot } from './state'
@@ -25,7 +25,7 @@ const storeQueue = createQueue()
 const verifyQueue = createQueue()
 // True once the "could not run" toast was shown in this session.
 let unavailableToasted = false
-const pendingVerifications =new Set<Promise<void>>()
+const pendingVerifications = new Set<Promise<void>>()
 
 // Resolves once every verification started so far has recorded its outcome. Used by session.end.
 async function flushVerifications(): Promise<void> {
@@ -220,6 +220,11 @@ export const register: Register = (on, options) => {
     const swap = mode === 'active' && a !== undefined && a.tier !== a.startTier
     const r = yield* next(swap ? { ...e, model: resolveModelId(seenModels, a!.tier, config.modelIds) } : e)
     seenModels = rememberModel(seenModels, r.usage?.model)
+    // Idle requests count only where a score is acted on: active, and observe (which measures it).
+    try {
+      const counted = e.agentId ? agents.get(e.agentId) : undefined
+      if (e.agentId && counted && (mode === 'active' || mode === 'observe')) agents.set(e.agentId, countStep(counted, config))
+    } catch { /* the stream must go on */ }
     if (mode !== 'off' && r.usage) {
       ledger = addStep(ledger, r.usage as Usage, tierOf(r.usage.model), baseline, Boolean(e.agentId), config)
     }
@@ -278,7 +283,8 @@ export const register: Register = (on, options) => {
 async function recordOutcome($: EngineInterface, a: AgentState, wasEscalated: boolean, verifyFailed: boolean): Promise<void> {
   await storeQueue(async () => {
     const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
-    await $.store.set(STATS_KEY, record(stats, a.category, a.startTier, wasEscalated, 0, verifyFailed))  })
+    await $.store.set(STATS_KEY, record(stats, a.category, a.startTier, wasEscalated, 0, verifyFailed))
+  })
 }
 
 // Last lines of a command's output, kept short: it goes to the lead's log, never back to the agent.

@@ -17,6 +17,7 @@ export type AgentState = {
   score: number
   level: number
   stepsSinceAction: number
+  stepsSinceProgress: number            // model requests since the last progress; past the idle allowance each adds to the score
   errorCounts: Record<string, number>
   editCounts: Record<string, number>   // edits per normalised file path since the last progress
   lastFailing?: number
@@ -56,7 +57,7 @@ export function nextTier(t: Tier): Tier {
 export function newAgent(id: string, category: string, model: string | undefined, task: string): AgentState {
   const t = tierOf(model)
   return { id, category, task: task.slice(0, 2000), startTier: t, tier: t, score: 0, level: 0,
-    stepsSinceAction: 0, errorCounts: {}, editCounts: {}, log: [], tokens: 0 }
+    stepsSinceAction: 0, stepsSinceProgress: 0, errorCounts: {}, editCounts: {}, log: [], tokens: 0 }
 }
 
 // Strips what changes between identical failures: numbers, paths, hex ids, spacing.
@@ -142,6 +143,7 @@ export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT
 
   if (progress) {
     s.score = 0
+    s.stepsSinceProgress = 0
     s.errorCounts = {}
     s.editCounts = {}
     return { state: s }
@@ -157,6 +159,14 @@ export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT
     return { state: s, action }
   }
   return { state: s }
+}
+
+// One model request of a tracked agent. Requests beyond the idle allowance without progress add to the score,
+// so an agent that keeps working without ever producing a result climbs the ladder too.
+export function countStep(prev: AgentState, cfg: Config = DEFAULT_CONFIG): AgentState {
+  const s: AgentState = { ...prev, stepsSinceProgress: prev.stepsSinceProgress + 1 }
+  if (s.stepsSinceProgress > cfg.idleSteps) s.score += cfg.idleWeight
+  return s
 }
 
 // True once an agent got past the swap level (or past the last one when swap is disabled).
