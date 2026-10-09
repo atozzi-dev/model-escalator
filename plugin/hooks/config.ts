@@ -10,6 +10,7 @@ export type Config = {
   grace: number                     // steps to wait between two interventions
   logSize: number                   // attempts kept in the dossier
   senior: string                    // model asked for advice at the consult level
+  maxTier: Tier                     // highest tier a swap may reach (never above opus)
   levels: readonly Action[]         // enabled ladder levels, in escalation order
   prices: Record<Tier, Price>       // USD per million tokens
   prudentTokenRatio: number         // fraction of tokens the baseline model would need
@@ -42,6 +43,7 @@ export const DEFAULT_CONFIG: Config = {
   logSize: 12,
   senior: 'opus',
   levels: ALL_LEVELS,
+  maxTier: 'opus',
   prices: DEFAULT_PRICES,
   prudentTokenRatio: 0.65,
   oscillationEdits: 3,
@@ -72,6 +74,11 @@ function parseLevels(v: unknown, fallback: readonly Action[]): readonly Action[]
   const names = v.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
   if (names.length === 0 || names.some((n) => !ALL_LEVELS.includes(n as Action))) return fallback
   return ALL_LEVELS.filter((l) => names.includes(l))
+}
+
+function parseMaxTier(v: unknown, fallback: Tier): Tier {
+  const t = typeof v === 'string' ? v.trim().toLowerCase() : ''
+  return t === 'haiku' || t === 'sonnet' || t === 'opus' ? t : fallback
 }
 
 const RATE_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite5m', 'cacheWrite1h'] as const
@@ -164,6 +171,7 @@ export function parseConfig(raw: Raw | undefined): Config {
       grace: grace !== undefined && grace >= 0 ? Math.floor(grace) : d.grace,
       senior: senior !== '' && senior.length <= 100 ? senior : d.senior,
       levels: parseLevels(o.levels, d.levels),
+      maxTier: parseMaxTier(o.maxTier, d.maxTier),
       prices: parsePrices(o.prices, d.prices),
       prudentTokenRatio: ratio !== undefined && ratio > 0 && ratio <= 1 ? ratio : d.prudentTokenRatio,
     }

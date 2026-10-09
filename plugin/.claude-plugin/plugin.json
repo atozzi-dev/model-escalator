@@ -67,6 +67,12 @@
       "description": "Comma-separated escalation levels, from: nudge, consult, swap, human. Disabled levels are skipped.",
       "default": "nudge,consult,swap,human"
     },
+    "maxTier": {
+      "type": "string",
+      "title": "Highest swap tier",
+      "description": "Highest model tier an agent may be swapped up to: haiku, sonnet or opus. Agents already at this tier skip the swap level. Never above opus.",
+      "default": "opus"
+    },
     "prudentTokenRatio": {
       "type": "number",
       "title": "Prudent token ratio",

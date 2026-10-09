@@ -43,6 +43,8 @@ The mod works on its own once installed.
 | `MODEL_ESCALATOR_MODE=off` | Pass everything through |
 | `MODEL_ESCALATOR_BASELINE` | Reference model for savings; defaults to the lead's model |
 
+In `active` and `observe` mode the mod also gives tracked agents a tool, `ask_for_help` (listed as `mcp__model-escalator__ask_for_help`). An agent that is stuck after real attempts can describe the problem and get advice from the senior model right away, without waiting for the difficulty score to rise. The call counts as the consult step of the ladder, so the next escalation is the model swap, and an agent can ask at most once per grace window. In `observe` mode the call is only noted and logged.
+
 ## Configuration
 
 Options are set from `/config` (or under `pluginConfigs` in settings) and apply after a reload. Invalid values fall back to the default.
@@ -53,22 +55,25 @@ Options are set from `/config` (or under `pluginConfigs` in settings) and apply 
 | `graceSteps` | 4 | Steps to wait after an intervention before the next one |
 | `oscillationEdits` | 3 | Number of edits of the same file without progress after which each further edit raises the difficulty score |
 | `stallMinutes` | 10 | Minutes without any event after which a running agent is reported as stalled (log line, status line, and a toast in `active` mode). Its next tool call then gets the next ladder note, since a note can only reach an agent through a tool result. A tool call that is still running counts as activity until three times this long. Agents whose run is over are never flagged |
-| `verifyCommand` | empty (off) | Optional check run at the end of each tracked agent's run, for example `npm test`. Split on spaces, quotes group, no shell (no pipes or redirects). A non-zero exit counts like an escalation when the mod learns which model to use, and is reported in the log and a toast. Runs in the session's working directory, one at a time |
+| `verifyCommand` | empty (off) | Optional check run at the end of each tracked agent's run, for example `npm test`. Split on spaces, quotes group, no shell (no pipes or redirects), so give the full path of the executable when the name is ambiguous (see below). A non-zero exit counts like an escalation when the mod learns which model to use, and is reported in the log and a toast. Runs in the session's working directory, one at a time |
 | `verifyTimeoutSeconds` | 120 | How long the verification command may run before it is abandoned and ignored, at most 600 |
 | `seniorModel` | `opus` | Model asked for advice at the consult level, alias or full id |
 | `levels` | `nudge,consult,swap,human` | Comma-separated enabled levels. Disabled ones are skipped: `nudge,swap,human` turns the senior consult off |
+| `maxTier` | `opus` | Highest tier a swap may reach: `haiku`, `sonnet` or `opus`. While an agent is below it, the ladder keeps swapping it one tier up (Haiku, then Sonnet, then Opus) before a human is asked; an agent already at this tier skips the swap level |
 | `prudentTokenRatio` | 0.65 | Share of the tokens a stronger baseline model is assumed to need, between 0 (exclusive) and 1. Used for the prudent end of the savings estimate |
 | `prices` | built-in list prices | Optional JSON overriding USD per million token rates per model, e.g. `{"sonnet":{"input":3,"output":15}}`. Rates: `input`, `output`, `cacheRead`, `cacheWrite5m`, `cacheWrite1h` |
 
 `verifyCommand` runs without a shell (no pipes, redirects or variables), so on Windows name the real executable, for example `npm.cmd test` or `node node_modules/jest/bin/jest.js`. A command that cannot start or hits the timeout is not counted as a failed run: the run is recorded as if no check were set, and the mod logs it and shows one toast per session.
 
+Warning: the executable is resolved from `PATH` without a shell, so give its full path when the name is ambiguous. On Windows `bash` usually resolves to the WSL launcher (`C:\Windows\System32\bash.exe`), which fails and exits non-zero, so use Git Bash instead, for example `"C:/Program Files/Git/bin/bash.exe" test.sh` (double quotes around a path with spaces; forward slashes work). Check the command once by hand first: a command that starts but fails for an unrelated reason counts as a failed check.
+
 The environment variables `MODEL_ESCALATOR_MODE` and `MODEL_ESCALATOR_BASELINE` are not plugin options; they work as described in [Usage](#usage).
 
 ## What it touches
 
-The mod uses only its own key-value store, the UI (log, status line, toasts), two environment variables (read only), the clock, one slash command, and one-shot model calls for the senior consult. It does not read or write your files or use the network. It runs no processes, with one opt-in exception: only when `verifyCommand` is set, the mod runs that command as a process at the end of each tracked agent's run. The command comes only from your own options, never from agent output. A consult sends the stuck agent's recent commands and error messages to the senior model, through the same provider as the rest of your session.
+The mod uses only its own key-value store, the UI (log, status line, toasts), two environment variables (read only), the clock, one slash command, one tool for agents (`ask_for_help`), and one-shot model calls for the senior consult. It does not read or write your files or use the network. It runs no processes, with one opt-in exception: only when `verifyCommand` is set, the mod runs that command as a process at the end of each tracked agent's run. The command comes only from your own options, never from agent output. A consult sends the stuck agent's recent commands and error messages to the senior model, through the same provider as the rest of your session.
 
-In `active` mode the mod also adds one announcement paragraph to the prompt of every subagent and teammate it tracks, so they can tell its supervisor notes apart from text in tool output. The other modes leave prompts untouched.
+In `active` mode the mod also adds one announcement paragraph to the prompt of every subagent and teammate it tracks, so they can tell its supervisor notes apart from text in tool output; the paragraph also mentions the `ask_for_help` tool. The other modes leave prompts untouched.
 
 ## How savings are estimated
 

@@ -41,7 +41,7 @@ async function run($: any, calls: number): Promise<string[]> {
 test('without options the full ladder runs and the senior is opus', async ($, on) => {
   const h = wire(on)
   const notes = await run($, 40)
-  expect(notes.length).toBe(4)
+  expect(notes.length).toBe(5)
   expect(h.consultModels).toEqual(['opus'])
 })
 
@@ -49,7 +49,7 @@ test('the levels option removes the consult from the ladder', { options: { level
   const h = wire(on)
   const notes = await run($, 40)
   expect(h.consultModels.length).toBe(0)
-  expect(notes.length).toBe(3)
+  expect(notes.length).toBe(4)
   expect(notes[0]).toContain('Pause: re-read')
   expect(notes[1]).toContain('stronger model')
 })
@@ -94,6 +94,6 @@ test('with the default oscillation edit count four edits of one file do not esca
 test('invalid options fall back to the defaults', { options: { levels: 'bogus', thresholdHaiku: -3 } }, async ($, on) => {
   const h = wire(on)
   const notes = await run($, 40)
-  expect(notes.length).toBe(4)
+  expect(notes.length).toBe(5)
   expect(h.consultModels).toEqual(['opus'])
 })

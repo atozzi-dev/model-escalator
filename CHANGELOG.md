@@ -12,14 +12,18 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Optional `verifyCommand` and `verifyTimeoutSeconds` options: the mod runs your check (for example a test command) at the end of each tracked agent's run, and a failed check counts against that model for that kind of task when learning. A check that cannot start or times out is not counted against the model.
 - Agents that keep making model requests without any progress now climb the escalation ladder too, after a generous number of requests.
 - Agents that go silent for `stallMinutes` (default 10) are reported in the log, the status line and a toast, and get a note on their next tool call; a tool call still running counts as activity for three times that window.
+- `ask_for_help` tool: a tracked agent that is stuck can ask for the senior consult directly, once per grace window; in observe mode the request is only logged.
 
 ### Changed
 
+- The escalation ladder keeps swapping an agent one model up (Haiku, then Sonnet, then Opus) before asking a human. The new `maxTier` option (default `opus`) caps how high a swap may go.
 - Fork subagents keep their model and prompt and are no longer tracked, nudged or escalated.
 - The nudge note now reads "You are not making progress...", so it fits repeated failures, idle loops and stalls alike.
 
 ### Fixed
 
+- A slow command that is still running and then succeeds no longer earns the agent a "not making progress" note; the stall is only reported to the lead.
+- Agents already on the top model no longer get a swap step or a false "you run on a stronger model" note.
 - Learned statistics no longer lose updates when several agents finish at the same time: all store writes go through a single queue.
 - `MODEL_ESCALATOR_BASELINE` now stays the reference model instead of being overwritten by the lead's model on every request.
 - Hot model swap now sends a full model id (the one seen in the session, else the current default) instead of the bare alias, which the API rejected with a 404.

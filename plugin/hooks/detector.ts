@@ -28,6 +28,7 @@ export type AgentState = {
   inFlight?: number                     // tool calls started and not yet finished
   running?: boolean                     // true from the first event of a run until turn.complete
   stalled?: boolean                     // already flagged as silent; cleared by any event
+  helped?: boolean                      // asked for help through the tool at least once
 }
 
 export function tierOf(model: string | undefined): Tier {
@@ -53,6 +54,8 @@ export function rememberModel(seen: ObservedModels, model: string | undefined): 
 export function resolveModelId(seen: ObservedModels, tier: Tier, ids: Record<Tier, string> = DEFAULT_CONFIG.modelIds): string {
   return seen[tier] ?? ids[tier]
 }
+
+export const tierRank = (t: Tier): number => LADDER.indexOf(t)
 
 export function nextTier(t: Tier): Tier {
   const i = LADDER.indexOf(t)
@@ -90,6 +93,21 @@ export function normalizePath(p: string): string {
   const t = p.trim()
   const f = t.replace(/\\/g, '/')
   return f !== t || /^[a-z]:\//i.test(f) ? f.toLowerCase() : f
+}
+
+// The action due at the current level, moving s.level past it. While the agent runs below `maxTier`,
+// the ladder keeps swapping one tier up instead of moving past the swap level. A swap that cannot happen
+// (swap disabled, or the agent already at `maxTier`) is skipped, and the next enabled level acts in its place.
+function nextAction(s: AgentState, cfg: Config): Action | undefined {
+  const swapAt = cfg.levels.indexOf('swap')
+  const canSwap = swapAt >= 0 && tierRank(s.tier) < tierRank(cfg.maxTier)
+  if (canSwap && s.level > swapAt) return 'swap'            // level stays just past the swap
+  while (s.level < cfg.levels.length) {
+    const action = cfg.levels[s.level]!
+    s.level++
+    if (action !== 'swap' || canSwap) return action
+  }
+  return undefined
 }
 
 export type Observation = { tool: string; ok: boolean; text: string; summary: string }
@@ -155,13 +173,14 @@ export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT
   }
 
   const due = s.level === 0 || s.stepsSinceAction >= cfg.grace
-  if (s.score >= cfg.threshold[s.tier] && due && s.level < cfg.levels.length) {
-    const action = cfg.levels[s.level]!
-    s.level++
-    s.score = 0
-    s.stepsSinceAction = 0
-    if (action === 'swap') s.tier = nextTier(s.tier)
-    return { state: s, action }
+  if (s.score >= cfg.threshold[s.tier] && due) {
+    const action = nextAction(s, cfg)
+    if (action) {
+      s.score = 0
+      s.stepsSinceAction = 0
+      if (action === 'swap') s.tier = nextTier(s.tier)
+      return { state: s, action }
+    }
   }
   return { state: s }
 }
@@ -200,12 +219,28 @@ export function isSilent(s: AgentState, now: number, cfg: Config = DEFAULT_CONFI
   return silent > window ? silent : undefined
 }
 
-// Flags the agent and raises its score to its threshold, so its next tool call earns the next ladder note.
+// Flags the agent. A silent agent with no tool call running also gets its score raised to its threshold, so its
+// next tool call earns the next ladder note. With a tool call in flight the command may simply be slow: only
+// flag it (the lead is notified); if the command fails, the usual error signals take over.
 export function markStall(s: AgentState, cfg: Config = DEFAULT_CONFIG): AgentState {
+  if ((s.inFlight ?? 0) > 0) return { ...s, stalled: true }
   return { ...s, stalled: true, score: Math.max(s.score, cfg.threshold[s.tier]) }
 }
 
-// True once an agent got past the swap level (or past the last one when swap is disabled).
+// An agent may ask for help once per grace window: after a help call (or any intervention) it waits
+// for `grace` more tool calls.
+export function canAskForHelp(s: AgentState, cfg: Config = DEFAULT_CONFIG): boolean {
+  return !s.helped || s.stepsSinceAction >= cfg.grace
+}
+
+// A help call jumps straight to the senior consult: the ladder continues after it (never moves back),
+// the score restarts and a fresh grace window begins.
+export function afterHelp(s: AgentState, cfg: Config = DEFAULT_CONFIG): AgentState {
+  const i = cfg.levels.indexOf('consult')
+  return { ...s, helped: true, level: i >= 0 ? Math.max(s.level, i + 1) : s.level, score: 0, stepsSinceAction: 0 }
+}
+
+// True once an agent got past the swap level (it swapped at least once, or had none to make) (or past the last one when swap is disabled).
 export function escalated(s: AgentState, levels: readonly Action[]): boolean {
   const i = levels.indexOf('swap')
   return i >= 0 ? s.level > i : s.level >= levels.length

@@ -20,9 +20,9 @@ test('reads failing test counts', async () => {
 })
 
 test('a repeated error climbs the ladder, one level per grace window', async () => {
-  const { s, actions } = run(newAgent('a1', 'x', 'haiku', 'fix'), 20, 'TypeError: x is undefined at line 7')
-  expect(actions.filter(Boolean)).toEqual(['nudge', 'consult', 'swap', 'human'])
-  expect(s.tier).toBe('sonnet')
+  const { s, actions } = run(newAgent('a1', 'x', 'haiku', 'fix'), 40, 'TypeError: x is undefined at line 7')
+  expect(actions.filter(Boolean)).toEqual(['nudge', 'consult', 'swap', 'swap', 'human'])
+  expect(s.tier).toBe('opus')
   expect(s.level).toBe(4)
 })
 
@@ -80,15 +80,15 @@ test('a custom threshold and grace window change when the ladder moves', async (
   const custom = runWith(newAgent('a', 'x', 'haiku', 't'), 8, 'boom 1', cfg).actions
   const def = run(newAgent('b', 'x', 'haiku', 't'), 8, 'boom 1').actions
   expect(custom.findIndex(Boolean)).toBeLessThan(def.findIndex(Boolean))
-  expect(custom.filter(Boolean)).toEqual(['nudge', 'consult', 'swap', 'human'])
-  expect(def.filter(Boolean).length).toBeLessThan(4)
+  expect(custom.filter(Boolean)).toEqual(['nudge', 'consult', 'swap', 'swap', 'human'])
+  expect(def.filter(Boolean).length).toBeLessThan(5)
 })
 
 test('a disabled level is skipped by the ladder', async () => {
   const cfg = { ...DEFAULT_CONFIG, levels: ['nudge', 'swap'] as const }
   const { s, actions } = runWith(newAgent('a', 'x', 'haiku', 't'), 30, 'TypeError: x is undefined', cfg)
-  expect(actions.filter(Boolean)).toEqual(['nudge', 'swap'])
-  expect(s.tier).toBe('sonnet')
+  expect(actions.filter(Boolean)).toEqual(['nudge', 'swap', 'swap'])
+  expect(s.tier).toBe('opus')
   expect(escalated(s, cfg.levels)).toBe(true)
   expect(escalated({ ...s, level: 1 }, cfg.levels)).toBe(false)
   expect(escalated({ ...s, level: 3 }, DEFAULT_CONFIG.levels)).toBe(true)
