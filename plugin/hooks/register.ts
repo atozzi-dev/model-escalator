@@ -1,7 +1,7 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config'
-import { afterHelp, canAskForHelp, countStep, escalated, isSilent, markStall, newAgent, observe, otherSenior, rememberModel, resolveModelId, skipGrace, tierOf, toolEnd, toolStart, touch, type Action, type AgentState, type ObservedModels, type Tier } from './detector'
+import { afterHelp, canAskForHelp, consultLimit, countStep, escalated, isSilent, markStall, newAgent, observe, otherSenior, rememberModel, resolveModelId, skipGrace, tierOf, toolEnd, toolStart, touch, type Action, type AgentState, type ObservedModels, type Tier } from './detector'
 import { buildDossier, inputFromState } from './dossier'
 import { categorize, recommend, record, type Stats } from './learning'
 import { createQueue } from './queue'
@@ -35,6 +35,8 @@ async function flushVerifications(): Promise<void> {
 }
 
 const agents = new Map<string, AgentState>()
+// Agents for which a consult limit was already logged (one line per agent).
+const limitNoted = new Set<string>()
 let ledger: Ledger = emptyLedger()
 let baseline: Tier = 'opus'
 let mode: Mode = 'active'
@@ -66,10 +68,28 @@ function mark(id: string | undefined, now: number | undefined, f: typeof touch =
 
 const watching = (): boolean => mode === 'active' || mode === 'observe'
 
+// Senior consults of the whole session. Agents never leave the map, so the sum over agents is the total.
+function sessionConsults(): number {
+  let n = 0
+  for (const a of agents.values()) n += a.consults ?? 0
+  return n
+}
+
+// The limit that closes consults for this agent right now, if any.
+const limitFor = (a: AgentState): string | undefined => consultLimit(a, sessionConsults(), ledger.consultCost, config)
+
+// Logs once per agent that a limit stopped a consult. Diagnostics only: never throws.
+async function noteLimit($: EngineInterface, id: string, category: string, limit: string): Promise<void> {
+  if (limitNoted.has(id)) return
+  limitNoted.add(id)
+  try { await $.ui.log(`${id} (${category}): consult limit reached: ${limit}`) } catch { /* the note is best effort */ }
+}
+
 // Restores the module state to its defaults. Used by tests so each one starts clean.
 export function resetState(): void {
   sessionTag = newTag()
   agents.clear()
+  limitNoted.clear()
   ledger = emptyLedger()
   baseline = 'opus'
   baselinePinned = false
@@ -258,9 +278,11 @@ export const register: Register = (on, options) => {
     const a = id ? agents.get(id) : undefined
     if (!id || !a || r.deny !== undefined) return r
     try {
-      const { state, action } = observe(a, {
+      const limit = limitFor(a)
+      const { state, action, consultSkipped } = observe(a, {
         tool: e.tool, ok: r.isError !== true, text: textOf(r), summary: summarize(e as unknown as Record<string, unknown>),
-      }, config)
+      }, config, limit === undefined)
+      if (consultSkipped && limit) await noteLimit($, id, state.category, limit)
       if (!action) { agents.set(id, state); await save($); return r }
       ledger = addIntervention(ledger, action)
       if (mode === 'observe') {
@@ -466,6 +488,9 @@ async function gitDiffStat($: EngineInterface): Promise<string> {
 // account of the problem (help tool), shown to the senior as the agent notes. Falls back to a generic
 // note without advice.
 async function consult($: EngineInterface, s: AgentState, extra = ''): Promise<string> {
+  // One consult action, counted before the calls so a refused call and its retry make one.
+  const counted = agents.get(s.id)
+  if (counted) agents.set(s.id, { ...counted, consults: (counted.consults ?? 0) + 1 })
   const diffStat = await gitDiffStat($)
   let advice = await askSenior($, config.senior, buildDossier(inputFromState(s, { diffStat, extra })))
   if (!advice) {
@@ -523,6 +548,12 @@ async function handleHelp($: EngineInterface, input: Record<string, unknown>, id
       return 'Request noted.'
     }
     if (!canAskForHelp(a, config)) return tag('You already consulted a senior model a moment ago: try that advice first.')
+    const limit = limitFor(a)
+    if (limit) {
+      await noteLimit($, id, a.category, limit)
+      return tag(`No further senior consult is available for you (${limit}). Do not ask for help again: try a different approach, ` +
+        'make one small change you can check, or stop and summarize what you tried.')
+    }
     // Count the call and move the ladder before the (slow) model call, so a second call cannot slip in.
     agents.set(id, afterHelp(a, config))
     ledger = addIntervention(ledger, 'ask')

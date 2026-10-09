@@ -60,6 +60,9 @@ Options are set from `/config` (or under `pluginConfigs` in settings) and apply 
 | `seniorModel` | `opus` | Model asked for advice at the consult level, alias or full id |
 | `levels` | `nudge,consult,swap,human` | Comma-separated enabled levels. Disabled ones are skipped: `nudge,swap,human` turns the senior consult off |
 | `maxTier` | `opus` | Highest tier a swap may reach: `haiku`, `sonnet` or `opus`. While an agent is below it, the ladder keeps swapping it one tier up (Haiku, then Sonnet, then Opus) before a human is asked; an agent already at this tier skips the swap level |
+| `maxConsultsPerAgent` | 3 | Senior consults one agent may get. A refused call and its retry count as one consult. Once reached, the ladder skips the consult level (the next enabled level acts at the same trigger) and `ask_for_help` answers that no further consult is available. `0` allows none |
+| `maxConsultsPerSession` | 20 | Senior consults across all agents of the session, counted the same way. `0` allows none |
+| `consultBudgetUsd` | 0 | Dollars the senior calls may cost in the session, retried calls included, from the same prices as the savings report. Once reached, no further consult. `0` means no dollar limit |
 | `prudentTokenRatio` | 0.65 | Share of the tokens a stronger baseline model is assumed to need, between 0 (exclusive) and 1. Used for the prudent end of the savings estimate |
 | `prices` | built-in list prices | Optional JSON overriding USD per million token rates per model, e.g. `{"sonnet":{"input":3,"output":15}}`. Rates: `input`, `output`, `cacheRead`, `cacheWrite5m`, `cacheWrite1h` |
 

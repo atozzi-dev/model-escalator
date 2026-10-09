@@ -35,6 +35,8 @@ export function parseSnapshot(v: unknown): Snapshot | undefined {
     if (typeof a.running !== 'boolean') delete live.running
     if (typeof a.stalled !== 'boolean') delete live.stalled
     if (typeof a.helped !== 'boolean') delete live.helped
+    // Senior consults of the agent: a whole, non-negative count; anything else is dropped (counts as none).
+    if (typeof a.consults !== 'number' || !Number.isInteger(a.consults) || a.consults < 0) delete live.consults
     // The ring of full error texts: kept only as an array of strings, and cut to its bounds.
     if (Array.isArray(a.recentErrors) && a.recentErrors.every((e) => typeof e === 'string')) {
       live.recentErrors = (a.recentErrors as string[]).slice(-MAX_RECENT_ERRORS).map((e) => e.slice(0, MAX_ERROR_TEXT))
