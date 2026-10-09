@@ -6,7 +6,7 @@ const drain = async (st: Drainable) => { for await (const _ of st) { /* chunks *
 
 type Harness = { consultModels: string[]; stepModels: string[] }
 
-function wire(on: any): Harness {
+function wire(on: any, toolResult: Record<string, unknown> = { isError: true, result: 'Error: boom', text: 'Error: boom' }): Harness {
   resetState()
   mock.env(on, {})
   mock.store(on)
@@ -14,7 +14,7 @@ function wire(on: any): Harness {
   on('command.register', () => ({ value: undefined }) as never)
   const h: Harness = { consultModels: [], stepModels: [] }
   on('agent.spawn', (_$: unknown, e: any) => ({ model: e.model ?? 'haiku', agentId: 'a1' }))
-  on('tool.call', () => ({ isError: true, result: 'Error: boom', text: 'Error: boom' }) as never)
+  on('tool.call', () => toolResult as never)
   on('model.complete', (_$: unknown, e: any) => { h.consultModels.push(e.model); return { value: { isAnswered: true, text: 'advice' } } as never })
   on('turn.complete', () => ({ text: 'done' }) as never)
   on('turn.step', async function* (_$: unknown, e: any) {
@@ -68,6 +68,27 @@ test('a lower threshold makes the first intervention come earlier', { options: {
 test('with the default threshold two failures do not intervene yet', async ($, on) => {
   wire(on)
   expect((await run($, 2)).length).toBe(0)
+})
+
+async function editSame($: any, count: number, file: string): Promise<string[]> {
+  await $.session.start({ cwd: '/work' } as never)
+  const r = await $.agent.spawn({ prompt: 'p', description: 'fix db test', subagentType: 'general-purpose', model: 'haiku' } as never) as { agentId: string }
+  const notes: string[] = []
+  for (let i = 0; i < count; i++) {
+    const t = await $.tool.call({ tool: 'Edit', file_path: file, agentId: r.agentId } as never) as { context?: readonly string[] }
+    for (const c of t.context ?? []) notes.push(c)
+  }
+  return notes
+}
+
+test('a lower oscillation edit count makes repeated edits of one file escalate earlier', { options: { oscillationEdits: 1 } }, async ($, on) => {
+  wire(on, { isError: false, result: 'ok', text: 'edited' })
+  expect((await editSame($, 4, '/src/a.ts')).length).toBeGreaterThan(0)
+})
+
+test('with the default oscillation edit count four edits of one file do not escalate yet', async ($, on) => {
+  wire(on, { isError: false, result: 'ok', text: 'edited' })
+  expect((await editSame($, 4, '/src/a.ts')).length).toBe(0)
 })
 
 test('invalid options fall back to the defaults', { options: { levels: 'bogus', thresholdHaiku: -3 } }, async ($, on) => {

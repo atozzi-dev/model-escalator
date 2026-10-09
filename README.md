@@ -51,6 +51,7 @@ Options are set from `/config` (or under `pluginConfigs` in settings) and apply 
 |---|---|---|
 | `thresholdHaiku` / `thresholdSonnet` / `thresholdOpus` | 3 / 4 / 6 | Difficulty score at which an agent that started on that model gets its next intervention. Lower means earlier intervention |
 | `graceSteps` | 4 | Steps to wait after an intervention before the next one |
+| `oscillationEdits` | 3 | Number of edits of the same file without progress after which each further edit raises the difficulty score |
 | `seniorModel` | `opus` | Model asked for advice at the consult level, alias or full id |
 | `levels` | `nudge,consult,swap,human` | Comma-separated enabled levels. Disabled ones are skipped: `nudge,swap,human` turns the senior consult off |
 | `prudentTokenRatio` | 0.65 | Share of the tokens a stronger baseline model is assumed to need, between 0 (exclusive) and 1. Used for the prudent end of the savings estimate |

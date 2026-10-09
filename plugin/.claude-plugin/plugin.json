@@ -31,6 +31,12 @@
       "description": "Steps to wait after an intervention before the next one.",
       "default": 4
     },
+    "oscillationEdits": {
+      "type": "number",
+      "title": "Edits before oscillation",
+      "description": "Edits of the same file without progress tolerated before each further edit raises the difficulty score.",
+      "default": 3
+    },
     "seniorModel": {
       "type": "string",
       "title": "Senior model",
