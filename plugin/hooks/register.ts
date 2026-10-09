@@ -469,9 +469,9 @@ async function refuseSwapTarget($: EngineInterface, id: string, tier: Tier, mode
 }
 
 // Tells the lead (the session's main conversation) about an escalated agent, once per event, in active mode and
-// with notifyLead on, at most MAX_LEAD_NOTICES per session. Fire and forget: the hook never waits for the send,
-// and a send that fails or is not delivered only leaves a line in the debug log (the toast and log already
-// carry the news). The send is awaited at session end for a moment, like the verifications.
+// with notifyLead on, at most MAX_LEAD_NOTICES per session. Fire and forget: the hook never waits for the append,
+// and one that fails or is refused only leaves a line in the debug log (the toast and log already carry the
+// news). The append is awaited at session end for a moment, like the verifications.
 function notifyLead($: EngineInterface, a: AgentState, ev: LeadEvent): void {
   try {
     if (mode !== 'active' || !config.notifyLead || leadNotices >= MAX_LEAD_NOTICES) return
@@ -479,8 +479,10 @@ function notifyLead($: EngineInterface, a: AgentState, ev: LeadEvent): void {
     leadNotices++
     const p: Promise<void> = (async () => {
       try {
-        const r = await $.session.send({ to: { sessionId: await $.session.id() }, text }) as { isDelivered?: boolean; reason?: string } | undefined
-        if (r && r.isDelivered === false) await $.ui.log(`${a.id}: lead not notified: ${r.reason ?? 'not delivered'}`, { to: 'debug' })
+        // $.session.send cannot reach the main loop (it only addresses other sessions and agents), so the notice
+        // is a user-role row the person does not see as typed, appended to the main conversation.
+        const r = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } })
+        if (r.deny !== undefined) await $.ui.log(`${a.id}: lead not notified: ${r.deny}`, { to: 'debug' })
       } catch (err) {
         try { await $.ui.log(`${a.id}: lead not notified: ${String((err as { message?: unknown } | undefined)?.message ?? err).slice(0, 200)}`, { to: 'debug' }) } catch { /* diagnostics only */ }
       }

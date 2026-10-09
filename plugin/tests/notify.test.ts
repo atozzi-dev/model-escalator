@@ -7,23 +7,22 @@ type Drainable = { result: Promise<unknown> } & AsyncIterable<unknown>
 const drain = async (st: Drainable) => { for await (const _ of st) { /* chunks */ } return st.result }
 
 const SONNET = 'claude-sonnet-5-5'
-type Sent = { to: unknown; text: string }
-type Harness = { sent: Sent[]; toasts: string[]; logs: string[]; bad?: string; failSend: boolean; notDelivered: boolean }
+type Sent = { text: string; type: string; agentId?: string }
+type Harness = { sent: Sent[]; toasts: string[]; logs: string[]; bad?: string; failSend: boolean; skip: number }
 
 function wire(on: any, env: Record<string, string> = {}): Harness {
   resetState()
   mock.clock(on, { now: 1_000_000 })
   mock.env(on, env)
   mock.store(on)
-  const h: Harness = { sent: [], toasts: [], logs: [], failSend: false, notDelivered: false }
+  const session = mock.session(on)
+  const h: Harness = { sent: [], toasts: [], logs: [], failSend: false, skip: 0 }
+  // The rows the mod appended to the main conversation, after the first `skip`.
+  Object.defineProperty(h, 'sent', { get: () => session.appended().slice(h.skip).map((r: any) => ({
+    text: String(r.message.content[0]?.text ?? ''), type: r.message.type, agentId: r.agentId })) })
   on('session.start', () => ({ cwd: '/work' }) as never)
   on('command.register', () => ({ value: undefined }) as never)
-  on('session.id', () => ({ value: 'sess-1' }) as never)
-  on('session.send', (_$: unknown, e: any) => {
-    if (h.failSend) throw new Error('mailbox down')
-    h.sent.push({ to: e.to, text: e.text })
-    return (h.notDelivered ? { isDelivered: false, reason: 'gone' } : { isDelivered: true }) as never
-  })
+  on('session.append', { door: 'note' }, (_$: unknown, e: any, next: any) => (h.failSend ? ({ deny: 'refused' } as never) : next(e)))
   let n = 0
   on('agent.spawn', (_$: unknown, e: any) => ({ model: e.model ?? 'haiku', agentId: 'a' + ++n }))
   on('tool.call', () => ({ isError: true, result: 'Error: boom', text: 'Error: boom' }) as never)
@@ -62,8 +61,9 @@ test('a model swap sends one message to the session naming the agent and the new
   await stuck($, id, 12)
   const swaps = h.sent.filter((s) => s.text.includes('sonnet'))
   expect(swaps).toHaveLength(1)
-  // The engine spells `{ sessionId }` as the session's address on `e.to` for the hooks below the plugin.
-  expect(swaps[0]!.to).toBe('sess-1')
+  // A user-role row of the main conversation (no agentId), which the lead model reads.
+  expect(swaps[0]!.type).toBe('user')
+  expect(swaps[0]!.agentId).toBeUndefined()
   expect(swaps[0]!.text).toContain('[model-escalator]')
   expect(swaps[0]!.text).toContain(id)
   expect(swaps[0]!.text).toContain('Fix the failing database test')
@@ -101,7 +101,7 @@ test('an unavailable swap target sends a message', async ($, on) => {
   h.bad = SONNET
   const id = await spawn($)
   await stuck($, id, 12)
-  h.sent.length = 0
+  h.skip = h.sent.length
   await step($, id)
   await settle()
   expect(h.sent).toHaveLength(1)
@@ -129,7 +129,7 @@ test('notifyLead false sends nothing', { options: { notifyLead: false } }, async
   expect(h.toasts.some((t) => t.includes('needs a human'))).toBe(true)
 })
 
-test('a send that throws never breaks the hook', async ($, on) => {
+test('an append that is refused never breaks the hook', async ($, on) => {
   const h = wire(on)
   h.failSend = true
   await $.session.start({ cwd: '/work' } as never)
@@ -141,15 +141,6 @@ test('a send that throws never breaks the hook', async ($, on) => {
   }
   await settle()
   expect(notes.some((n) => n.includes('stronger model'))).toBe(true)
-  expect(h.toasts.some((t) => t.includes('switched to sonnet'))).toBe(true)
-})
-
-test('a message that is not delivered is tolerated', async ($, on) => {
-  const h = wire(on)
-  h.notDelivered = true
-  await $.session.start({ cwd: '/work' } as never)
-  const id = await spawn($)
-  await stuck($, id, 12)
   expect(h.toasts.some((t) => t.includes('switched to sonnet'))).toBe(true)
 })
 

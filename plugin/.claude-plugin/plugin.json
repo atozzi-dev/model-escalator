@@ -124,7 +124,7 @@
     "notifyLead": {
       "type": "boolean",
       "title": "Tell the lead about escalations",
-      "description": "Send a short message to the main conversation whenever an agent is swapped to a stronger model, cannot be (the model is not available) or needs a human. At most 10 messages per session; active mode only. Off keeps the log and the toasts only.",
+      "description": "Add a short notice to the main conversation, read by the lead, whenever an agent is swapped to a stronger model, cannot be (the model is not available) or needs a human. At most 10 messages per session; active mode only. Off keeps the log and the toasts only.",
       "default": true
     },
     "effortBoost": {
