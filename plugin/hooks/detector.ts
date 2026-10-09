@@ -31,6 +31,7 @@ export type AgentState = {
   helped?: boolean                      // asked for help through the tool at least once
   recentErrors?: string[]               // full text (cut) of the last failed calls, oldest first, for the senior dossier
   consults?: number                     // senior consult actions for this agent (a refused call and its retry count once)
+  paused?: boolean                      // stopped at the human level: its tool calls are refused until the user resumes it
 }
 
 export function tierOf(model: string | undefined): Tier {
@@ -262,7 +263,7 @@ export const BUSY_FACTOR = 3
 // How long (ms) a running, not yet flagged agent has been silent, when that exceeds its window; else undefined.
 // An agent without a timestamp (old snapshot) or whose run is over is never silent.
 export function isSilent(s: AgentState, now: number, cfg: Config = DEFAULT_CONFIG): number | undefined {
-  if (!s.running || s.stalled || s.lastEventAt === undefined) return undefined
+  if (!s.running || s.stalled || s.paused || s.lastEventAt === undefined) return undefined
   const window = cfg.stallMinutes * 60_000 * ((s.inFlight ?? 0) > 0 ? BUSY_FACTOR : 1)
   const silent = now - s.lastEventAt
   return silent > window ? silent : undefined
@@ -274,6 +275,19 @@ export function isSilent(s: AgentState, now: number, cfg: Config = DEFAULT_CONFI
 export function markStall(s: AgentState, cfg: Config = DEFAULT_CONFIG): AgentState {
   if ((s.inFlight ?? 0) > 0) return { ...s, stalled: true }
   return { ...s, stalled: true, score: Math.max(s.score, cfg.threshold[s.tier]) }
+}
+
+// The agent reached the human level: it is paused until the user resumes it.
+export function pauseAgent(s: AgentState): AgentState {
+  return { ...s, paused: true }
+}
+
+// The user resumed the agent: it keeps its tier and starts a fresh ladder (no score, no failure history, a fresh
+// grace window). With `now` it also counts as active then, so the pause itself is never read as silence.
+export function resumeAgent(s: AgentState, now?: number): AgentState {
+  const { paused: _paused, lastFailing: _lastFailing, ...rest } = s
+  const fresh: AgentState = { ...rest, score: 0, level: 0, stepsSinceAction: 0, stepsSinceProgress: 0, errorCounts: {}, editCounts: {}, stalled: false }
+  return now === undefined ? fresh : { ...fresh, lastEventAt: now }
 }
 
 // An agent may ask for help once per grace window: after a help call (or any intervention) it waits

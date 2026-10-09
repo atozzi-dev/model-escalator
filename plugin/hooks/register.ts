@@ -1,7 +1,7 @@
 import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config'
-import { afterHelp, canAskForHelp, classifyFailure, consultLimit, countStep, escalated, isModelRefusal, isSilent, markStall, newAgent, observe, otherSenior, pickSenior, refuseTier, rememberModel, resolveModelId, revertSwap, skipGrace, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type ModelFailure, type ObservedModels, type Tier } from './detector'
+import { afterHelp, canAskForHelp, classifyFailure, consultLimit, countStep, escalated, isModelRefusal, isSilent, markStall, newAgent, observe, otherSenior, pauseAgent, pickSenior, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type ModelFailure, type ObservedModels, type Tier } from './detector'
 import { buildDossier, inputFromState } from './dossier'
 import { categorize, recommend, record, type Stats } from './learning'
 import { createQueue } from './queue'
@@ -215,7 +215,7 @@ export const register: Register = (on, options) => {
       } catch { /* the tool is optional: the ladder works without it */ }
     }
     try {
-      await $.command.register({ name: 'escalator', description: 'Model escalator: savings report and stats', argumentHint: '[report|stats|reset]' })
+      await $.command.register({ name: 'escalator', description: 'Model escalator: savings report and stats', argumentHint: '[report|stats|reset|resume <id>|resume all]' })
     } catch { /* name taken: the report stays reachable through the status line */ }
     return r
   })
@@ -230,7 +230,11 @@ export const register: Register = (on, options) => {
       await storeQueue(async () => { await $.store.delete(STATS_KEY) })
       return { text: 'Learned stats cleared.' }
     }
-    return { text: `Mode: ${mode}\n` + report(ledger, baseline) }
+    if (arg === 'resume' || arg.startsWith('resume ')) return { text: await resumeCommand($, arg.slice(6).trim()) }
+    const paused = [...agents.values()].filter((a) => a.paused)
+    const pausedText = paused.length === 0 ? '' : '\n\nPaused (resume with /escalator resume <id>|all):\n' +
+      paused.map((a) => `- ${a.id} (${a.category}, ${a.tier})`).join('\n')
+    return { text: `Mode: ${mode}\n` + report(ledger, baseline) + pausedText }
   })
 
   // 1. Spawn: remember the agent, and let history (or baseline mode) pick the model.
@@ -264,12 +268,16 @@ export const register: Register = (on, options) => {
   // The help tool: a tracked agent asks for the senior consult directly. Answered here, never passed on.
   on('tool.call', { tool: HELP_TOOL as never }, async ($, e) => {
     const ev = e as unknown as Record<string, unknown>
+    const stop = pausedDeny(typeof ev.agentId === 'string' ? ev.agentId : undefined)
+    if (stop) return stop as never
     const text = await handleHelp($, ev, typeof ev.agentId === 'string' ? ev.agentId : undefined)
     return { result: text } as never
   })
 
   // 2. Every tool call of a watched agent updates its difficulty score.
   on('tool.call', async ($, e, next) => {
+    const stop = pausedDeny(e.agentId)
+    if (stop) return stop
     if ((e.tool as string) === HELP_TOOL) return next(e)
     const id = e.agentId
     const tracked = watching() && id !== undefined && agents.has(id)
@@ -299,7 +307,8 @@ export const register: Register = (on, options) => {
         await save($)
         return r
       }
-      agents.set(id, state)
+      // The human level pauses the agent: from now on its tool calls are refused until the user resumes it.
+      agents.set(id, action === 'human' && config.pauseAtHuman ? pauseAgent(state) : state)
       const note = await act($, state, action)
       await save($)
       return { ...r, context: [...(r.context ?? []), note] } as typeof r
@@ -326,7 +335,7 @@ export const register: Register = (on, options) => {
     // Idle requests count only where a score is acted on: active, and observe (which measures it).
     try {
       const counted = e.agentId ? agents.get(e.agentId) : undefined
-      if (e.agentId && counted && (mode === 'active' || mode === 'observe')) agents.set(e.agentId, countStep(counted, config))
+      if (e.agentId && counted && !counted.paused && (mode === 'active' || mode === 'observe')) agents.set(e.agentId, countStep(counted, config))
     } catch { /* the stream must go on */ }
     if (mode !== 'off' && r.usage) {
       ledger = addStep(ledger, r.usage as Usage, tierOf(r.usage.model), baseline, Boolean(e.agentId), config)
@@ -549,6 +558,40 @@ type ModelReply = string | { isAnswered: true; text: string; usage?: { output_to
 
 const tag = (text: string): string => tagNote(sessionTag, text)
 
+// The refusal for a tool call of a paused agent (active mode only), or undefined when the call may go on.
+function pausedDeny(id: string | undefined): { deny: string } | undefined {
+  try {
+    if (mode !== 'active' || !id || !agents.get(id)?.paused) return undefined
+    return { deny: tag('You are paused by the supervisor: a human has to step in. Stop now, do not retry this tool or call any other, ' +
+      'and reply with a short summary of what you tried and what blocks you. Tool calls stay refused until the user resumes you.') }
+  } catch {
+    return undefined
+  }
+}
+
+// `/escalator resume <id>|all`: clears the pause and restarts the ladder of the agent on its current tier.
+async function resumeCommand($: EngineInterface, target: string): Promise<string> {
+  try {
+    if (!target) return 'Usage: /escalator resume <agentId>|all'
+    const paused = [...agents.values()].filter((a) => a.paused)
+    const chosen = target === 'all' ? paused : paused.filter((a) => a.id === target)
+    if (chosen.length === 0) {
+      return target !== 'all' && agents.has(target) ? `Agent ${target} is not paused.` : `No paused agent${target === 'all' ? '' : ` with id ${target}`}.`
+    }
+    const now = await clockNow($)
+    for (const a of chosen) agents.set(a.id, resumeAgent(a, now))
+    await save($)
+    const lines = chosen.map((a) => `${a.id} (${a.category}, ${a.tier})`)
+    for (const a of chosen) {
+      try { await $.ui.log(`${a.id} (${a.category}): resumed by the user, ladder restarted on ${a.tier}`) } catch { /* best effort */ }
+    }
+    try { await $.ui.status(statusLine(ledger)) } catch { /* best effort */ }
+    return `Resumed ${chosen.length === 1 ? 'agent' : 'agents'}: ${lines.join(', ')}. The ladder restarts on the current tier.`
+  } catch {
+    return 'Could not resume the agent.'
+  }
+}
+
 async function act($: EngineInterface, s: AgentState, action: Action): Promise<string> {
   await $.ui.log(`${s.id} (${s.category}): ${action}`)
   switch (action) {
@@ -561,9 +604,10 @@ async function act($: EngineInterface, s: AgentState, action: Action): Promise<s
       await $.ui.toast(`${s.category}: switched to ${s.tier}`)
       return tag(`From your next step you run on a stronger model (${s.tier}). Re-assess the problem from scratch.`)
     case 'human':
-      await $.ui.toast(`${s.category}: needs a human`)
+      await $.ui.toast(`${s.category}: needs a human` + (config.pauseAtHuman ? ` (paused: /escalator resume ${s.id})` : ''))
       await $.ui.status(`stuck: ${s.category} (${s.id})`)
-      return tag('Stop now. Summarize what you tried and what blocks you, and end your turn so a human can step in.')
+      return tag('Stop now. Summarize what you tried and what blocks you, and end your turn so a human can step in.' +
+        (config.pauseAtHuman ? ' Your further tool calls are refused until the user resumes you with /escalator resume.' : ''))
   }
 }
 

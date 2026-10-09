@@ -38,6 +38,7 @@ The mod works on its own once installed.
 | `/escalator` | Session cost, estimated savings, interventions |
 | `/escalator stats` | What the mod has learned per task category |
 | `/escalator reset` | Forget what it has learned |
+| `/escalator resume <id>` / `resume all` | Resume an agent paused at the human level (the report lists paused agents). Its ladder restarts on its current model |
 | `MODEL_ESCALATOR_MODE=observe` | Measure and log what it *would* do, without intervening. Recommended for the first days |
 | `MODEL_ESCALATOR_MODE=baseline` | Run every agent on the reference model, no interventions (control arm for A/B evals) |
 | `MODEL_ESCALATOR_MODE=off` | Pass everything through |
@@ -55,6 +56,7 @@ Options are set from `/config` (or under `pluginConfigs` in settings) and apply 
 | `graceSteps` | 4 | Steps to wait after an intervention before the next one |
 | `oscillationEdits` | 3 | Number of edits of the same file without progress after which each further edit raises the difficulty score |
 | `stallMinutes` | 10 | Minutes without any event after which a running agent is reported as stalled (log line, status line, and a toast in `active` mode). Its next tool call then gets the next ladder note, since a note can only reach an agent through a tool result. A tool call that is still running counts as activity until three times this long. Agents whose run is over are never flagged |
+| `pauseAtHuman` | true | When an agent reaches the human level its further tool calls are refused, including `ask_for_help`, until you resume it with `/escalator resume <id>` (or `resume all`). It is told to stop and summarise for you. Set to false to keep the note only. Active mode only; `observe` never pauses |
 | `verifyCommand` | empty (off) | Optional check run at the end of each tracked agent's run, for example `npm test`. Split on spaces, quotes group, no shell (no pipes or redirects), so give the full path of the executable when the name is ambiguous (see below). A non-zero exit counts like an escalation when the mod learns which model to use, and is reported in the log and a toast. Runs in the session's working directory, one at a time |
 | `verifyTimeoutSeconds` | 120 | How long the verification command may run before it is abandoned and ignored, at most 600 |
 | `seniorModel` | `opus` | Model asked for advice at the consult level, alias or full id |

@@ -103,6 +103,12 @@
       "description": "Senior consults across all agents of the session, with the same counting. 0 allows none.",
       "default": 20
     },
+    "pauseAtHuman": {
+      "type": "boolean",
+      "title": "Pause at the human level",
+      "description": "When an agent reaches the human level, refuse all its further tool calls until you resume it with /escalator resume <id> (or all). Off keeps the note only.",
+      "default": true
+    },
     "consultBudgetUsd": {
       "type": "number",
       "title": "Consult budget (USD)",

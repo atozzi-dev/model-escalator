@@ -124,7 +124,7 @@ test('retry counts as one consult for the count limit', { options: { maxConsults
   expect(h.calls.length).toBe(2)
 })
 
-test('zero consults allowed: the ladder skips the consult and swaps at the same trigger', { options: { maxConsultsPerSession: 0 } }, async ($, on) => {
+test('zero consults allowed: the ladder skips the consult and swaps at the same trigger', { options: { maxConsultsPerSession: 0, pauseAtHuman: false } }, async ($, on) => {
   const h = wire(on, () => answered('should not be asked'))
   await $.session.start({ cwd: '/work' } as never)
   const id = await spawn($)

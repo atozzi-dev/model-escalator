@@ -25,6 +25,7 @@ declare module 'claude-code' {
           stalled?: boolean
           recentErrors?: string[]
           consults?: number
+          paused?: boolean
         }[]
         ledger: {
           actual: number

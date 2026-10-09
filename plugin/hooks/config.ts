@@ -25,6 +25,7 @@ export type Config = {
   maxConsultsPerAgent: number       // senior consults one agent may get; a refused call and its retry count once; 0 = none
   maxConsultsPerSession: number     // senior consults across all agents of the session; 0 = none
   consultBudgetUsd: number          // USD the senior calls may cost in the session; 0 = no limit
+  pauseAtHuman: boolean             // refuse the tool calls of an agent that reached the human level until it is resumed
 }
 
 // USD per million tokens, Anthropic API list prices (Oct 2026), checked against /cost.
@@ -59,6 +60,7 @@ export const DEFAULT_CONFIG: Config = {
   maxConsultsPerAgent: 3,
   maxConsultsPerSession: 20,
   consultBudgetUsd: 0,
+  pauseAtHuman: true,
   modelOverrides: {},
   verifyCommand: '',
   verifyTimeoutSeconds: 120,
@@ -75,6 +77,13 @@ function num(v: unknown): number | undefined {
 function positive(v: unknown, fallback: number): number {
   const n = num(v)
   return n !== undefined && n > 0 ? n : fallback
+}
+
+// A boolean option: a real boolean, or the strings "true" / "false"; anything else keeps the default.
+function bool(v: unknown, fallback: boolean): boolean {
+  if (typeof v === 'boolean') return v
+  const t = typeof v === 'string' ? v.trim().toLowerCase() : ''
+  return t === 'true' ? true : t === 'false' ? false : fallback
 }
 
 function parseLevels(v: unknown, fallback: readonly Action[]): readonly Action[] {
@@ -204,6 +213,7 @@ export function parseConfig(raw: Raw | undefined): Config {
       maxConsultsPerAgent: perAgent !== undefined && perAgent >= 0 ? Math.floor(perAgent) : d.maxConsultsPerAgent,
       maxConsultsPerSession: perSession !== undefined && perSession >= 0 ? Math.floor(perSession) : d.maxConsultsPerSession,
       consultBudgetUsd: budget !== undefined && budget >= 0 ? budget : d.consultBudgetUsd,
+      pauseAtHuman: bool(o.pauseAtHuman, d.pauseAtHuman),
     }
   } catch {
     return d
