@@ -49,6 +49,51 @@ export type AgentState = {
   deescalated?: boolean                 // already returned to a cheaper tier in this run: never again until the run is over
   effortSeen?: Effort | number | null   // effort of the agent's last model request as the engine set it; null when it had none
   effortBoosted?: boolean               // the effort level acted: its requests carry a raised effort until the next swap
+  name?: string                         // the name the agent was spawned with (Agent's `name`), capped; per session, never in the stats
+  taskTitle?: string                    // subject of the shared-list task it created or claimed (in_progress), capped
+}
+
+// Names and task titles are shown in one log line or notice each, so they are capped.
+export const MAX_AGENT_NAME = 40
+export const MAX_TASK_TITLE = 80
+
+// Flattens whitespace and cuts to `max` characters, the cut marked with "...". Undefined for a non-string or a blank one.
+export function clipLabel(v: unknown, max: number): string | undefined {
+  if (typeof v !== 'string') return undefined
+  const flat = v.replace(/\s+/g, ' ').trim()
+  if (flat === '') return undefined
+  return flat.length > max ? `${flat.slice(0, max - 3)}...` : flat
+}
+
+// The agent as the lead reads it: `name (id)` when it has a name, else the id.
+export function agentHead(s: { id: string; name?: string }): string {
+  return s.name ? `${s.name} (${s.id})` : s.id
+}
+
+// The agent's head, then its task title when one is known: `fixer (a1) · task: Fix the date parser`.
+export function agentLabel(s: { id: string; name?: string; taskTitle?: string }): string {
+  return s.taskTitle ? `${agentHead(s)} · task: ${s.taskTitle}` : agentHead(s)
+}
+
+// The task an agent works on, read from its call of a task-list tool. A task it creates is its own. TaskUpdate to
+// in_progress claims the task, titled by the call's subject or else by the subject the list gave that id (`subjects`).
+export function taskClaim(tool: unknown, input: Record<string, unknown>, subjects: ReadonlyMap<string, string>): string | undefined {
+  if (tool === 'TaskCreate') return clipLabel(input.subject, MAX_TASK_TITLE)
+  if (tool === 'TaskUpdate' && input.status === 'in_progress') {
+    return clipLabel(input.subject, MAX_TASK_TITLE) ?? subjects.get(String(input.taskId))
+  }
+  return undefined
+}
+
+// The id and subject of the task a task-list answer carries (`task` in TaskCreate's or TaskGet's result).
+export function taskOfResult(result: unknown): { id: string; subject: string } | undefined {
+  if (typeof result !== 'object' || result === null) return undefined
+  const t = (result as { task?: unknown }).task
+  if (typeof t !== 'object' || t === null) return undefined
+  const { id, subject } = t as { id?: unknown; subject?: unknown }
+  const text = typeof id === 'string' ? id : typeof id === 'number' ? String(id) : undefined
+  const title = clipLabel(subject, MAX_TASK_TITLE)
+  return text !== undefined && title !== undefined ? { id: text, subject: title } : undefined
 }
 
 export function tierOf(model: string | undefined): Tier {
@@ -444,10 +489,11 @@ const NOTICE_INTRO = 'This is an automatic notice from the model-escalator mod t
 
 // One short plain-text message for the lead about an escalated agent. The first one of a session also says what
 // these notices are, so the lead does not take them for injected text. Pure.
-export function leadMessage(a: { id: string; category: string; task: string }, ev: LeadEvent, first: boolean): string {
+export function leadMessage(a: { id: string; name?: string; category: string; task: string; taskTitle?: string }, ev: LeadEvent, first: boolean): string {
   const flat = a.task.replace(/\s+/g, ' ').trim()
-  const task = flat.length > 80 ? `${flat.slice(0, 80)}...` : flat
-  const who = `${a.id} (${a.category}, task: ${task})`
+  // The shared task's title says what the agent works on; the spawn prompt is the fallback.
+  const task = a.taskTitle ?? (flat.length > 80 ? `${flat.slice(0, 80)}...` : flat)
+  const who = `${agentHead(a)} (${a.category}, task: ${task})`
   const body = ev.kind === 'swap'
     ? `${who} was stuck and now runs on ${ev.tier}.`
     : ev.kind === 'human'

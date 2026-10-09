@@ -1,4 +1,4 @@
-import { EFFORTS, MAX_ERROR_TEXT, MAX_RECENT_ERRORS, type AgentState, type ObservedModels, type Tier } from './detector'
+import { clipLabel, EFFORTS, MAX_AGENT_NAME, MAX_ERROR_TEXT, MAX_RECENT_ERRORS, MAX_TASK_TITLE, type AgentState, type ObservedModels, type Tier } from './detector'
 import type { Ledger } from './savings'
 
 // Pure: the session state that must survive a module reload. The host keeps `$.state` for the session
@@ -46,6 +46,13 @@ export function parseSnapshot(v: unknown): Snapshot | undefined {
     if (typeof a.progressSignals !== 'number' || !Number.isInteger(a.progressSignals) || a.progressSignals < 0) delete live.progressSignals
     // Senior consults of the agent: a whole, non-negative count; anything else is dropped (counts as none).
     if (typeof a.consults !== 'number' || !Number.isInteger(a.consults) || a.consults < 0) delete live.consults
+    // The name and the task title are labels: kept as capped text, dropped when absent or blank.
+    const name = clipLabel(a.name, MAX_AGENT_NAME)
+    if (name === undefined) delete live.name
+    else live.name = name
+    const title = clipLabel(a.taskTitle, MAX_TASK_TITLE)
+    if (title === undefined) delete live.taskTitle
+    else live.taskTitle = title
     // The ring of full error texts: kept only as an array of strings, and cut to its bounds.
     if (Array.isArray(a.recentErrors) && a.recentErrors.every((e) => typeof e === 'string')) {
       live.recentErrors = (a.recentErrors as string[]).slice(-MAX_RECENT_ERRORS).map((e) => e.slice(0, MAX_ERROR_TEXT))

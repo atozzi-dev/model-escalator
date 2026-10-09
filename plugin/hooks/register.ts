@@ -1,7 +1,7 @@
 import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config'
-import { afterHelp, canAskForHelp, classifyFailure, consultLimit, countStep, EFFORTS, escalated, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_LEAD_NOTICES, newAgent, noteProgress, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
+import { afterHelp, agentLabel, canAskForHelp, classifyFailure, clipLabel, consultLimit, countStep, EFFORTS, escalated, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_AGENT_NAME, MAX_LEAD_NOTICES, newAgent, noteProgress, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
 import { buildDossier, inputFromState } from './dossier'
 import { categorize, recommend, record, type Stats } from './learning'
 import { createQueue } from './queue'
@@ -41,6 +41,10 @@ const pendingNotices = new Set<Promise<void>>()
 const agents = new Map<string, AgentState>()
 // Agents for which a consult limit was already logged (one line per agent).
 const limitNoted = new Set<string>()
+// Subjects of the shared task list, by task id, as its answers showed them (most recent kept): what an
+// in_progress TaskUpdate titles an agent with when the call carries no subject.
+const taskSubjects = new Map<string, string>()
+const MAX_TASK_SUBJECTS = 200
 let ledger: Ledger = emptyLedger()
 let baseline: Tier = 'opus'
 let mode: Mode = 'active'
@@ -87,10 +91,34 @@ function sessionConsults(): number {
 const limitFor = (a: AgentState): string | undefined => consultLimit(a, sessionConsults(), ledger.consultCost, config)
 
 // Logs once per agent that a limit stopped a consult. Diagnostics only: never throws.
-async function noteLimit($: EngineInterface, id: string, category: string, limit: string): Promise<void> {
-  if (limitNoted.has(id)) return
-  limitNoted.add(id)
-  try { await $.ui.log(`${id} (${category}): consult limit reached: ${limit}`) } catch { /* the note is best effort */ }
+async function noteLimit($: EngineInterface, a: AgentState, limit: string): Promise<void> {
+  if (limitNoted.has(a.id)) return
+  limitNoted.add(a.id)
+  try { await $.ui.log(`${agentLabel(a)} (${a.category}): consult limit reached: ${limit}`) } catch { /* the note is best effort */ }
+}
+
+// The short name of an agent for a toast or a status line: its name when it has one, else its category.
+const shortName = (a: { name?: string; category: string }): string => a.name ?? a.category
+
+// Remembers the subjects a task-list answer carries, and titles the tracked agent (`id`, undefined when it is not
+// tracked) that created or claimed the task. Returns true when the agent's title changed. Never throws.
+function noteTask(id: string | undefined, e: Record<string, unknown>, r: unknown): boolean {
+  try {
+    const t = taskOfResult((r as { result?: unknown } | undefined)?.result)
+    if (t) {
+      taskSubjects.delete(t.id)
+      taskSubjects.set(t.id, t.subject)
+      if (taskSubjects.size > MAX_TASK_SUBJECTS) taskSubjects.delete(taskSubjects.keys().next().value as string)
+    }
+    const a = id ? agents.get(id) : undefined
+    if (!id || !a) return false
+    const title = taskClaim(e.tool, e, taskSubjects)
+    if (title === undefined || title === a.taskTitle) return false
+    agents.set(id, { ...a, taskTitle: title })
+    return true
+  } catch {
+    return false
+  }
 }
 
 // Restores the module state to its defaults. Used by tests so each one starts clean.
@@ -98,6 +126,7 @@ export function resetState(): void {
   sessionTag = newTag()
   agents.clear()
   limitNoted.clear()
+  taskSubjects.clear()
   leadNotices = 0
   pendingNotices.clear()
   ledger = emptyLedger()
@@ -240,7 +269,7 @@ export const register: Register = (on, options) => {
     if (arg === 'resume' || arg.startsWith('resume ')) return { text: await resumeCommand($, arg.slice(6).trim()) }
     const paused = [...agents.values()].filter((a) => a.paused)
     const pausedText = paused.length === 0 ? '' : '\n\nPaused (resume with /escalator resume <id>|all):\n' +
-      paused.map((a) => `- ${a.id} (${a.category}, ${a.tier})`).join('\n')
+      paused.map((a) => `- ${agentLabel(a)} (${a.category}, ${a.tier})`).join('\n')
     return { text: `Mode: ${mode}\n` + report(ledger, baseline) + pausedText }
   })
 
@@ -257,7 +286,7 @@ export const register: Register = (on, options) => {
       const best = mode === 'baseline' ? baseline : recommend(stats, category, asked)
       if (best !== asked) {
         if (mode !== 'observe') ev = { ...e, model: best }
-        await $.ui.log(`${category}: ${asked} -> ${best}${mode === 'observe' ? ' (would)' : ''}`)
+        await $.ui.log(`${clipLabel(e.name, MAX_AGENT_NAME) ?? category}: ${asked} -> ${best}${mode === 'observe' ? ' (would)' : ''}`)
       }
     } catch { /* never block a spawn on our own failure */ }
     try {
@@ -265,7 +294,9 @@ export const register: Register = (on, options) => {
     } catch { /* keep the original prompt */ }
     const r = await next(ev)
     if (r.agentId) {
-      agents.set(r.agentId, newAgent(r.agentId, category, r.model, e.prompt))
+      const name = clipLabel(e.name, MAX_AGENT_NAME)
+      const fresh = newAgent(r.agentId, category, r.model, e.prompt)
+      agents.set(r.agentId, name === undefined ? fresh : { ...fresh, name })
       if (watching()) mark(r.agentId, await clockNow($))
       await save($)
     }
@@ -297,6 +328,7 @@ export const register: Register = (on, options) => {
       throw err
     }
     if (tracked) mark(id, await clockNow($), toolEnd)
+    if (noteTask(tracked ? id : undefined, e as unknown as Record<string, unknown>, r)) await save($)
     if (mode === 'off' || mode === 'baseline') return r
     const a = id ? agents.get(id) : undefined
     if (!id || !a || r.deny !== undefined) return r
@@ -305,14 +337,14 @@ export const register: Register = (on, options) => {
       const { state, action, consultSkipped, progress } = observe(a, {
         tool: e.tool, ok: r.isError !== true, text: textOf(r), summary: summarize(e as unknown as Record<string, unknown>),
       }, config, limit === undefined, blockedTiers)
-      if (consultSkipped && limit) await noteLimit($, id, state.category, limit)
+      if (consultSkipped && limit) await noteLimit($, state, limit)
       if (!action) {
         // Progress while swapped up may send the agent back one tier (option deescalateAfter).
         const back = progress ? noteProgress(state, config, mode === 'observe') : { state }
         agents.set(id, back.state)
         if (back.decided) {
           ledger = addIntervention(ledger, 'deescalate')
-          await $.ui.log(`${id} (${state.category}): ${mode === 'observe' ? 'would de-escalate' : `de-escalate to ${back.state.tier}`}`)
+          await $.ui.log(`${agentLabel(state)} (${state.category}): ${mode === 'observe' ? 'would de-escalate' : `de-escalate to ${back.state.tier}`}`)
         }
         await save($)
         if (back.decided && mode === 'active') {
@@ -322,7 +354,7 @@ export const register: Register = (on, options) => {
       }
       ledger = addIntervention(ledger, action)
       if (mode === 'observe') {
-        await $.ui.log(`${id} (${state.category}): would ${labelOf(action)}`)
+        await $.ui.log(`${agentLabel(state)} (${state.category}): would ${labelOf(action)}`)
         // Measure only: never swap, never raise the effort.
         const { effortBoosted: _boost, ...rest } = state
         agents.set(id, a.effortBoosted === undefined ? { ...rest, tier: a.tier } : { ...rest, tier: a.tier, effortBoosted: a.effortBoosted })
@@ -460,8 +492,8 @@ async function refuseSwapTarget($: EngineInterface, id: string, tier: Tier, mode
   const a = agents.get(id)
   const back = a?.tier ?? tier
   try {
-    await $.ui.log(`${id} (${a?.category ?? '-'}): ${model} is not available, stays on ${back}`)
-    await $.ui.toast(`${model} is not available: ${a?.category ?? 'agent'} stays on ${back}`)
+    await $.ui.log(`${a ? agentLabel(a) : id} (${a?.category ?? '-'}): ${model} is not available, stays on ${back}`)
+    await $.ui.toast(`${model} is not available: ${a ? shortName(a) : 'agent'} stays on ${back}`)
   } catch { /* the notice is best effort */ }
   if (a) notifyLead($, a, { kind: 'unavailable', model, stays: back })
   await save($)
@@ -558,9 +590,9 @@ async function checkStalls($: EngineInterface): Promise<void> {
       const min = Math.max(1, Math.round(silent / 60_000))
       const busy = (a.inFlight ?? 0) > 0 ? ' (a tool call is still running)' : ''
       try {
-        await $.ui.log(`${a.id} (${a.category}): no activity for ${min} min${busy}`)
-        await $.ui.status(`stalled: ${a.category} (${a.id}) silent for ${min} min`)
-        if (mode === 'active') await $.ui.toast(`${a.category}: no activity for ${min} min`)
+        await $.ui.log(`${agentLabel(a)} (${a.category}): no activity for ${min} min${busy}`)
+        await $.ui.status(`stalled: ${shortName(a)} (${a.id}) silent for ${min} min`)
+        if (mode === 'active') await $.ui.toast(`${shortName(a)}: no activity for ${min} min`)
       } catch { /* the notice is best effort */ }
     }
   } catch { /* a failing check must never disturb the session */ }
@@ -599,14 +631,14 @@ async function verifyAndRecord($: EngineInterface, a: AgentState, wasEscalated: 
   }
   try {
     if (unavailable) {
-      await $.ui.log(`${a.id} (${a.category}): verification could not run: ${unavailable}`)
+      await $.ui.log(`${agentLabel(a)} (${a.category}): verification could not run: ${unavailable}`)
       if (!unavailableToasted) {
         unavailableToasted = true
         await $.ui.toast('Verification could not run: check the verifyCommand option')
       }
     } else {
-      await $.ui.log(`${a.id} (${a.category}): verification ${failed ? 'failed' : 'passed'} (${detail})`)
-      if (failed) await $.ui.toast(`${a.category}: verification failed`)
+      await $.ui.log(`${agentLabel(a)} (${a.category}): verification ${failed ? 'failed' : 'passed'} (${detail})`)
+      if (failed) await $.ui.toast(`${shortName(a)}: verification failed`)
     }
   } catch { /* the note is best effort */ }
   try { await recordOutcome($, a, wasEscalated, failed) } catch { /* best effort */ }
@@ -655,9 +687,9 @@ async function resumeCommand($: EngineInterface, target: string): Promise<string
     const now = await clockNow($)
     for (const a of chosen) agents.set(a.id, resumeAgent(a, now))
     await save($)
-    const lines = chosen.map((a) => `${a.id} (${a.category}, ${a.tier})`)
+    const lines = chosen.map((a) => `${agentLabel(a)} (${a.category}, ${a.tier})`)
     for (const a of chosen) {
-      try { await $.ui.log(`${a.id} (${a.category}): resumed by the user, ladder restarted on ${a.tier}`) } catch { /* best effort */ }
+      try { await $.ui.log(`${agentLabel(a)} (${a.category}): resumed by the user, ladder restarted on ${a.tier}`) } catch { /* best effort */ }
     }
     try { await $.ui.status(statusLine(ledger)) } catch { /* best effort */ }
     return `Resumed ${chosen.length === 1 ? 'agent' : 'agents'}: ${lines.join(', ')}. The ladder restarts on the current tier.\n` +
@@ -669,7 +701,7 @@ async function resumeCommand($: EngineInterface, target: string): Promise<string
 
 async function act($: EngineInterface, s: AgentState, action: Action): Promise<string> {
   const raised = action === 'effort' ? raiseEffort(s.effortSeen, config.effortBoost) : undefined
-  await $.ui.log(`${s.id} (${s.category}): ${labelOf(action)}${raised ? ` to ${raised}` : ''}`)
+  await $.ui.log(`${agentLabel(s)} (${s.category}): ${labelOf(action)}${raised ? ` to ${raised}` : ''}`)
   switch (action) {
     case 'nudge':
       return tag('You are not making progress. Pause: re-read the last error or result in full, ' +
@@ -680,11 +712,11 @@ async function act($: EngineInterface, s: AgentState, action: Action): Promise<s
       return tag(`From your next step you think harder (effort ${raised ?? 'raised'}) on the same model. ` +
         'Re-assess the problem from scratch: question your assumptions before you continue.')
     case 'swap':
-      await $.ui.toast(`${s.category}: switched to ${s.tier}`)
+      await $.ui.toast(`${shortName(s)}: switched to ${s.tier}`)
       return tag(`From your next step you run on a stronger model (${s.tier}). Re-assess the problem from scratch.`)
     case 'human':
-      await $.ui.toast(`${s.category}: needs a human` + (config.pauseAtHuman ? ` (paused: /escalator resume ${s.id})` : ''))
-      await $.ui.status(`stuck: ${s.category} (${s.id})`)
+      await $.ui.toast(`${shortName(s)}: needs a human` + (config.pauseAtHuman ? ` (paused: /escalator resume ${s.id})` : ''))
+      await $.ui.status(`stuck: ${shortName(s)} (${s.id})`)
       return tag('Stop now. Do not continue the task: summarize what you tried and what blocks you, hand back the summary with your usual report tool, then stop so a human can step in.' +
         (config.pauseAtHuman ? ' Your other tool calls are refused until the user resumes you with /escalator resume.' : ''))
   }
@@ -723,8 +755,8 @@ async function consult($: EngineInterface, s: AgentState, extra = ''): Promise<s
   }
   if (!advice) {
     try {
-      await $.ui.log(`${s.id} (${s.category}): consult refused twice`, { to: 'debug' })
-      await $.ui.log(`${s.id} (${s.category}): consult refused twice`)
+      await $.ui.log(`${agentLabel(s)} (${s.category}): consult refused twice`, { to: 'debug' })
+      await $.ui.log(`${agentLabel(s)} (${s.category}): consult refused twice`)
     } catch { /* diagnostics only */ }
     // Nothing was given to the agent: the next ladder step must not wait a full grace window.
     const cur = agents.get(s.id)
@@ -770,7 +802,7 @@ async function handleHelp($: EngineInterface, input: Record<string, unknown>, id
     const a = id ? agents.get(id) : undefined
     if (!id || !a || mode === 'off' || mode === 'baseline') return 'Help is not available for this agent.'
     if (mode === 'observe') {
-      await $.ui.log(`${id} (${a.category}): would consult (asked for help)`)
+      await $.ui.log(`${agentLabel(a)} (${a.category}): would consult (asked for help)`)
       ledger = addIntervention(ledger, 'ask')
       await save($)
       return 'Request noted.'
@@ -778,14 +810,14 @@ async function handleHelp($: EngineInterface, input: Record<string, unknown>, id
     if (!canAskForHelp(a, config)) return tag('You already consulted a senior model a moment ago: try that advice first.')
     const limit = limitFor(a)
     if (limit) {
-      await noteLimit($, id, a.category, limit)
+      await noteLimit($, a, limit)
       return tag(`No further senior consult is available for you (${limit}). Do not ask for help again: try a different approach, ` +
         'make one small change you can check, or stop and summarize what you tried.')
     }
     // Count the call and move the ladder before the (slow) model call, so a second call cannot slip in.
     agents.set(id, afterHelp(a, config))
     ledger = addIntervention(ledger, 'ask')
-    await $.ui.log(`${id} (${a.category}): asked for help`)
+    await $.ui.log(`${agentLabel(a)} (${a.category}): asked for help`)
     const problem = clip(input.problem, 2000)
     const tried = clip(input.tried, 2000)
     const extra = `Problem: ${problem || '(not given)'}` + (tried ? `
