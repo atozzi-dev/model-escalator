@@ -14,6 +14,8 @@ export type Config = {
   prices: Record<Tier, Price>       // USD per million tokens
   prudentTokenRatio: number         // fraction of tokens the baseline model would need
   modelIds: Record<Tier, string>    // full ids sent on a swap when none was observed
+  verifyCommand: string             // optional check run at the end of each tracked agent's run; empty = off
+  verifyTimeoutSeconds: number      // how long the check may run before it counts as failed (at most 600)
   oscillationEdits: number          // edits of one file tolerated since the last progress; each further edit adds to the score
 }
 
@@ -40,6 +42,8 @@ export const DEFAULT_CONFIG: Config = {
   prices: DEFAULT_PRICES,
   prudentTokenRatio: 0.65,
   oscillationEdits: 3,
+  verifyCommand: '',
+  verifyTimeoutSeconds: 120,
   modelIds: { haiku: 'claude-haiku-5-5', sonnet: 'claude-sonnet-5-5', opus: 'claude-opus-5-5' },
 }
 
@@ -98,6 +102,32 @@ function parsePrices(v: unknown, base: Record<Tier, Price>): Record<Tier, Price>
   return { haiku: mergePrice(base.haiku, o.haiku), sonnet: mergePrice(base.sonnet, o.sonnet), opus: mergePrice(base.opus, o.opus) }
 }
 
+// Splits a command line into an argument vector: spaces separate, single or double quotes group.
+// There is no shell, so no pipes, redirects or variable expansion. An unbalanced quote yields [] (nothing runs).
+export function splitCommand(line: string): string[] {
+  const out: string[] = []
+  let cur = ''
+  let inWord = false
+  let quote = ''
+  for (const ch of line) {
+    if (quote) {
+      if (ch === quote) quote = ''
+      else cur += ch
+    } else if (ch === '"' || ch === "'") {
+      quote = ch
+      inWord = true
+    } else if (/\s/.test(ch)) {
+      if (inWord) { out.push(cur); cur = ''; inWord = false }
+    } else {
+      cur += ch
+      inWord = true
+    }
+  }
+  if (quote) return []
+  if (inWord) out.push(cur)
+  return out
+}
+
 export function parseConfig(raw: Raw | undefined): Config {
   const d = DEFAULT_CONFIG
   const o: Raw = raw ?? {}
@@ -105,6 +135,8 @@ export function parseConfig(raw: Raw | undefined): Config {
     const ratio = num(o.prudentTokenRatio)
     const grace = num(o.graceSteps)
     const osc = num(o.oscillationEdits)
+    const vt = num(o.verifyTimeoutSeconds)
+    const vc = typeof o.verifyCommand === 'string' ? o.verifyCommand.trim() : ''
     const senior = typeof o.seniorModel === 'string' ? o.seniorModel.trim() : ''
     return {
       ...d,
@@ -114,6 +146,8 @@ export function parseConfig(raw: Raw | undefined): Config {
         opus: positive(o.thresholdOpus, d.threshold.opus),
       },
       oscillationEdits: osc !== undefined && osc >= 1 ? Math.floor(osc) : d.oscillationEdits,
+      verifyCommand: vc.length <= 1000 ? vc : d.verifyCommand,
+      verifyTimeoutSeconds: vt !== undefined && vt > 0 ? Math.min(vt, 600) : d.verifyTimeoutSeconds,
       grace: grace !== undefined && grace >= 0 ? Math.floor(grace) : d.grace,
       senior: senior !== '' && senior.length <= 100 ? senior : d.senior,
       levels: parseLevels(o.levels, d.levels),

@@ -1,6 +1,6 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
-import { DEFAULT_CONFIG, parseConfig, type Config } from './config'
+import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config'
 import { dossier, escalated, newAgent, observe, rememberModel, resolveModelId, tierOf, type Action, type AgentState, type ObservedModels, type Tier } from './detector'
 import { categorize, recommend, record, type Stats } from './learning'
 import { createQueue } from './queue'
@@ -20,6 +20,15 @@ export type Mode = 'active' | 'observe' | 'baseline' | 'off'
 // Every read-modify-write of $.store goes through this queue, so agents that finish together
 // cannot both read the old value and overwrite each other's update.
 const storeQueue = createQueue()
+
+// Verification commands run strictly one at a time, whatever the number of agents finishing together.
+const verifyQueue = createQueue()
+const pendingVerifications = new Set<Promise<void>>()
+
+// Resolves once every verification started so far has recorded its outcome. Used by session.end.
+async function flushVerifications(): Promise<void> {
+  while (pendingVerifications.size > 0) await Promise.allSettled([...pendingVerifications])
+}
 
 const agents = new Map<string, AgentState>()
 let ledger: Ledger = emptyLedger()
@@ -223,10 +232,16 @@ export const register: Register = (on, options) => {
       try {
         if (mode !== 'baseline') {
           const wasEscalated = escalated(a, config.levels)
-          await storeQueue(async () => {
-            const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
-            await $.store.set(STATS_KEY, record(stats, a.category, a.startTier, wasEscalated, 0))
-          })
+          const argv = splitCommand(config.verifyCommand)
+          if (argv.length === 0) {
+            await recordOutcome($, a, wasEscalated, false)
+          } else {
+            // The agent's run is over and the lead is waiting for its result: verify in the background,
+            // one command at a time, and record the outcome (once) when it is known.
+            const p: Promise<void> = verifyQueue(() => verifyAndRecord($, a, wasEscalated, argv))
+              .catch(() => undefined).finally(() => { pendingVerifications.delete(p) })
+            pendingVerifications.add(p)
+          }
         }
         agents.set(id, { ...a, level: 0, score: 0, stepsSinceAction: 0 })
         await save($)
@@ -239,6 +254,12 @@ export const register: Register = (on, options) => {
   // 5. Keep a short history of sessions for later comparison.
   on('session.end', async ($, e, next) => {
     try {
+      // Give running verifications a moment to land their outcome; session.end has a short budget.
+      if (pendingVerifications.size > 0) {
+        await Promise.race([flushVerifications(), $.clock.sleep(1000)])
+      }
+    } catch { /* best effort */ }
+    try {
       if (mode !== 'off' && ledger.agentSteps > 0) {
         const entry = { at: await $.clock.now(), mode, baseline, ledger }
         await storeQueue(async () => {
@@ -249,6 +270,39 @@ export const register: Register = (on, options) => {
     } catch { /* best effort */ }
     return next(e)
   })
+}
+
+async function recordOutcome($: EngineInterface, a: AgentState, wasEscalated: boolean, verifyFailed: boolean): Promise<void> {
+  await storeQueue(async () => {
+    const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
+    await $.store.set(STATS_KEY, record(stats, a.category, a.startTier, wasEscalated, 0, verifyFailed))  })
+}
+
+// Last lines of a command's output, kept short: it goes to the lead's log, never back to the agent.
+function outputTail(r: { stdout?: unknown; stderr?: unknown }): string {
+  const text = `${typeof r.stdout === 'string' ? r.stdout : ''}\n${typeof r.stderr === 'string' ? r.stderr : ''}`
+  const tail = text.trim().split('\n').slice(-5).join(' | ')
+  return tail.length > 400 ? '...' + tail.slice(-400) : tail
+}
+
+// Runs the user's verification command (argv from the user's own option, never from agent output)
+// in the session's working directory and records the run as accepted or not. Never throws.
+async function verifyAndRecord($: EngineInterface, a: AgentState, wasEscalated: boolean, argv: string[]): Promise<void> {
+  let failed = false
+  let detail = ''
+  try {
+    const r = await $.process.run(argv, { timeoutMs: config.verifyTimeoutSeconds * 1000 })
+    failed = r.exitCode !== 0
+    detail = `exit ${r.exitCode}: ${outputTail(r)}`
+  } catch (err) {
+    failed = true
+    detail = `did not complete: ${String((err as { message?: unknown } | undefined)?.message ?? err).slice(0, 200)}`
+  }
+  try {
+    await $.ui.log(`${a.id} (${a.category}): verification ${failed ? 'failed' : 'passed'} (${detail})`)
+    if (failed) await $.ui.toast(`${a.category}: verification failed`)
+  } catch { /* the note is best effort */ }
+  try { await recordOutcome($, a, wasEscalated, failed) } catch { /* best effort */ }
 }
 
 type ModelReply = string | { isAnswered: true; text: string; usage?: { output_tokens?: number } } | { isAnswered: false; reason?: string; status?: number | null; error?: string; usage?: { output_tokens?: number } }

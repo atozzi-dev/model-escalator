@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { DEFAULT_CONFIG, parseConfig } from '../hooks/config'
+import { DEFAULT_CONFIG, parseConfig, splitCommand } from '../hooks/config'
 
 test('no options gives the defaults', async () => {
   expect(parseConfig(undefined)).toEqual(DEFAULT_CONFIG)
@@ -38,4 +38,22 @@ test('prices override only the rates they name', async () => {
   expect(c.prices.haiku.longContext?.threshold).toBe(50000)
   expect(c.prices.haiku.longContext?.input).toBe(0.5)
   expect(c.prices.opus).toEqual(DEFAULT_CONFIG.prices.opus)
+})
+
+test('verify options: off by default, parsed and bounded when set', async () => {
+  expect(DEFAULT_CONFIG.verifyCommand).toBe('')
+  expect(DEFAULT_CONFIG.verifyTimeoutSeconds).toBe(120)
+  const c = parseConfig({ verifyCommand: '  npm test  ', verifyTimeoutSeconds: '30' })
+  expect(c.verifyCommand).toBe('npm test')
+  expect(c.verifyTimeoutSeconds).toBe(30)
+  expect(parseConfig({ verifyCommand: 5, verifyTimeoutSeconds: -1 }).verifyCommand).toBe('')
+  expect(parseConfig({ verifyTimeoutSeconds: 0 }).verifyTimeoutSeconds).toBe(120)
+  expect(parseConfig({ verifyTimeoutSeconds: 99999 }).verifyTimeoutSeconds).toBe(600)
+})
+
+test('splitCommand splits on spaces and honors quotes, never a shell', async () => {
+  expect(splitCommand('npm test')).toEqual(['npm', 'test'])
+  expect(splitCommand(`node -e "a b" 'c d'  e`)).toEqual(['node', '-e', 'a b', 'c d', 'e'])
+  expect(splitCommand('   ')).toEqual([])
+  expect(splitCommand('a "b')).toEqual([])   // unbalanced quote: refuse rather than guess
 })

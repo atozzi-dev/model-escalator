@@ -37,6 +37,18 @@
       "description": "Edits of the same file without progress tolerated before each further edit raises the difficulty score.",
       "default": 3
     },
+    "verifyCommand": {
+      "type": "string",
+      "title": "Verification command",
+      "description": "Optional check run at the end of each tracked agent's run (split on spaces, quotes group, no shell). A non-zero exit or a timeout counts as a failed run for learning. Empty turns it off.",
+      "default": ""
+    },
+    "verifyTimeoutSeconds": {
+      "type": "number",
+      "title": "Verification timeout (seconds)",
+      "description": "How long the verification command may run before it counts as failed (at most 600).",
+      "default": 120
+    },
     "seniorModel": {
       "type": "string",
       "title": "Senior model",
