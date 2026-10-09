@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: config-parser-edges
+description: Hard. A line-based config parser with quoting, escapes, inline comments, continuation lines and error line numbers; many interacting edge cases.
+tags: [hard, bugfix, parser]
+context:
+  scaffold_script: scaffold.sh

@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: csv-delimiter-option
+description: Easy. Add a delimiter option to a CSV parser and serialiser (two independent files), with new tests; a cheap model should manage alone.
+tags: [easy, feature]
+context:
+  scaffold_script: scaffold.sh

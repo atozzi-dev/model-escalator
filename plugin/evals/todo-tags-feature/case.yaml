@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: todo-tags-feature
+description: Medium. A feature spread over three modules (parser, store, formatter) that can be delegated in parallel, with a precise tag syntax and new tests.
+tags: [medium, feature, parallel]
+context:
+  scaffold_script: scaffold.sh

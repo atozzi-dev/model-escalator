@@ -1,0 +1,2 @@
+# Scaffold scripts run under bash, which rejects CRLF line endings; keep every case byte-identical across platforms.
+* text=auto eol=lf

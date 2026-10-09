@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: split-bill-remainder
+description: Medium. Largest-remainder money split with tie-breaking, refunds and validation, plus negative amount formatting.
+tags: [medium, bugfix]
+context:
+  scaffold_script: scaffold.sh
