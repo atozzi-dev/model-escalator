@@ -174,9 +174,9 @@ export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT
     s.lastFailing = failing
   }
 
-  s.log.push(`${ob.tool}: ${ob.summary.slice(0, 120)} -> ${ob.ok ? 'ok' : 'ERR ' + normalizeError(ob.text).slice(0, 100)}`)
+  s.log.push(`${ob.tool}: ${ob.summary.slice(0, 120)} -> ${attempts === 0 ? 'ok' : 'ERR ' + normalizeError(ob.text).slice(0, 100)}`)
   // One ring entry per failed log line (same rule as the "ERR" mark above), so the dossier can match them from the end.
-  if (!ob.ok) s.recentErrors = [...(prev.recentErrors ?? []), cutError(String(ob.text ?? ''))].slice(-MAX_RECENT_ERRORS)
+  if (attempts > 0) s.recentErrors = [...(prev.recentErrors ?? []), cutError(String(ob.text ?? ''))].slice(-MAX_RECENT_ERRORS)
   if (s.log.length > cfg.logSize) s.log.splice(0, s.log.length - cfg.logSize)
 
   if (progress) {

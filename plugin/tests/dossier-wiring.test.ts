@@ -130,6 +130,16 @@ test('observe keeps a bounded ring of full error texts for failed calls only', (
   expect(ring.every((e) => e.length <= 2000)).toBe(true)
 })
 
+test('a hidden failure (ok result with a failing run and a non-zero exit) is an ERR line with its full text in the ring', () => {
+  const text = 'FAIL src/a.test.ts\nTests: 1 failed, 1 passed, 2 total\nexit=1'
+  const s = observe(newAgent('a', 'test', 'haiku', 'task'), { tool: 'Bash', summary: 'npm test', ok: true, text }).state
+  expect(s.log[0]).toContain('-> ERR')
+  expect(s.recentErrors).toEqual([text])
+  const ok = observe(s, { tool: 'Bash', summary: 'ls', ok: true, text: 'fine' }).state
+  expect(ok.log[1]).toContain('-> ok')
+  expect(ok.recentErrors!.length).toBe(1)
+})
+
 test('parseSnapshot validates recentErrors and old snapshots hydrate', () => {
   const snap = (a: Record<string, unknown>) => ({ agents: [{ id: 'a', ...a }], ledger: {}, seenModels: {}, sessionTag: 't', mode: 'active', baseline: 'opus', baselinePinned: false })
   const get = (a: Record<string, unknown>) => (parseSnapshot(snap(a))!.agents[0] as any).recentErrors
