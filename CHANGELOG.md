@@ -6,7 +6,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ### Added
 
-- Plugin options for the difficulty thresholds, grace steps, senior model, enabled escalation levels, prudent token ratio and price overrides; defaults are unchanged.
+- Plugin options for the difficulty thresholds, grace steps, edit oscillation count, senior model, enabled escalation levels, prudent token ratio and price overrides; defaults are unchanged.
 - Edit oscillation: editing the same file again and again without progress now raises an agent's difficulty score.
 
 ### Fixed
