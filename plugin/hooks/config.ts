@@ -31,6 +31,8 @@ export type Config = {
   effortBoost: Effort               // lowest effort the effort level raises a request to (it always goes at least one step up)
   learningHalfLifeDays: number      // days after which learned evidence counts half; 0 = never fades
   notifyLead: boolean               // message the lead (main conversation) when an agent is swapped up or needs a human
+  reviewRate: number                // share (0 to 1) of the runs of cheap models reviewed by a senior model; 0 = off
+  reviewModel: string               // model that reviews a sampled run; empty = the senior model
 }
 
 // USD per million tokens, Anthropic API list prices (Oct 2026), checked against /cost.
@@ -77,6 +79,9 @@ export const DEFAULT_CONFIG: Config = {
   modelOverrides: {},
   verifyCommand: '',
   verifyTimeoutSeconds: 120,
+  // Off by default: every sampled run costs one senior call.
+  reviewRate: 0,
+  reviewModel: '',
   modelIds: { haiku: 'claude-haiku-5-5', sonnet: 'claude-sonnet-5-5', opus: 'claude-opus-5-5' },
 }
 
@@ -218,6 +223,8 @@ export function parseConfig(raw: Raw | undefined): Config {
     const deesc = num(o.deescalateAfter)
     const halfLife = num(o.learningHalfLifeDays)
     const effortStep = bool(o.effortStep, d.effortStep)
+    const rate = num(o.reviewRate)
+    const reviewer = typeof o.reviewModel === 'string' ? o.reviewModel.trim() : ''
     return {
       ...d,
       threshold: {
@@ -247,6 +254,8 @@ export function parseConfig(raw: Raw | undefined): Config {
       effortBoost: parseEffort(o.effortBoost, d.effortBoost),
       notifyLead: bool(o.notifyLead, d.notifyLead),
       learningHalfLifeDays: halfLife !== undefined && halfLife >= 0 ? halfLife : d.learningHalfLifeDays,
+      reviewRate: rate !== undefined && rate >= 0 && rate <= 1 ? rate : d.reviewRate,
+      reviewModel: reviewer.length <= 100 ? reviewer : d.reviewModel,
     }
   } catch {
     return d

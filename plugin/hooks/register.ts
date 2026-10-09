@@ -5,6 +5,7 @@ import { afterHelp, agentLabel, canAskForHelp, classifyFailure, clipLabel, consu
 import { buildDossier, inputFromState } from './dossier'
 import { categorize, formatStats, recommend, record, type Stats } from './learning'
 import { createQueue } from './queue'
+import { addReview, buildReviewPrompt, carryReview, diffArgv, editedPath, formatReviews, isCheaper, parseReview, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun } from './review'
 import { parseSnapshot, type Snapshot } from './state'
 import { addConsult, addIntervention, addStep, asUsage, emptyLedger, report, statusLine, type Ledger, type Usage } from './savings'
 
@@ -33,6 +34,13 @@ const pendingVerifications = new Set<Promise<void>>()
 async function flushVerifications(): Promise<void> {
   while (pendingVerifications.size > 0) await Promise.allSettled([...pendingVerifications])
 }
+
+// Sampled reviews run strictly one at a time in the background, like verifications.
+let reviewQueue = createQueue()
+const pendingReviews = new Set<Promise<void>>()
+// Files each tracked agent edited during its current run, as it named them: the review diff is limited to them.
+// Module state only: after a reload the review falls back to the whole working tree diff.
+const editedFiles = new Map<string, string[]>()
 
 // Messages to the lead sent this session (capped by MAX_LEAD_NOTICES) and the sends still in flight.
 let leadNotices = 0
@@ -141,6 +149,9 @@ export function resetState(): void {
   mode = 'active'
   stallTimer?.cancel()
   stallTimer = undefined
+  reviewQueue = createQueue()
+  pendingReviews.clear()
+  editedFiles.clear()
 }
 
 function snapshot(): Snapshot {
@@ -263,7 +274,9 @@ export const register: Register = (on, options) => {
     const arg = e.args.trim()
     if (arg === 'stats') {
       const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
-      return { text: 'Learned stats per category (runs / escalated):\n' + formatStats(stats, await clockNow($)) }
+      const reviews = formatReviews(stats)
+      return { text: 'Learned stats per category (runs / escalated):\n' + formatStats(stats, await clockNow($)) +
+        (reviews ? '\n\nSenior review scores of sampled runs (1-5):\n' + reviews : '') }
     }
     if (arg === 'reset') {
       await storeQueue(async () => { await $.store.delete(STATS_KEY) })
@@ -331,6 +344,7 @@ export const register: Register = (on, options) => {
       throw err
     }
     if (tracked) mark(id, await clockNow($), toolEnd)
+    if (tracked && config.reviewRate > 0 && r.isError !== true && r.deny === undefined) noteEdit(id, e as unknown as Record<string, unknown>)
     if (noteTask(tracked ? id : undefined, e as unknown as Record<string, unknown>, r)) await save($)
     if (mode === 'off' || mode === 'baseline') return r
     const a = id ? agents.get(id) : undefined
@@ -430,6 +444,9 @@ export const register: Register = (on, options) => {
               .catch(() => undefined).finally(() => { pendingVerifications.delete(p) })
             pendingVerifications.add(p)
           }
+          // Read loosely: older published types may not declare these fields.
+          const turn = e as { turnId?: unknown; isAborted?: unknown }
+          startReview($, a, turn.turnId, turn.isAborted === true)
         }
         agents.set(id, { ...(agents.get(id) ?? a), level: 0, score: 0, stepsSinceAction: 0, deescalated: false, progressSignals: 0, running: false, inFlight: 0, stalled: false })
         await save($)
@@ -443,8 +460,8 @@ export const register: Register = (on, options) => {
   on('session.end', async ($, e, next) => {
     try {
       // Give running verifications a moment to land their outcome; session.end has a short budget.
-      if (pendingVerifications.size > 0) {
-        await Promise.race([flushVerifications(), $.clock.sleep(1000)])
+      if (pendingVerifications.size > 0 || pendingReviews.size > 0) {
+        await Promise.race([Promise.all([flushVerifications(), flushReviews()]), $.clock.sleep(1000)])
       }
       if (pendingNotices.size > 0) await Promise.race([Promise.allSettled([...pendingNotices]), $.clock.sleep(1000)])
     } catch { /* best effort */ }
@@ -604,8 +621,104 @@ async function checkStalls($: EngineInterface): Promise<void> {
 async function recordOutcome($: EngineInterface, a: AgentState, wasEscalated: boolean, verifyFailed: boolean): Promise<void> {
   await storeQueue(async () => {
     const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
-    await $.store.set(STATS_KEY, record(stats, a.category, a.startTier, wasEscalated, 0, verifyFailed, await clockNow($), halfLifeMs()))
+    const next = record(stats, a.category, a.startTier, wasEscalated, 0, verifyFailed, await clockNow($), halfLifeMs())
+    await $.store.set(STATS_KEY, carryReview(stats, next, a.category, a.startTier))
   })
+}
+
+// Remembers the file a successful edit tool call of a tracked agent changed (first spelling kept, capped). Never throws.
+function noteEdit(id: string, input: Record<string, unknown>): void {
+  try {
+    const path = editedPath(input.tool, input)
+    if (!path) return
+    const list = editedFiles.get(id) ?? []
+    if (!list.includes(path) && list.length < REVIEW_LIMITS.maxTracked) editedFiles.set(id, [...list, path])
+  } catch { /* the review falls back to the whole diff */ }
+}
+
+async function flushReviews(): Promise<void> {
+  while (pendingReviews.size > 0) await Promise.allSettled([...pendingReviews])
+}
+
+// End of a tracked agent's run: draws whether it is reviewed and, if so, queues the review in the background.
+// Only runs that started below the reference tier, in active or observe mode, and that were not aborted. The
+// edited files are taken for this run either way, so the next run of the same agent starts with none. Never throws.
+function startReview($: EngineInterface, a: AgentState, turnId: unknown, aborted: boolean): void {
+  try {
+    const files = editedFiles.get(a.id) ?? []
+    editedFiles.delete(a.id)
+    if (!watching() || aborted || config.reviewRate <= 0 || !isCheaper(a.startTier, baseline)) return
+    if (!sampleRun(config.reviewRate, sessionTag, `${a.id}:${typeof turnId === 'string' ? turnId : ''}`)) return
+    const p: Promise<void> = reviewQueue(() => reviewRun($, a, files))
+      .catch(() => undefined).finally(() => { pendingReviews.delete(p) })
+    pendingReviews.add(p)
+  } catch { /* the review is optional */ }
+}
+
+// The agent's diff for the review: limited to the files it edited when they are known and few enough, else the
+// whole working tree. Empty when there is nothing to review or git cannot tell (missing, not a repository, no
+// commit yet, timeout). Read only. Never throws.
+async function reviewDiff($: EngineInterface, files: readonly string[]): Promise<{ diff: string; scoped: boolean }> {
+  const scoped = files.length > 0 && files.length <= REVIEW_LIMITS.maxPaths
+  try {
+    const r = await $.process.run(diffArgv(scoped ? files : []), { timeoutMs: 10_000 })
+    if (r.exitCode !== 0 || typeof r.stdout !== 'string') return { diff: '', scoped }
+    // Capped twice: here so a huge diff is not carried around, and in the prompt with head and tail kept.
+    return { diff: r.stdout.trim().slice(0, REVIEW_LIMITS.maxDiffChars * 4), scoped }
+  } catch {
+    return { diff: '', scoped }
+  }
+}
+
+// One sampled review: the agent's diff and task to the review model with the rubric, its score recorded in the
+// stats of the run's category and start tier, its cost in the ledger like a consult. A refused or unscored reply
+// records nothing. Never throws.
+async function reviewRun($: EngineInterface, a: AgentState, files: readonly string[]): Promise<void> {
+  try {
+    const model = config.reviewModel || config.senior
+    if (refusedSeniors.includes(tierOf(model))) return
+    if (config.consultBudgetUsd > 0 && ledger.consultCost >= config.consultBudgetUsd) {
+      try { await $.ui.log(`${agentLabel(a)} (${a.category}): review skipped: consult budget reached`, { to: 'debug' }) } catch { /* diagnostics only */ }
+      return
+    }
+    const { diff, scoped } = await reviewDiff($, files)
+    if (!diff) {
+      try { await $.ui.log(`${agentLabel(a)} (${a.category}): review skipped: no diff`, { to: 'debug' }) } catch { /* diagnostics only */ }
+      return
+    }
+    const prompt = buildReviewPrompt({ task: a.taskTitle ? `${a.taskTitle}\n\n${a.task}` : a.task, diff, scoped })
+    let text = ''
+    let why = 'no reply'
+    try {
+      // The engine answers { isAnswered, text, usage }; the published 2.1.277 types still say string.
+      const reply = await $.model.complete({ model, system: REVIEW_SYSTEM, prompt, maxTokens: 400 }) as ModelReply
+      text = typeof reply === 'string' ? reply : reply.isAnswered ? reply.text : ''
+      if (typeof reply !== 'string' && !reply.isAnswered) {
+        why = reply.reason ?? 'refused'
+        // The model itself is unusable for this account: no review or consult asks it again this session.
+        if (reply.reason === 'api-error' && isModelRefusal({ status: reply.status, error: reply.error })) refusedSeniors = refuseTier(refusedSeniors, tierOf(model))
+      }
+      const usage = typeof reply === 'string' ? undefined : asUsage(reply.usage)
+      ledger = addConsult(ledger, { usage, promptChars: prompt.length + REVIEW_SYSTEM.length, replyChars: text.length }, tierOf(model), config)
+      await save($)
+    } catch (err) {
+      why = String((err as { message?: unknown } | undefined)?.message ?? err).slice(0, 200)
+    }
+    const review = parseReview(text)
+    if (!review) {
+      try { await $.ui.log(`${agentLabel(a)} (${a.category}): review gave no score (${text ? 'no SCORE line' : why})`) } catch { /* best effort */ }
+      return
+    }
+    await storeQueue(async () => {
+      const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
+      await $.store.set(STATS_KEY, addReview(stats, a.category, a.startTier, review.score, await clockNow($), halfLifeMs()))
+    })
+    try {
+      const reasons = review.reasons.length > 0 ? `: ${review.reasons.join('; ')}` : ''
+      await $.ui.log(`${agentLabel(a)} (${a.category}): review ${review.score}/5${reasons}`.slice(0, 600))
+      if (review.score <= 2) await $.ui.toast(`${shortName(a)}: review ${review.score}/5`)
+    } catch { /* the note is best effort */ }
+  } catch { /* a failing review must never disturb the session */ }
 }
 
 // Last lines of a command's output, kept short: it goes to the lead's log, never back to the agent.

@@ -55,6 +55,18 @@
       "description": "How long the verification command may run before it is abandoned and ignored (at most 600).",
       "default": 120
     },
+    "reviewRate": {
+      "type": "number",
+      "title": "Review rate",
+      "description": "Share of the runs of cheaper models (started below the lead's or baseline model) whose diff a senior model reviews and scores 1-5, from 0 to 1 (0.1 reviews about one run in ten). Each review costs one senior call. 0 is off.",
+      "default": 0
+    },
+    "reviewModel": {
+      "type": "string",
+      "title": "Review model",
+      "description": "Model that reviews a sampled run (alias or full id). Empty uses the senior model.",
+      "default": ""
+    },
     "seniorModel": {
       "type": "string",
       "title": "Senior model",
