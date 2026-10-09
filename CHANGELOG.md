@@ -4,6 +4,10 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Added
+
+- Plugin options for the difficulty thresholds, grace steps, senior model, enabled escalation levels, prudent token ratio and price overrides; defaults are unchanged.
+
 ### Fixed
 
 - `MODEL_ESCALATOR_BASELINE` now stays the reference model instead of being overwritten by the lead's model on every request.
