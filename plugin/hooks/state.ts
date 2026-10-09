@@ -1,4 +1,4 @@
-import type { AgentState, ObservedModels, Tier } from './detector'
+import { MAX_ERROR_TEXT, MAX_RECENT_ERRORS, type AgentState, type ObservedModels, type Tier } from './detector'
 import type { Ledger } from './savings'
 
 // Pure: the session state that must survive a module reload. The host keeps `$.state` for the session
@@ -35,6 +35,10 @@ export function parseSnapshot(v: unknown): Snapshot | undefined {
     if (typeof a.running !== 'boolean') delete live.running
     if (typeof a.stalled !== 'boolean') delete live.stalled
     if (typeof a.helped !== 'boolean') delete live.helped
+    // The ring of full error texts: kept only as an array of strings, and cut to its bounds.
+    if (Array.isArray(a.recentErrors) && a.recentErrors.every((e) => typeof e === 'string')) {
+      live.recentErrors = (a.recentErrors as string[]).slice(-MAX_RECENT_ERRORS).map((e) => e.slice(0, MAX_ERROR_TEXT))
+    } else delete live.recentErrors
     return live
   })
   return { ...v, agents } as unknown as Snapshot

@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import { resetState } from '../hooks/register'
-import { newAgent, otherSenior, shortDossier, skipGrace } from '../hooks/detector'
+import { newAgent, otherSenior, skipGrace } from '../hooks/detector'
 import { DEFAULT_CONFIG } from '../hooks/config'
 
 type Call = { model: string; prompt: string }
@@ -41,7 +41,7 @@ async function climb($: any, calls = 40): Promise<{ at: number; note: string }[]
 const report = async ($: any): Promise<string> =>
   ((await $.command.run({ command: 'escalator', args: 'report', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as never)) as { text: string }).text
 
-test('pure helpers: other senior, shorter dossier, skipped grace', () => {
+test('pure helpers: other senior, skipped grace', () => {
   expect(otherSenior('opus')).toBe('sonnet')
   expect(otherSenior('claude-opus-5-5')).toBe('sonnet')
   expect(otherSenior('sonnet')).toBe('opus')
@@ -49,11 +49,6 @@ test('pure helpers: other senior, shorter dossier, skipped grace', () => {
   expect(otherSenior('haiku')).toBe('opus')
   let s = newAgent('a1', 'test', 'haiku', 'fix the build')
   s = { ...s, log: Array.from({ length: 12 }, (_, i) => `step ${i}`) }
-  const short = shortDossier(s, 5)
-  expect(short).toContain('Task: fix the build')
-  expect(short).toContain('step 11')
-  expect(short).toContain('step 7')
-  expect(short).not.toContain('step 6')
   expect(skipGrace({ ...s, stepsSinceAction: 0 }, DEFAULT_CONFIG).stepsSinceAction).toBe(DEFAULT_CONFIG.grace)
   expect(skipGrace({ ...s, stepsSinceAction: 99 }, DEFAULT_CONFIG).stepsSinceAction).toBe(99)
 })
@@ -76,7 +71,7 @@ test('refused first, answered on the other model with a shorter prompt: advice r
   expect(h.calls[0]!.model).toBe('opus')
   expect(h.calls[1]!.model).toBe('sonnet')
   expect(h.calls[1]!.prompt.length).toBeLessThanOrEqual(h.calls[0]!.prompt.length)
-  expect(h.calls[1]!.prompt).toContain('Task:')
+  expect(h.calls[1]!.prompt).toContain('## Task')
   expect(notes.some(n => n.note.includes('retry advice'))).toBe(true)
   expect(await report($)).toContain('senior consults: 2')
 })

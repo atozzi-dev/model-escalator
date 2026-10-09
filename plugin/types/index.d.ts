@@ -23,6 +23,7 @@ declare module 'claude-code' {
           inFlight?: number
           running?: boolean
           stalled?: boolean
+          recentErrors?: string[]
         }[]
         ledger: {
           actual: number

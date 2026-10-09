@@ -1,7 +1,8 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config'
-import { afterHelp, canAskForHelp, countStep, dossier, escalated, isSilent, markStall, newAgent, observe, otherSenior, rememberModel, resolveModelId, shortDossier, skipGrace, tierOf, toolEnd, toolStart, touch, type Action, type AgentState, type ObservedModels, type Tier } from './detector'
+import { afterHelp, canAskForHelp, countStep, escalated, isSilent, markStall, newAgent, observe, otherSenior, rememberModel, resolveModelId, skipGrace, tierOf, toolEnd, toolStart, touch, type Action, type AgentState, type ObservedModels, type Tier } from './detector'
+import { buildDossier, inputFromState } from './dossier'
 import { categorize, recommend, record, type Stats } from './learning'
 import { createQueue } from './queue'
 import { parseSnapshot, type Snapshot } from './state'
@@ -447,14 +448,30 @@ async function act($: EngineInterface, s: AgentState, action: Action): Promise<s
   }
 }
 
+const RETRY_DOSSIER_LIMITS = { maxChars: 6000, maxAttempts: 5, maxErrorChars: 700, maxDiffChars: 700, maxExtraChars: 800 }
+
+// `git diff --stat` in the session folder, read only, for the dossier. Empty when git is missing, the
+// folder is not a repository, the command fails or times out. Never throws.
+async function gitDiffStat($: EngineInterface): Promise<string> {
+  try {
+    const r = await $.process.run(['git', 'diff', '--stat'], { timeoutMs: 5000 })
+    if (r.exitCode !== 0) return ''
+    return typeof r.stdout === 'string' ? r.stdout.trim().slice(0, 4000) : ''
+  } catch {
+    return ''
+  }
+}
+
 // Asks the senior model about the agent and returns the tagged note for it. `extra` is the agent's own
-// account of the problem (help tool), added to the dossier. Falls back to a generic note without advice.
+// account of the problem (help tool), shown to the senior as the agent notes. Falls back to a generic
+// note without advice.
 async function consult($: EngineInterface, s: AgentState, extra = ''): Promise<string> {
-  let advice = await askSenior($, config.senior, dossier(s) + extra)
+  const diffStat = await gitDiffStat($)
+  let advice = await askSenior($, config.senior, buildDossier(inputFromState(s, { diffStat, extra })))
   if (!advice) {
     // A refusal (often the safety classifier) is intermittent and model dependent: one retry on the other
-    // senior model, with a shorter dossier.
-    advice = await askSenior($, otherSenior(config.senior), shortDossier(s) + extra)
+    // senior model, with a tighter dossier (same diff stat, git is not run again).
+    advice = await askSenior($, otherSenior(config.senior), buildDossier(inputFromState(s, { diffStat, extra }), RETRY_DOSSIER_LIMITS))
   }
   if (!advice) {
     try {
@@ -512,9 +529,7 @@ async function handleHelp($: EngineInterface, input: Record<string, unknown>, id
     await $.ui.log(`${id} (${a.category}): asked for help`)
     const problem = clip(input.problem, 2000)
     const tried = clip(input.tried, 2000)
-    const extra = `
-The agent asks for help.
-Problem: ${problem || '(not given)'}` + (tried ? `
+    const extra = `Problem: ${problem || '(not given)'}` + (tried ? `
 What it tried: ${tried}` : '')
     const note = await consult($, agents.get(id) ?? a, extra)
     await save($)

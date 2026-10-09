@@ -29,6 +29,7 @@ export type AgentState = {
   running?: boolean                     // true from the first event of a run until turn.complete
   stalled?: boolean                     // already flagged as silent; cleared by any event
   helped?: boolean                      // asked for help through the tool at least once
+  recentErrors?: string[]               // full text (cut) of the last failed calls, oldest first, for the senior dossier
 }
 
 export function tierOf(model: string | undefined): Tier {
@@ -110,6 +111,18 @@ function nextAction(s: AgentState, cfg: Config): Action | undefined {
   return undefined
 }
 
+export const MAX_RECENT_ERRORS = 6
+export const MAX_ERROR_TEXT = 2000
+
+// Keeps the head and the tail of a long error text (the cause is often at the end), within MAX_ERROR_TEXT.
+function cutError(text: string): string {
+  if (text.length <= MAX_ERROR_TEXT) return text
+  const mark = '\n[... cut ...]\n'
+  const room = MAX_ERROR_TEXT - mark.length
+  const head = Math.floor(room * 0.45)
+  return text.slice(0, head) + mark + text.slice(text.length - (room - head))
+}
+
 export type Observation = { tool: string; ok: boolean; text: string; summary: string }
 
 export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT_CONFIG): { state: AgentState; action?: Action } {
@@ -162,6 +175,8 @@ export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT
   }
 
   s.log.push(`${ob.tool}: ${ob.summary.slice(0, 120)} -> ${ob.ok ? 'ok' : 'ERR ' + normalizeError(ob.text).slice(0, 100)}`)
+  // One ring entry per failed log line (same rule as the "ERR" mark above), so the dossier can match them from the end.
+  if (!ob.ok) s.recentErrors = [...(prev.recentErrors ?? []), cutError(String(ob.text ?? ''))].slice(-MAX_RECENT_ERRORS)
   if (s.log.length > cfg.logSize) s.log.splice(0, s.log.length - cfg.logSize)
 
   if (progress) {
@@ -246,27 +261,9 @@ export function escalated(s: AgentState, levels: readonly Action[]): boolean {
   return i >= 0 ? s.level > i : s.level >= levels.length
 }
 
-export function dossier(s: AgentState): string {
-  return [
-    `Task: ${s.task}`,
-    `Model tier: ${s.tier}. Interventions so far: ${s.level}.`,
-    'Recent attempts (oldest first):',
-    ...s.log.map(l => '- ' + l),
-  ].join('\n')
-}
-
 // The senior model to retry a refused consult on: the other one of opus and sonnet (never haiku).
 export function otherSenior(senior: string): 'opus' | 'sonnet' {
   return tierOf(senior) === 'opus' ? 'sonnet' : 'opus'
-}
-
-// The dossier cut to its task line and the last `attempts` attempts: a shorter prompt for the retry.
-export function shortDossier(s: AgentState, attempts = 5): string {
-  return [
-    `Task: ${s.task}`,
-    `Recent attempts (last ${attempts}, oldest first):`,
-    ...s.log.slice(-attempts).map(l => '- ' + l),
-  ].join('\n')
 }
 
 // After a refused consult nothing was given to the agent: the next ladder step is due without a grace window.
