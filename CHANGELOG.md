@@ -9,6 +9,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Plugin options for the difficulty thresholds, grace steps, edit oscillation count, senior model, enabled escalation levels, prudent token ratio and price overrides; defaults are unchanged.
 - Edit oscillation: editing the same file again and again without progress now raises an agent's difficulty score.
 - Test output is parsed run by run (jest, vitest, pytest, go test, cargo test and plain "N failed, M passed" summaries): a loop that repeats a failing test in one command, or a command that hides the failure behind a trailing exit marker, now weighs like separate failing attempts.
+- Optional `verifyCommand` and `verifyTimeoutSeconds` options: the mod runs your check (for example a test command) at the end of each tracked agent's run, and a failed check counts against that model for that kind of task when learning. A check that cannot start or times out is not counted against the model.
 
 ### Changed
 
