@@ -116,6 +116,47 @@ test('the nudge asks to pause the repetition and does not read as a stop order',
   expect(notes[0]).toContain('continue')
 })
 
+// Runs one stuck agent until the consult fires (third note), with the given senior reply, and returns the report.
+async function consultThenReport($: any, on: any, reply: unknown): Promise<{ notes: string[]; text: string }> {
+  mock.store(on)
+  let n = 0
+  on('agent.spawn', (_$: any, e: any) => ({ model: e.model ?? 'haiku', agentId: 'u' + ++n }))
+  on('tool.call', () => ({ isError: true, result: 'Error: boom', text: 'Error: boom' }) as never)
+  on('model.complete', () => reply as never)
+  for (const k of ['ui.log', 'ui.toast', 'ui.status'] as const) on(k, () => ({ value: undefined }) as never)
+
+  const { agentId } = await $.agent.spawn({ prompt: 'p', description: 'fix db test', subagentType: 'general-purpose', model: 'haiku' } as never) as { agentId: string }
+  const notes: string[] = []
+  for (let i = 0; i < 12; i++) {
+    const r = await $.tool.call({ tool: 'Bash', command: 'npm test', agentId } as never) as { context?: readonly string[] }
+    for (const c of r.context ?? []) notes.push(c)
+  }
+  const out = await $.command.run({ command: 'escalator', args: 'report', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as never) as { text: string }
+  return { notes, text: out.text }
+}
+
+test('a senior consult is priced from the usage the reply reports', async ($, on) => {
+  // 500K opus input tokens at $4 per million: $2.00 exactly, far above the character estimate of a short dossier
+  const r = await consultThenReport($, on, { value: { isAnswered: true, text: 'Check the import path.', usage: { input_tokens: 500_000, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } })
+  expect(r.notes[1]).toContain('Check the import path.')
+  expect(r.text).toContain('senior consults: 1, $2.00')
+})
+
+test('an empty senior reply still counts its reported usage', async ($, on) => {
+  const r = await consultThenReport($, on, { value: { isAnswered: false, reason: 'empty-reply', usage: { input_tokens: 500_000, output_tokens: 20, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } })
+  expect(r.notes[1]).toContain('Still stuck')
+  // Both calls (opus $2.00, then the retry on sonnet $1.00) are counted at their own price.
+  expect(r.text).toContain('senior consults: 2, $3.00')
+})
+
+test('a malformed senior usage is ignored and the character estimate is used', async ($, on) => {
+  const r = await consultThenReport($, on, { value: { isAnswered: true, text: 'Check the import path.', usage: { input_tokens: 'many', output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } })
+  expect(r.notes[1]).toContain('Check the import path.')
+  expect(r.text).toContain('senior consults: 1')
+  expect(r.text).not.toContain('$2.00')
+  expect(r.text).toMatch(/senior consults: 1, \$0\.0\d\)/)
+})
+
 // Store whose get/set/delete yield several times, so unserialized read-modify-writes interleave.
 function slowStore(on: any, data: Record<string, unknown>): void {
   const ticks = async (): Promise<void> => { for (let i = 0; i < 5; i++) await Promise.resolve() }

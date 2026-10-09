@@ -21,6 +21,9 @@ export type Config = {
   idleSteps: number                 // model requests tolerated without progress
   idleWeight: number                // score added by each model request past idleSteps
   stallMinutes: number              // minutes without any event after which a running agent is flagged as stalled
+  maxConsultsPerAgent: number       // senior consults one agent may get; a refused call and its retry count once; 0 = none
+  maxConsultsPerSession: number     // senior consults across all agents of the session; 0 = none
+  consultBudgetUsd: number          // USD the senior calls may cost in the session; 0 = no limit
 }
 
 // USD per million tokens, Anthropic API list prices (Oct 2026), checked against /cost.
@@ -52,6 +55,9 @@ export const DEFAULT_CONFIG: Config = {
   idleSteps: 40,
   idleWeight: 0.25,
   stallMinutes: 10,
+  maxConsultsPerAgent: 3,
+  maxConsultsPerSession: 20,
+  consultBudgetUsd: 0,
   verifyCommand: '',
   verifyTimeoutSeconds: 120,
   modelIds: { haiku: 'claude-haiku-5-5', sonnet: 'claude-sonnet-5-5', opus: 'claude-opus-5-5' },
@@ -155,6 +161,9 @@ export function parseConfig(raw: Raw | undefined): Config {
     const vt = num(o.verifyTimeoutSeconds)
     const vc = typeof o.verifyCommand === 'string' ? o.verifyCommand.trim() : ''
     const senior = typeof o.seniorModel === 'string' ? o.seniorModel.trim() : ''
+    const perAgent = num(o.maxConsultsPerAgent)
+    const perSession = num(o.maxConsultsPerSession)
+    const budget = num(o.consultBudgetUsd)
     return {
       ...d,
       threshold: {
@@ -174,6 +183,9 @@ export function parseConfig(raw: Raw | undefined): Config {
       maxTier: parseMaxTier(o.maxTier, d.maxTier),
       prices: parsePrices(o.prices, d.prices),
       prudentTokenRatio: ratio !== undefined && ratio > 0 && ratio <= 1 ? ratio : d.prudentTokenRatio,
+      maxConsultsPerAgent: perAgent !== undefined && perAgent >= 0 ? Math.floor(perAgent) : d.maxConsultsPerAgent,
+      maxConsultsPerSession: perSession !== undefined && perSession >= 0 ? Math.floor(perSession) : d.maxConsultsPerSession,
+      consultBudgetUsd: budget !== undefined && budget >= 0 ? budget : d.consultBudgetUsd,
     }
   } catch {
     return d

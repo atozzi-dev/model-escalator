@@ -29,6 +29,8 @@ export type AgentState = {
   running?: boolean                     // true from the first event of a run until turn.complete
   stalled?: boolean                     // already flagged as silent; cleared by any event
   helped?: boolean                      // asked for help through the tool at least once
+  recentErrors?: string[]               // full text (cut) of the last failed calls, oldest first, for the senior dossier
+  consults?: number                     // senior consult actions for this agent (a refused call and its retry count once)
 }
 
 export function tierOf(model: string | undefined): Tier {
@@ -98,21 +100,48 @@ export function normalizePath(p: string): string {
 // The action due at the current level, moving s.level past it. While the agent runs below `maxTier`,
 // the ladder keeps swapping one tier up instead of moving past the swap level. A swap that cannot happen
 // (swap disabled, or the agent already at `maxTier`) is skipped, and the next enabled level acts in its place.
-function nextAction(s: AgentState, cfg: Config): Action | undefined {
+// A consult that is closed (a limit was reached) is skipped the same way: `skipped` reports it.
+function nextAction(s: AgentState, cfg: Config, consultOpen: boolean): { action?: Action; skipped: boolean } {
   const swapAt = cfg.levels.indexOf('swap')
   const canSwap = swapAt >= 0 && tierRank(s.tier) < tierRank(cfg.maxTier)
-  if (canSwap && s.level > swapAt) return 'swap'            // level stays just past the swap
+  if (canSwap && s.level > swapAt) return { action: 'swap', skipped: false }   // level stays just past the swap
+  let skipped = false
   while (s.level < cfg.levels.length) {
     const action = cfg.levels[s.level]!
     s.level++
-    if (action !== 'swap' || canSwap) return action
+    if (action === 'consult' && !consultOpen) { skipped = true; continue }
+    if (action !== 'swap' || canSwap) return { action, skipped }
   }
+  return { skipped }
+}
+
+// Why no further senior consult may be made, or undefined when one may. `sessionConsults` is the total over
+// all agents; `consultCost` the USD of every senior call so far (a refused call and its retry both count).
+// A count limit of 0 allows no consult; a budget of 0 means no dollar limit.
+export function consultLimit(s: AgentState, sessionConsults: number, consultCost: number, cfg: Config = DEFAULT_CONFIG): string | undefined {
+  if ((s.consults ?? 0) >= cfg.maxConsultsPerAgent) return `per agent (${cfg.maxConsultsPerAgent} consults)`
+  if (sessionConsults >= cfg.maxConsultsPerSession) return `per session (${cfg.maxConsultsPerSession} consults)`
+  if (cfg.consultBudgetUsd > 0 && consultCost >= cfg.consultBudgetUsd) return `budget (USD ${cfg.consultBudgetUsd})`
   return undefined
+}
+
+export const MAX_RECENT_ERRORS = 6
+export const MAX_ERROR_TEXT = 2000
+
+// Keeps the head and the tail of a long error text (the cause is often at the end), within MAX_ERROR_TEXT.
+function cutError(text: string): string {
+  if (text.length <= MAX_ERROR_TEXT) return text
+  const mark = '\n[... cut ...]\n'
+  const room = MAX_ERROR_TEXT - mark.length
+  const head = Math.floor(room * 0.45)
+  return text.slice(0, head) + mark + text.slice(text.length - (room - head))
 }
 
 export type Observation = { tool: string; ok: boolean; text: string; summary: string }
 
-export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT_CONFIG): { state: AgentState; action?: Action } {
+// `consultOpen` false means a limit forbids consults now: a consult due at this trigger is skipped to the next
+// enabled level, and `consultSkipped` tells the caller that a limit stopped it.
+export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT_CONFIG, consultOpen = true): { state: AgentState; action?: Action; consultSkipped?: boolean } {
   const s: AgentState = { ...prev, errorCounts: { ...prev.errorCounts }, editCounts: { ...prev.editCounts }, log: [...prev.log] }
   s.stepsSinceAction++
   let progress = false
@@ -161,7 +190,9 @@ export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT
     s.lastFailing = failing
   }
 
-  s.log.push(`${ob.tool}: ${ob.summary.slice(0, 120)} -> ${ob.ok ? 'ok' : 'ERR ' + normalizeError(ob.text).slice(0, 100)}`)
+  s.log.push(`${ob.tool}: ${ob.summary.slice(0, 120)} -> ${attempts === 0 ? 'ok' : 'ERR ' + normalizeError(ob.text).slice(0, 100)}`)
+  // One ring entry per failed log line (same rule as the "ERR" mark above), so the dossier can match them from the end.
+  if (attempts > 0) s.recentErrors = [...(prev.recentErrors ?? []), cutError(String(ob.text ?? ''))].slice(-MAX_RECENT_ERRORS)
   if (s.log.length > cfg.logSize) s.log.splice(0, s.log.length - cfg.logSize)
 
   if (progress) {
@@ -174,13 +205,14 @@ export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT
 
   const due = s.level === 0 || s.stepsSinceAction >= cfg.grace
   if (s.score >= cfg.threshold[s.tier] && due) {
-    const action = nextAction(s, cfg)
-    if (action) {
+    const pick = nextAction(s, cfg, consultOpen)
+    if (pick.action) {
       s.score = 0
       s.stepsSinceAction = 0
-      if (action === 'swap') s.tier = nextTier(s.tier)
-      return { state: s, action }
+      if (pick.action === 'swap') s.tier = nextTier(s.tier)
+      return { state: s, action: pick.action, consultSkipped: pick.skipped }
     }
+    return { state: s, consultSkipped: pick.skipped }
   }
   return { state: s }
 }
@@ -246,11 +278,12 @@ export function escalated(s: AgentState, levels: readonly Action[]): boolean {
   return i >= 0 ? s.level > i : s.level >= levels.length
 }
 
-export function dossier(s: AgentState): string {
-  return [
-    `Task: ${s.task}`,
-    `Model tier: ${s.tier}. Interventions so far: ${s.level}.`,
-    'Recent attempts (oldest first):',
-    ...s.log.map(l => '- ' + l),
-  ].join('\n')
+// The senior model to retry a refused consult on: the other one of opus and sonnet (never haiku).
+export function otherSenior(senior: string): 'opus' | 'sonnet' {
+  return tierOf(senior) === 'opus' ? 'sonnet' : 'opus'
+}
+
+// After a refused consult nothing was given to the agent: the next ladder step is due without a grace window.
+export function skipGrace(s: AgentState, cfg: Config = DEFAULT_CONFIG): AgentState {
+  return { ...s, stepsSinceAction: Math.max(s.stepsSinceAction, cfg.grace) }
 }

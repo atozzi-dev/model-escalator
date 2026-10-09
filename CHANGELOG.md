@@ -13,9 +13,13 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Agents that keep making model requests without any progress now climb the escalation ladder too, after a generous number of requests.
 - Agents that go silent for `stallMinutes` (default 10) are reported in the log, the status line and a toast, and get a note on their next tool call; a tool call still running counts as activity for three times that window.
 - `ask_for_help` tool: a tracked agent that is stuck can ask for the senior consult directly, once per grace window; in observe mode the request is only logged.
+- Senior consults are capped per agent (`maxConsultsPerAgent`, default 3), per session (`maxConsultsPerSession`, default 20) and by dollar budget (`consultBudgetUsd`, default off); a stopped consult falls through to the next ladder level.
 
 ### Changed
 
+- The senior consult receives the full text of recent failed attempts (hidden failures included), the files the agent touched and the output of a read-only `git diff --stat`, all capped and with obvious secrets redacted.
+- A refused senior consult is retried once on the other senior model with a shorter dossier; if that is refused too, the next ladder step is due immediately instead of after a grace window.
+- Senior consults are priced from the token usage their reply reports instead of an estimate from text length; the estimate remains as a fallback.
 - The escalation ladder keeps swapping an agent one model up (Haiku, then Sonnet, then Opus) before asking a human. The new `maxTier` option (default `opus`) caps how high a swap may go.
 - Fork subagents keep their model and prompt and are no longer tracked, nudged or escalated.
 - The nudge note now reads "You are not making progress...", so it fits repeated failures, idle loops and stalls alike.

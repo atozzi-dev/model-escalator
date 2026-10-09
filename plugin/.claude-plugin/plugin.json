@@ -84,6 +84,24 @@
       "title": "Price overrides",
       "description": "Optional JSON overriding USD per million token rates, e.g. {\"sonnet\":{\"input\":3,\"output\":15}}. Rates: input, output, cacheRead, cacheWrite5m, cacheWrite1h.",
       "default": ""
+    },
+    "maxConsultsPerAgent": {
+      "type": "number",
+      "title": "Consults per agent",
+      "description": "Senior consults one agent may get. A refused call and its retry count as one consult. Once reached, the ladder skips the consult level and ask_for_help answers that no further consult is available. 0 allows none.",
+      "default": 3
+    },
+    "maxConsultsPerSession": {
+      "type": "number",
+      "title": "Consults per session",
+      "description": "Senior consults across all agents of the session, with the same counting. 0 allows none.",
+      "default": 20
+    },
+    "consultBudgetUsd": {
+      "type": "number",
+      "title": "Consult budget (USD)",
+      "description": "Dollars the senior calls may cost in the session, retried calls included. Once reached, no further consult. 0 means no dollar limit.",
+      "default": 0
     }
   }
 }

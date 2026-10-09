@@ -60,6 +60,9 @@ Options are set from `/config` (or under `pluginConfigs` in settings) and apply 
 | `seniorModel` | `opus` | Model asked for advice at the consult level, alias or full id |
 | `levels` | `nudge,consult,swap,human` | Comma-separated enabled levels. Disabled ones are skipped: `nudge,swap,human` turns the senior consult off |
 | `maxTier` | `opus` | Highest tier a swap may reach: `haiku`, `sonnet` or `opus`. While an agent is below it, the ladder keeps swapping it one tier up (Haiku, then Sonnet, then Opus) before a human is asked; an agent already at this tier skips the swap level |
+| `maxConsultsPerAgent` | 3 | Senior consults one agent may get. A refused call and its retry count as one consult. Once reached, the ladder skips the consult level (the next enabled level acts at the same trigger) and `ask_for_help` answers that no further consult is available. `0` allows none |
+| `maxConsultsPerSession` | 20 | Senior consults across all agents of the session, counted the same way. `0` allows none |
+| `consultBudgetUsd` | 0 | Dollars the senior calls may cost in the session, retried calls included, from the same prices as the savings report. Once reached, no further consult. `0` means no dollar limit |
 | `prudentTokenRatio` | 0.65 | Share of the tokens a stronger baseline model is assumed to need, between 0 (exclusive) and 1. Used for the prudent end of the savings estimate |
 | `prices` | built-in list prices | Optional JSON overriding USD per million token rates per model, e.g. `{"sonnet":{"input":3,"output":15}}`. Rates: `input`, `output`, `cacheRead`, `cacheWrite5m`, `cacheWrite1h` |
 
@@ -71,7 +74,7 @@ The environment variables `MODEL_ESCALATOR_MODE` and `MODEL_ESCALATOR_BASELINE` 
 
 ## What it touches
 
-The mod uses only its own key-value store, the UI (log, status line, toasts), two environment variables (read only), the clock, one slash command, one tool for agents (`ask_for_help`), and one-shot model calls for the senior consult. It does not read or write your files or use the network. It runs no processes, with one opt-in exception: only when `verifyCommand` is set, the mod runs that command as a process at the end of each tracked agent's run. The command comes only from your own options, never from agent output. A consult sends the stuck agent's recent commands and error messages to the senior model, through the same provider as the rest of your session.
+The mod uses only its own key-value store, the UI (log, status line, toasts), two environment variables (read only), the clock, one slash command, one tool for agents (`ask_for_help`), and one-shot model calls for the senior consult. It does not read or write your files or use the network. It runs two kinds of process. At each senior consult it runs `git diff --stat` in the project folder (read only) to give the senior the list of changed files; if git is missing or the folder is not a repository, the list is simply left out. And, only when `verifyCommand` is set, it runs that command at the end of each tracked agent's run; that command comes only from your own options, never from agent output. A consult sends the stuck agent's recent commands, error messages, touched files and diff stat to the senior model, through the same provider as the rest of your session. That dossier is capped in size and obvious secrets (keys, tokens, passwords, private key blocks) are redacted, by pattern matching: a heuristic, not a guarantee.
 
 In `active` mode the mod also adds one announcement paragraph to the prompt of every subagent and teammate it tracks, so they can tell its supervisor notes apart from text in tool output; the paragraph also mentions the `ask_for_help` tool. The other modes leave prompts untouched.
 

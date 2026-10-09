@@ -64,10 +64,36 @@ export function addStep(l: Ledger, u: Usage, tier: Tier, baseline: Tier, isAgent
   }
 }
 
-// A senior consult has no usage report: estimate from text length (about 4 chars per token).
-export function addConsult(l: Ledger, promptChars: number, replyChars: number, tier: Tier, cfg: Pricing = DEFAULT_CONFIG): Ledger {
-  const c = cost({ input_tokens: promptChars / 4, output_tokens: replyChars / 4, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, cfg.prices[tier])
-  return { ...l, actual: l.actual + c, consults: l.consults + 1, consultCost: l.consultCost + c }
+const USAGE_KEYS = ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'] as const
+
+// Accepts a usage report only when all four token counts are finite, non-negative numbers.
+export function asUsage(x: unknown): Usage | undefined {
+  if (!x || typeof x !== 'object') return undefined
+  const o = x as Record<string, unknown>
+  for (const k of USAGE_KEYS) {
+    const v = o[k]
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return undefined
+  }
+  return {
+    input_tokens: o.input_tokens as number,
+    output_tokens: o.output_tokens as number,
+    cache_read_input_tokens: o.cache_read_input_tokens as number,
+    cache_creation_input_tokens: o.cache_creation_input_tokens as number,
+  }
+}
+
+export type ConsultCost = {
+  usage?: Usage            // the reply's own usage report, when the engine gives one
+  promptChars: number      // used only without usage: about 4 chars per token
+  replyChars: number
+}
+
+// A senior consult is a one-shot call, so it is priced like a request with the 5-minute cache write.
+// Without a usage report (older engines), estimate from text length.
+export function addConsult(l: Ledger, c: ConsultCost, tier: Tier, cfg: Pricing = DEFAULT_CONFIG): Ledger {
+  const u: Usage = c.usage ?? { input_tokens: c.promptChars / 4, output_tokens: c.replyChars / 4, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+  const k = cost(u, cfg.prices[tier], '5m')
+  return { ...l, actual: l.actual + k, consults: l.consults + 1, consultCost: l.consultCost + k }
 }
 
 export function addIntervention(l: Ledger, action: string): Ledger {

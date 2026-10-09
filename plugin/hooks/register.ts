@@ -1,11 +1,12 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config'
-import { afterHelp, canAskForHelp, countStep, dossier, escalated, isSilent, markStall, newAgent, observe, rememberModel, resolveModelId, tierOf, toolEnd, toolStart, touch, type Action, type AgentState, type ObservedModels, type Tier } from './detector'
+import { afterHelp, canAskForHelp, consultLimit, countStep, escalated, isSilent, markStall, newAgent, observe, otherSenior, rememberModel, resolveModelId, skipGrace, tierOf, toolEnd, toolStart, touch, type Action, type AgentState, type ObservedModels, type Tier } from './detector'
+import { buildDossier, inputFromState } from './dossier'
 import { categorize, recommend, record, type Stats } from './learning'
 import { createQueue } from './queue'
 import { parseSnapshot, type Snapshot } from './state'
-import { addConsult, addIntervention, addStep, emptyLedger, report, statusLine, type Ledger, type Usage } from './savings'
+import { addConsult, addIntervention, addStep, asUsage, emptyLedger, report, statusLine, type Ledger, type Usage } from './savings'
 
 export const HELP_TOOL = 'mcp__model-escalator__ask_for_help'
 const STATS_KEY = 'stats'
@@ -34,6 +35,8 @@ async function flushVerifications(): Promise<void> {
 }
 
 const agents = new Map<string, AgentState>()
+// Agents for which a consult limit was already logged (one line per agent).
+const limitNoted = new Set<string>()
 let ledger: Ledger = emptyLedger()
 let baseline: Tier = 'opus'
 let mode: Mode = 'active'
@@ -65,10 +68,28 @@ function mark(id: string | undefined, now: number | undefined, f: typeof touch =
 
 const watching = (): boolean => mode === 'active' || mode === 'observe'
 
+// Senior consults of the whole session. Agents never leave the map, so the sum over agents is the total.
+function sessionConsults(): number {
+  let n = 0
+  for (const a of agents.values()) n += a.consults ?? 0
+  return n
+}
+
+// The limit that closes consults for this agent right now, if any.
+const limitFor = (a: AgentState): string | undefined => consultLimit(a, sessionConsults(), ledger.consultCost, config)
+
+// Logs once per agent that a limit stopped a consult. Diagnostics only: never throws.
+async function noteLimit($: EngineInterface, id: string, category: string, limit: string): Promise<void> {
+  if (limitNoted.has(id)) return
+  limitNoted.add(id)
+  try { await $.ui.log(`${id} (${category}): consult limit reached: ${limit}`) } catch { /* the note is best effort */ }
+}
+
 // Restores the module state to its defaults. Used by tests so each one starts clean.
 export function resetState(): void {
   sessionTag = newTag()
   agents.clear()
+  limitNoted.clear()
   ledger = emptyLedger()
   baseline = 'opus'
   baselinePinned = false
@@ -257,9 +278,11 @@ export const register: Register = (on, options) => {
     const a = id ? agents.get(id) : undefined
     if (!id || !a || r.deny !== undefined) return r
     try {
-      const { state, action } = observe(a, {
+      const limit = limitFor(a)
+      const { state, action, consultSkipped } = observe(a, {
         tool: e.tool, ok: r.isError !== true, text: textOf(r), summary: summarize(e as unknown as Record<string, unknown>),
-      }, config)
+      }, config, limit === undefined)
+      if (consultSkipped && limit) await noteLimit($, id, state.category, limit)
       if (!action) { agents.set(id, state); await save($); return r }
       ledger = addIntervention(ledger, action)
       if (mode === 'observe') {
@@ -447,25 +470,68 @@ async function act($: EngineInterface, s: AgentState, action: Action): Promise<s
   }
 }
 
+const RETRY_DOSSIER_LIMITS = { maxChars: 6000, maxAttempts: 5, maxErrorChars: 700, maxDiffChars: 700, maxExtraChars: 800 }
+
+// `git diff --stat` in the session folder, read only, for the dossier. Empty when git is missing, the
+// folder is not a repository, the command fails or times out. Never throws.
+async function gitDiffStat($: EngineInterface): Promise<string> {
+  try {
+    const r = await $.process.run(['git', 'diff', '--stat'], { timeoutMs: 5000 })
+    if (r.exitCode !== 0) return ''
+    return typeof r.stdout === 'string' ? r.stdout.trim().slice(0, 4000) : ''
+  } catch {
+    return ''
+  }
+}
+
 // Asks the senior model about the agent and returns the tagged note for it. `extra` is the agent's own
-// account of the problem (help tool), added to the dossier. Falls back to a generic note without advice.
+// account of the problem (help tool), shown to the senior as the agent notes. Falls back to a generic
+// note without advice.
 async function consult($: EngineInterface, s: AgentState, extra = ''): Promise<string> {
-  const prompt = dossier(s) + extra
-  // The engine answers { isAnswered, text, usage }; the published 2.1.277 types (used by CI)
-  // still say string, hence the wider local type.
-  const reply = await $.model.complete({ model: config.senior, system: SENIOR_SYSTEM, prompt, maxTokens: 2000 }) as ModelReply
-  const advice = typeof reply === 'string' ? reply : reply.isAnswered ? reply.text : ''
+  // One consult action, counted before the calls so a refused call and its retry make one.
+  const counted = agents.get(s.id)
+  if (counted) agents.set(s.id, { ...counted, consults: (counted.consults ?? 0) + 1 })
+  const diffStat = await gitDiffStat($)
+  let advice = await askSenior($, config.senior, buildDossier(inputFromState(s, { diffStat, extra })))
+  if (!advice) {
+    // A refusal (often the safety classifier) is intermittent and model dependent: one retry on the other
+    // senior model, with a tighter dossier (same diff stat, git is not run again).
+    advice = await askSenior($, otherSenior(config.senior), buildDossier(inputFromState(s, { diffStat, extra }), RETRY_DOSSIER_LIMITS))
+  }
   if (!advice) {
     try {
-      const r = typeof reply === 'string' ? undefined : reply
-      const why = r && !r.isAnswered ? `reason=${r.reason ?? 'unknown'} status=${r.status ?? '-'} error=${r.error ?? '-'}` : 'reason=empty-text'
-      await $.ui.log(`senior consult gave no advice: ${why} output_tokens=${r?.usage?.output_tokens ?? '-'}`, { to: 'debug' })
+      await $.ui.log(`${s.id} (${s.category}): consult refused twice`, { to: 'debug' })
+      await $.ui.log(`${s.id} (${s.category}): consult refused twice`)
     } catch { /* diagnostics only */ }
+    // Nothing was given to the agent: the next ladder step must not wait a full grace window.
+    const cur = agents.get(s.id)
+    if (cur) agents.set(s.id, skipGrace(cur, config))
+    return tag('Still stuck. List three different hypotheses and test the cheapest one first.')
   }
-  ledger = addConsult(ledger, prompt.length + SENIOR_SYSTEM.length, advice.length, tierOf(config.senior), config)
-  if (!advice) return tag('Still stuck. List three different hypotheses and test the cheapest one first.')
   return tag(`Advice from a senior model:
 ${advice}`)
+}
+
+// One senior call, recorded in the ledger. Returns the advice, or '' when the model gave none. Never throws.
+async function askSenior($: EngineInterface, model: string, prompt: string): Promise<string> {
+  try {
+    // The engine answers { isAnswered, text, usage }; the published 2.1.277 types (used by CI)
+    // still say string, hence the wider local type.
+    const reply = await $.model.complete({ model, system: SENIOR_SYSTEM, prompt, maxTokens: 2000 }) as ModelReply
+    const advice = typeof reply === 'string' ? reply : reply.isAnswered ? reply.text : ''
+    if (!advice) {
+      try {
+        const r = typeof reply === 'string' ? undefined : reply
+        const why = r && !r.isAnswered ? `reason=${r.reason ?? 'unknown'} status=${r.status ?? '-'} error=${r.error ?? '-'}` : 'reason=empty-text'
+        await $.ui.log(`senior consult (${model}) gave no advice: ${why} output_tokens=${r?.usage?.output_tokens ?? '-'}`, { to: 'debug' })
+      } catch { /* diagnostics only */ }
+    }
+    const usage = typeof reply === 'string' ? undefined : asUsage(reply.usage)
+    ledger = addConsult(ledger, { usage, promptChars: prompt.length + SENIOR_SYSTEM.length, replyChars: advice.length }, tierOf(model), config)
+    return advice
+  } catch {
+    return ''
+  }
 }
 
 const clip = (v: unknown, n: number): string => (typeof v === 'string' ? v.trim().slice(0, n) : '')
@@ -482,15 +548,19 @@ async function handleHelp($: EngineInterface, input: Record<string, unknown>, id
       return 'Request noted.'
     }
     if (!canAskForHelp(a, config)) return tag('You already consulted a senior model a moment ago: try that advice first.')
+    const limit = limitFor(a)
+    if (limit) {
+      await noteLimit($, id, a.category, limit)
+      return tag(`No further senior consult is available for you (${limit}). Do not ask for help again: try a different approach, ` +
+        'make one small change you can check, or stop and summarize what you tried.')
+    }
     // Count the call and move the ladder before the (slow) model call, so a second call cannot slip in.
     agents.set(id, afterHelp(a, config))
     ledger = addIntervention(ledger, 'ask')
     await $.ui.log(`${id} (${a.category}): asked for help`)
     const problem = clip(input.problem, 2000)
     const tried = clip(input.tried, 2000)
-    const extra = `
-The agent asks for help.
-Problem: ${problem || '(not given)'}` + (tried ? `
+    const extra = `Problem: ${problem || '(not given)'}` + (tried ? `
 What it tried: ${tried}` : '')
     const note = await consult($, agents.get(id) ?? a, extra)
     await save($)
