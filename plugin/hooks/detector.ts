@@ -43,11 +43,14 @@ export const DEFAULT_MODEL_IDS: Record<Tier, string> = {
 
 export type ObservedModels = Partial<Record<Tier, string>>
 
-// Remembers a resolved full id (never a bare alias such as "sonnet") under its tier.
+// Remembers a resolved full id (never a bare alias such as "sonnet") under its own tier.
 export function rememberModel(seen: ObservedModels, model: string | undefined): ObservedModels {
   const m = (model ?? '').trim()
-  if (!m.toLowerCase().startsWith('claude-')) return seen
-  return { ...seen, [tierOf(m)]: m }
+  const lower = m.toLowerCase()
+  if (!lower.startsWith('claude-')) return seen
+  // Only the ladder's own families: fable/mythos/unknown ids must never become a swap target.
+  const tier = LADDER.find((t) => lower.includes(t))
+  return tier ? { ...seen, [tier]: m } : seen
 }
 
 // Full model id to send for a tier: the one observed in this session, else the default.

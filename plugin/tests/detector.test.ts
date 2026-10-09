@@ -59,3 +59,11 @@ test('rememberModel ignores bare aliases and empty values', async () => {
   const seen = rememberModel({}, 'claude-haiku-5-5')
   expect(seen).toEqual({ haiku: 'claude-haiku-5-5' })
 })
+
+test('rememberModel only keeps ids of the ladder families', async () => {
+  for (const m of ['claude-fable-5-1', 'claude-mythos-1', 'claude-foo-1']) {
+    expect(rememberModel({}, m)).toEqual({})
+  }
+  expect(rememberModel({}, 'claude-opus-5-5')).toEqual({ opus: 'claude-opus-5-5' })
+  expect(rememberModel({}, 'Claude-Sonnet-5-5')).toEqual({ sonnet: 'Claude-Sonnet-5-5' })
+})

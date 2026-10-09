@@ -68,3 +68,13 @@ test('unanswered senior consult logs the reason to the debug log only', async ($
   expect(line!.to).toBe('debug')
   expect(line!.text).toContain('600')
 })
+
+test('a lead on fable never becomes the opus swap target', async ($, on) => {
+  const h = wire(on, {})
+  await $.session.start({ cwd: '/work' } as never)
+  await drain($.turn.step({ turnId: 'm', index: 0, model: 'claude-fable-5-1', messageCount: 1 } as never) as never)
+  const id = await spawn($, 'sonnet')
+  await stuck($, id, 40)
+  await drain($.turn.step({ turnId: 't', index: 0, model: 'sonnet', messageCount: 3, agentId: id } as never) as never)
+  expect(h.stepModels.at(-1)).toBe('claude-opus-5-5')
+})
