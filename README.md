@@ -59,6 +59,7 @@ Options are set from `/config` (or under `pluginConfigs` in settings) and apply 
 | `verifyTimeoutSeconds` | 120 | How long the verification command may run before it is abandoned and ignored, at most 600 |
 | `seniorModel` | `opus` | Model asked for advice at the consult level, alias or full id |
 | `levels` | `nudge,consult,swap,human` | Comma-separated enabled levels. Disabled ones are skipped: `nudge,swap,human` turns the senior consult off |
+| `maxTier` | `opus` | Highest tier a swap may reach: `haiku`, `sonnet` or `opus`. While an agent is below it, the ladder keeps swapping it one tier up (Haiku, then Sonnet, then Opus) before a human is asked; an agent already at this tier skips the swap level |
 | `prudentTokenRatio` | 0.65 | Share of the tokens a stronger baseline model is assumed to need, between 0 (exclusive) and 1. Used for the prudent end of the savings estimate |
 | `prices` | built-in list prices | Optional JSON overriding USD per million token rates per model, e.g. `{"sonnet":{"input":3,"output":15}}`. Rates: `input`, `output`, `cacheRead`, `cacheWrite5m`, `cacheWrite1h` |
 

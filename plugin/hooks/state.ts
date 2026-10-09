@@ -34,6 +34,7 @@ export function parseSnapshot(v: unknown): Snapshot | undefined {
     if (typeof a.inFlight !== 'number' || !(a.inFlight >= 0)) delete live.inFlight
     if (typeof a.running !== 'boolean') delete live.running
     if (typeof a.stalled !== 'boolean') delete live.stalled
+    if (typeof a.helped !== 'boolean') delete live.helped
     return live
   })
   return { ...v, agents } as unknown as Snapshot
