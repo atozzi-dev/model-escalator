@@ -1,0 +1,11 @@
+{
+  "name": "model-escalator",
+  "owner": { "name": "Alessandro Tozzi", "email": "261738626+atozzi-dev@users.noreply.github.com" },
+  "plugins": [
+    {
+      "name": "model-escalator",
+      "source": "./plugin",
+      "description": "Run cheap models in parallel and escalate only when they get stuck"
+    }
+  ]
+}
