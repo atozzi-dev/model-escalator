@@ -55,7 +55,7 @@ Options are set from `/config` (or under `pluginConfigs` in settings) and apply 
 | `graceSteps` | 4 | Steps to wait after an intervention before the next one |
 | `oscillationEdits` | 3 | Number of edits of the same file without progress after which each further edit raises the difficulty score |
 | `stallMinutes` | 10 | Minutes without any event after which a running agent is reported as stalled (log line, status line, and a toast in `active` mode). Its next tool call then gets the next ladder note, since a note can only reach an agent through a tool result. A tool call that is still running counts as activity until three times this long. Agents whose run is over are never flagged |
-| `verifyCommand` | empty (off) | Optional check run at the end of each tracked agent's run, for example `npm test`. Split on spaces, quotes group, no shell (no pipes or redirects). A non-zero exit counts like an escalation when the mod learns which model to use, and is reported in the log and a toast. Runs in the session's working directory, one at a time |
+| `verifyCommand` | empty (off) | Optional check run at the end of each tracked agent's run, for example `npm test`. Split on spaces, quotes group, no shell (no pipes or redirects), so give the full path of the executable when the name is ambiguous (see below). A non-zero exit counts like an escalation when the mod learns which model to use, and is reported in the log and a toast. Runs in the session's working directory, one at a time |
 | `verifyTimeoutSeconds` | 120 | How long the verification command may run before it is abandoned and ignored, at most 600 |
 | `seniorModel` | `opus` | Model asked for advice at the consult level, alias or full id |
 | `levels` | `nudge,consult,swap,human` | Comma-separated enabled levels. Disabled ones are skipped: `nudge,swap,human` turns the senior consult off |
@@ -64,6 +64,8 @@ Options are set from `/config` (or under `pluginConfigs` in settings) and apply 
 | `prices` | built-in list prices | Optional JSON overriding USD per million token rates per model, e.g. `{"sonnet":{"input":3,"output":15}}`. Rates: `input`, `output`, `cacheRead`, `cacheWrite5m`, `cacheWrite1h` |
 
 `verifyCommand` runs without a shell (no pipes, redirects or variables), so on Windows name the real executable, for example `npm.cmd test` or `node node_modules/jest/bin/jest.js`. A command that cannot start or hits the timeout is not counted as a failed run: the run is recorded as if no check were set, and the mod logs it and shows one toast per session.
+
+Warning: the executable is resolved from `PATH` without a shell, so give its full path when the name is ambiguous. On Windows `bash` usually resolves to the WSL launcher (`C:\Windows\System32\bash.exe`), which fails and exits non-zero, so use Git Bash instead, for example `"C:/Program Files/Git/bin/bash.exe" test.sh` (double quotes around a path with spaces; forward slashes work). Check the command once by hand first: a command that starts but fails for an unrelated reason counts as a failed check.
 
 The environment variables `MODEL_ESCALATOR_MODE` and `MODEL_ESCALATOR_BASELINE` are not plugin options; they work as described in [Usage](#usage).
 
