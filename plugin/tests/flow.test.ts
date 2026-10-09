@@ -96,3 +96,22 @@ test('meters requests and reports savings through /escalator', async ($, on) => 
   expect(out.text).toContain('haiku: 5 requests')
   expect(out.text).toContain('opus: 1 requests')
 })
+
+test('the nudge asks to pause the repetition and does not read as a stop order', async ($, on) => {
+  mock.store(on)
+  on('agent.spawn', (_$, e) => ({ model: e.model ?? 'haiku', agentId: 'n1' }))
+  on('tool.call', () => ({ isError: true, result: 'Error: boom', text: 'Error: boom' }) as never)
+  on('model.complete', () => ({ value: { isAnswered: false, reason: 'api-error', usage: { input_tokens: 0, output_tokens: 0 } } }) as never)
+  for (const k of ['ui.log', 'ui.toast', 'ui.status'] as const) on(k, () => ({ value: undefined }) as never)
+
+  const { agentId } = await $.agent.spawn({ prompt: 'p', description: 'fix db test', subagentType: 'general-purpose', model: 'haiku' } as never) as { agentId: string }
+  const notes: string[] = []
+  for (let i = 0; i < 6; i++) {
+    const r = await $.tool.call({ tool: 'Bash', command: 'npm test', agentId } as never) as { context?: readonly string[] }
+    for (const c of r.context ?? []) notes.push(c)
+  }
+  expect(notes.length).toBe(1)
+  expect(notes[0]).toContain('repeating the same failing step')
+  expect(notes[0]).not.toMatch(/\bStop\b/)
+  expect(notes[0]).toContain('continue')
+})

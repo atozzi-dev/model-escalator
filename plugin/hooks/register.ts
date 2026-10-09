@@ -236,8 +236,8 @@ async function act($: EngineInterface, s: AgentState, action: Action): Promise<s
   await $.ui.log(`${s.id} (${s.category}): ${action}`)
   switch (action) {
     case 'nudge':
-      return tag('You are repeating the same failing step. Stop, re-read the last error in full, ' +
-        'state one new hypothesis, and try a different approach.')
+      return tag('You are repeating the same failing step. Pause the repetition: re-read the last error in full, ' +
+        'state one new hypothesis, then continue with a different approach.')
     case 'consult': {
       const prompt = dossier(s)
       // The engine answers { isAnswered, text, usage }; the published 2.1.277 types (used by CI)
