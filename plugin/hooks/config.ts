@@ -29,6 +29,7 @@ export type Config = {
   pauseAtHuman: boolean             // refuse the tool calls of an agent that reached the human level until it is resumed
   effortStep: boolean               // adds the effort level between consult and swap
   effortBoost: Effort               // lowest effort the effort level raises a request to (it always goes at least one step up)
+  learningHalfLifeDays: number      // days after which learned evidence counts half; 0 = never fades
   notifyLead: boolean               // message the lead (main conversation) when an agent is swapped up or needs a human
 }
 
@@ -72,6 +73,7 @@ export const DEFAULT_CONFIG: Config = {
   effortStep: false,
   effortBoost: 'high',
   notifyLead: true,
+  learningHalfLifeDays: 30,
   modelOverrides: {},
   verifyCommand: '',
   verifyTimeoutSeconds: 120,
@@ -214,6 +216,7 @@ export function parseConfig(raw: Raw | undefined): Config {
     const perSession = num(o.maxConsultsPerSession)
     const budget = num(o.consultBudgetUsd)
     const deesc = num(o.deescalateAfter)
+    const halfLife = num(o.learningHalfLifeDays)
     const effortStep = bool(o.effortStep, d.effortStep)
     return {
       ...d,
@@ -243,6 +246,7 @@ export function parseConfig(raw: Raw | undefined): Config {
       effortStep,
       effortBoost: parseEffort(o.effortBoost, d.effortBoost),
       notifyLead: bool(o.notifyLead, d.notifyLead),
+      learningHalfLifeDays: halfLife !== undefined && halfLife >= 0 ? halfLife : d.learningHalfLifeDays,
     }
   } catch {
     return d

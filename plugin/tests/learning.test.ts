@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { categorize, HALF_LIFE_MS, recommend, record, type Stats } from '../hooks/learning'
+import { categorize, formatStats, HALF_LIFE_MS, recommend, record, type Stats } from '../hooks/learning'
 
 const DAY = 24 * 60 * 60 * 1000
 
@@ -108,4 +108,28 @@ test('stats stored before verification existed stay readable', async () => {
   const next = record(old, 'c', 'haiku', false, 0, true)
   expect(next['c']!.haiku!.notAccepted).toBe(5)
   expect(next['c']!.haiku!.runs).toBe(7)
+})
+
+test('formatStats shows counters with one decimal when fractional and the age of each cell', async () => {
+  const t0 = 10 * DAY
+  const st: Stats = {
+    'a/b': {
+      haiku: { runs: 2.5, escalated: 1, tokens: 0, failedVerify: 0.5, updatedAt: t0 - 3 * DAY },
+      sonnet: { runs: 4, escalated: 0, tokens: 0 },
+    },
+  }
+  const out = formatStats(st, t0)
+  expect(out).toContain('a/b')
+  expect(out).toContain('haiku: 2.5 runs, 1 escalated, 0.5 failed verify (updated 3 d ago)')
+  expect(out).toContain('sonnet: 4 runs, 0 escalated')
+  expect(out).not.toContain('sonnet: 4 runs, 0 escalated (')
+  expect(formatStats({}, t0)).toBe('No stats yet.')
+})
+
+test('formatStats ages: minutes, hours, days, and no age without a clock', async () => {
+  const mk = (age: number): Stats => ({ c: { haiku: { runs: 1, escalated: 0, tokens: 0, updatedAt: 1_000_000_000 } } })
+  expect(formatStats(mk(0), 1_000_000_000 + 30_000)).toContain('(updated just now)')
+  expect(formatStats(mk(0), 1_000_000_000 + 5 * 60_000)).toContain('(updated 5 min ago)')
+  expect(formatStats(mk(0), 1_000_000_000 + 7 * 3_600_000)).toContain('(updated 7 h ago)')
+  expect(formatStats(mk(0))).not.toContain('updated')
 })

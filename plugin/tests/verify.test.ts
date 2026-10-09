@@ -42,9 +42,18 @@ async function settle(h: Harness, runs: number): Promise<void> {
 }
 const finish =($: any, agentId: string) => $.turn.complete({ turnId: 't' + agentId, agentId, answer: 'x' } as never)
 // Reads the learned stats through the /escalator stats command (the test $ has no store of its own).
-const stats = async ($: any) => {
+const stats = async ($: any): Promise<any> => {
   const out = await $.command.run({ command: 'escalator', args: 'stats', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as never) as { text: string }
-  return JSON.parse(out.text.slice(out.text.indexOf('{')))
+  const cells: Record<string, Record<string, { runs: number; escalated: number; failedVerify?: number; notAccepted?: number }>> = {}
+  for (const m of out.text.matchAll(/^- (\S+) (\w+): ([\d.]+) runs, ([\d.]+) escalated(?:, ([\d.]+) failed verify)?(?:, ([\d.]+) not accepted)?/gm)) {
+    const escalated = Number(m[4])
+    ;(cells[m[1]!] ??= {})[m[2]!] = {
+      runs: Number(m[3]), escalated,
+      ...(m[5] !== undefined ? { failedVerify: Number(m[5]) } : {}),
+      notAccepted: m[6] !== undefined ? Number(m[6]) : escalated,
+    }
+  }
+  return cells
 }
 
 const CMD = { verifyCommand: 'npm test -- --run "my suite"' }

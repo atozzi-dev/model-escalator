@@ -3,7 +3,7 @@ import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config'
 import { afterHelp, agentLabel, canAskForHelp, classifyFailure, clipLabel, consultLimit, countStep, EFFORTS, escalated, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_AGENT_NAME, MAX_LEAD_NOTICES, newAgent, noteProgress, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
 import { buildDossier, inputFromState } from './dossier'
-import { categorize, recommend, record, type Stats } from './learning'
+import { categorize, formatStats, recommend, record, type Stats } from './learning'
 import { createQueue } from './queue'
 import { parseSnapshot, type Snapshot } from './state'
 import { addConsult, addIntervention, addStep, asUsage, emptyLedger, report, statusLine, type Ledger, type Usage } from './savings'
@@ -65,6 +65,9 @@ let config: Config = DEFAULT_CONFIG
 
 // Stall detection: one periodic check per module load (a reload cancels the old one with its environment).
 let stallTimer: { cancel: () => void } | undefined
+
+// Half-life of learned evidence in ms; 0 turns the decay off.
+function halfLifeMs(): number { return config.learningHalfLifeDays * 86_400_000 }
 
 // Current time from the host clock, or undefined when it cannot be read (liveness is then simply not tracked).
 async function clockNow($: EngineInterface): Promise<number | undefined> {
@@ -260,7 +263,7 @@ export const register: Register = (on, options) => {
     const arg = e.args.trim()
     if (arg === 'stats') {
       const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
-      return { text: 'Learned stats per category (runs / escalated):\n' + JSON.stringify(stats, null, 2) }
+      return { text: 'Learned stats per category (runs / escalated):\n' + formatStats(stats, await clockNow($)) }
     }
     if (arg === 'reset') {
       await storeQueue(async () => { await $.store.delete(STATS_KEY) })
@@ -283,7 +286,7 @@ export const register: Register = (on, options) => {
     try {
       const asked = tierOf(e.model ?? e.parentModel)
       const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
-      const best = mode === 'baseline' ? baseline : recommend(stats, category, asked)
+      const best = mode === 'baseline' ? baseline : recommend(stats, category, asked, await clockNow($), halfLifeMs())
       if (best !== asked) {
         if (mode !== 'observe') ev = { ...e, model: best }
         await $.ui.log(`${clipLabel(e.name, MAX_AGENT_NAME) ?? category}: ${asked} -> ${best}${mode === 'observe' ? ' (would)' : ''}`)
@@ -601,7 +604,7 @@ async function checkStalls($: EngineInterface): Promise<void> {
 async function recordOutcome($: EngineInterface, a: AgentState, wasEscalated: boolean, verifyFailed: boolean): Promise<void> {
   await storeQueue(async () => {
     const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
-    await $.store.set(STATS_KEY, record(stats, a.category, a.startTier, wasEscalated, 0, verifyFailed))
+    await $.store.set(STATS_KEY, record(stats, a.category, a.startTier, wasEscalated, 0, verifyFailed, await clockNow($), halfLifeMs()))
   })
 }
 

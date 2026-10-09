@@ -115,6 +115,12 @@
       "description": "Progress signals (failing tests dropping or reaching 0) after which an agent that was swapped up goes back one tier, once per run. Off by default: returning to a cheaper model rewrites the prompt cache and may bring the block back. 0 is off.",
       "default": 0
     },
+    "learningHalfLifeDays": {
+      "type": "number",
+      "title": "Learning half-life (days)",
+      "description": "Days after which learned evidence counts half, so a category is not stuck on a stronger model forever because of old runs. 0 never forgets.",
+      "default": 30
+    },
     "effortStep": {
       "type": "boolean",
       "title": "Raise the effort before a model swap",

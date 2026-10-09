@@ -78,3 +78,27 @@ export function recommend(stats: Stats, category: string, requested: Tier, now?:
     t = LADDER[i + 1]!
   }
 }
+
+const num1 = (n: number): string => (Number.isInteger(n) ? String(n) : n.toFixed(1))
+
+function ageText(ms: number): string {
+  if (ms < 60_000) return 'just now'
+  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)} min ago`
+  if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)} h ago`
+  return `${Math.floor(ms / 86_400_000)} d ago`
+}
+
+// One line per category and tier; counters may be fractional once decayed. With `now`, shows how old each cell is.
+export function formatStats(stats: Stats, now?: number): string {
+  const lines: string[] = []
+  for (const [category, row] of Object.entries(stats)) {
+    for (const [tier, c] of Object.entries(row)) {
+      if (!c) continue
+      const failed = c.failedVerify ? `, ${num1(c.failedVerify)} failed verify` : ''
+      const na = c.notAccepted !== undefined && c.notAccepted !== c.escalated ? `, ${num1(c.notAccepted)} not accepted` : ''
+      const age = now !== undefined && c.updatedAt !== undefined ? ` (updated ${ageText(Math.max(0, now - c.updatedAt))})` : ''
+      lines.push(`- ${category} ${tier}: ${num1(c.runs)} runs, ${num1(c.escalated)} escalated${failed}${na}${age}`)
+    }
+  }
+  return lines.length === 0 ? 'No stats yet.' : lines.join('\n')
+}

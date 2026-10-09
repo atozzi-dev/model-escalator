@@ -193,10 +193,7 @@ test('a run that swapped up and came back is recorded as escalated', OPT, async 
   await progress($, h, id, 2)
   await $.turn.complete({ turnId: 't', agentId: id, answer: 'done' } as never)
   const text = ((await $.command.run({ command: 'escalator', args: 'stats', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as never)) as { text: string }).text
-  const stats = JSON.parse(text.split('\n').slice(1).join('\n')) as Record<string, Record<string, { runs: number; escalated: number }>>
-  const cell = Object.values(stats)[0]!.haiku!
-  expect(cell.runs).toBe(1)
-  expect(cell.escalated).toBe(1)
+  expect(text).toContain('haiku: 1 runs, 1 escalated')
 })
 
 test('escalated() is true for a de-escalated agent', () => {

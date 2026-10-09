@@ -57,3 +57,11 @@ test('splitCommand splits on spaces and honors quotes, never a shell', async () 
   expect(splitCommand('   ')).toEqual([])
   expect(splitCommand('a "b')).toEqual([])   // unbalanced quote: refuse rather than guess
 })
+
+test('learningHalfLifeDays defaults to 30, 0 disables, invalid falls back', async () => {
+  expect(DEFAULT_CONFIG.learningHalfLifeDays).toBe(30)
+  expect(parseConfig({ learningHalfLifeDays: '7' }).learningHalfLifeDays).toBe(7)
+  expect(parseConfig({ learningHalfLifeDays: 0 }).learningHalfLifeDays).toBe(0)
+  expect(parseConfig({ learningHalfLifeDays: -3 }).learningHalfLifeDays).toBe(30)
+  expect(parseConfig({ learningHalfLifeDays: 'x' }).learningHalfLifeDays).toBe(30)
+})
