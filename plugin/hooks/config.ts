@@ -1,6 +1,6 @@
 // Pure: every tunable of the mod, parsed from the plugin's options. Invalid values fall back to the defaults.
 
-import type { Action, Tier } from './detector'
+import type { Action, Effort, Tier } from './detector'
 
 export type Rates = { input: number; output: number; cacheRead: number; cacheWrite5m: number; cacheWrite1h: number }
 export type Price = Rates & { longContext?: Rates & { threshold: number } }
@@ -27,6 +27,8 @@ export type Config = {
   consultBudgetUsd: number          // USD the senior calls may cost in the session; 0 = no limit
   deescalateAfter: number           // progress signals after which a swapped agent goes back one tier; 0 = off
   pauseAtHuman: boolean             // refuse the tool calls of an agent that reached the human level until it is resumed
+  effortStep: boolean               // adds the effort level between consult and swap
+  effortBoost: Effort               // lowest effort the effort level raises a request to (it always goes at least one step up)
 }
 
 // USD per million tokens, Anthropic API list prices (Oct 2026), checked against /cost.
@@ -42,6 +44,9 @@ export const DEFAULT_PRICES: Record<Tier, Price> = {
 }
 
 export const ALL_LEVELS: readonly Action[] = ['nudge', 'consult', 'swap', 'human']
+// Every level in escalation order. `effort` is switched by the effortStep option alone, never by `levels`.
+const LEVEL_ORDER: readonly Action[] = ['nudge', 'consult', 'effort', 'swap', 'human']
+const EFFORT_NAMES: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 
 export const DEFAULT_CONFIG: Config = {
   threshold: { haiku: 3, sonnet: 4, opus: 6 },
@@ -63,6 +68,8 @@ export const DEFAULT_CONFIG: Config = {
   consultBudgetUsd: 0,
   pauseAtHuman: true,
   deescalateAfter: 0,
+  effortStep: false,
+  effortBoost: 'high',
   modelOverrides: {},
   verifyCommand: '',
   verifyTimeoutSeconds: 120,
@@ -88,11 +95,23 @@ function bool(v: unknown, fallback: boolean): boolean {
   return t === 'true' ? true : t === 'false' ? false : fallback
 }
 
+// `effort` is accepted as a name so a list naming it stays valid, but it is ignored here: effortStep adds it.
 function parseLevels(v: unknown, fallback: readonly Action[]): readonly Action[] {
   if (typeof v !== 'string' || v.trim() === '') return fallback
   const names = v.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
-  if (names.length === 0 || names.some((n) => !ALL_LEVELS.includes(n as Action))) return fallback
-  return ALL_LEVELS.filter((l) => names.includes(l))
+  if (names.length === 0 || names.some((n) => !LEVEL_ORDER.includes(n as Action))) return fallback
+  const levels = ALL_LEVELS.filter((l) => names.includes(l))
+  return levels.length > 0 ? levels : fallback
+}
+
+// The enabled levels in escalation order, with the effort level between consult and swap when it is on.
+function withEffort(levels: readonly Action[], on: boolean): readonly Action[] {
+  return on ? LEVEL_ORDER.filter((l) => l === 'effort' || levels.includes(l)) : levels
+}
+
+function parseEffort(v: unknown, fallback: Effort): Effort {
+  const t = typeof v === 'string' ? v.trim().toLowerCase() : ''
+  return EFFORT_NAMES.includes(t as Effort) ? (t as Effort) : fallback
 }
 
 function parseMaxTier(v: unknown, fallback: Tier): Tier {
@@ -193,6 +212,7 @@ export function parseConfig(raw: Raw | undefined): Config {
     const perSession = num(o.maxConsultsPerSession)
     const budget = num(o.consultBudgetUsd)
     const deesc = num(o.deescalateAfter)
+    const effortStep = bool(o.effortStep, d.effortStep)
     return {
       ...d,
       threshold: {
@@ -208,7 +228,7 @@ export function parseConfig(raw: Raw | undefined): Config {
       verifyTimeoutSeconds: vt !== undefined && vt > 0 ? Math.min(vt, 600) : d.verifyTimeoutSeconds,
       grace: grace !== undefined && grace >= 0 ? Math.floor(grace) : d.grace,
       senior: senior !== '' && senior.length <= 100 ? senior : d.senior,
-      levels: parseLevels(o.levels, d.levels),
+      levels: withEffort(parseLevels(o.levels, d.levels), effortStep),
       maxTier: parseMaxTier(o.maxTier, d.maxTier),
       prices: parsePrices(o.prices, d.prices),
       modelOverrides: parseModelIds(o.modelIds),
@@ -218,6 +238,8 @@ export function parseConfig(raw: Raw | undefined): Config {
       consultBudgetUsd: budget !== undefined && budget >= 0 ? budget : d.consultBudgetUsd,
       pauseAtHuman: bool(o.pauseAtHuman, d.pauseAtHuman),
       deescalateAfter: deesc !== undefined && deesc >= 1 ? Math.floor(deesc) : d.deescalateAfter,
+      effortStep,
+      effortBoost: parseEffort(o.effortBoost, d.effortBoost),
     }
   } catch {
     return d

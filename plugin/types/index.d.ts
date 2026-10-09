@@ -28,6 +28,8 @@ declare module 'claude-code' {
           paused?: boolean
           progressSignals?: number
           deescalated?: boolean
+          effortSeen?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | number | null
+          effortBoosted?: boolean
         }[]
         ledger: {
           actual: number

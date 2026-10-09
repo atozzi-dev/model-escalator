@@ -115,6 +115,18 @@
       "description": "Progress signals (failing tests dropping or reaching 0) after which an agent that was swapped up goes back one tier, once per run. Off by default: returning to a cheaper model rewrites the prompt cache and may bring the block back. 0 is off.",
       "default": 0
     },
+    "effortStep": {
+      "type": "boolean",
+      "title": "Raise the effort before a model swap",
+      "description": "Adds a level between the senior consult and the model swap: the stuck agent keeps its model and its requests carry a higher effort (one step above their own, at least the effort boost) until its next swap. Skipped for a model that takes no effort or a request already at max. Off by default until measured: a higher effort costs more output tokens and a change of effort rewrites the prompt cache.",
+      "default": false
+    },
+    "effortBoost": {
+      "type": "string",
+      "title": "Effort boost",
+      "description": "Lowest effort the effort level raises a request to: low, medium, high, xhigh or max. The request always goes at least one step above its own effort.",
+      "default": "high"
+    },
     "consultBudgetUsd": {
       "type": "number",
       "title": "Consult budget (USD)",

@@ -6,7 +6,20 @@ import { exitCodes, parseTestRuns } from './testparse'
 export type Tier = 'haiku' | 'sonnet' | 'opus'
 export const LADDER: readonly Tier[] = ['haiku', 'sonnet', 'opus']
 
-export type Action = 'nudge' | 'consult' | 'swap' | 'human'
+export type Action = 'nudge' | 'consult' | 'effort' | 'swap' | 'human'
+
+// The effort scale of a model request, lowest first. A request may also carry a number, or no effort at all
+// (a model that takes none): neither can be raised.
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
+
+// The effort to send instead of `current`: one step above it, and at least `floor`. Undefined when it cannot be
+// raised: no effort (the model takes none), a number, an unknown value, or already at the top of the scale.
+export function raiseEffort(current: unknown, floor: Effort): Effort | undefined {
+  const i = EFFORTS.indexOf(current as Effort)
+  if (i < 0 || i === EFFORTS.length - 1) return undefined
+  return EFFORTS[Math.max(i + 1, EFFORTS.indexOf(floor))]
+}
 
 export type AgentState = {
   id: string
@@ -34,6 +47,8 @@ export type AgentState = {
   paused?: boolean                      // stopped at the human level: its tool calls are refused until the user resumes it
   progressSignals?: number              // progress signals since the last swap (or de-escalation), counted only while the agent runs above its start tier
   deescalated?: boolean                 // already returned to a cheaper tier in this run: never again until the run is over
+  effortSeen?: Effort | number | null   // effort of the agent's last model request as the engine set it; null when it had none
+  effortBoosted?: boolean               // the effort level acted: its requests carry a raised effort until the next swap
 }
 
 export function tierOf(model: string | undefined): Tier {
@@ -119,7 +134,8 @@ export function normalizePath(p: string): string {
 // The action due at the current level, moving s.level past it. While the agent runs below `maxTier`,
 // the ladder keeps swapping one tier up instead of moving past the swap level. A swap that cannot happen
 // (swap disabled, or the agent already at `maxTier`) is skipped, and the next enabled level acts in its place.
-// A consult that is closed (a limit was reached) is skipped the same way: `skipped` reports it.
+// A consult that is closed (a limit was reached) is skipped the same way: `skipped` reports it. So is an effort
+// level that cannot act: the effort is already raised, or the agent's last request had none that can be raised.
 function nextAction(s: AgentState, cfg: Config, consultOpen: boolean, blocked: readonly Tier[]): { action?: Action; skipped: boolean } {
   const swapAt = cfg.levels.indexOf('swap')
   const canSwap = swapAt >= 0 && tierRank(s.tier) < tierRank(allowedMax(cfg.maxTier, blocked))
@@ -129,6 +145,7 @@ function nextAction(s: AgentState, cfg: Config, consultOpen: boolean, blocked: r
     const action = cfg.levels[s.level]!
     s.level++
     if (action === 'consult' && !consultOpen) { skipped = true; continue }
+    if (action === 'effort' && !canRaiseEffort(s, cfg)) continue
     if (action !== 'swap' || canSwap) return { action, skipped }
   }
   return { skipped }
@@ -229,12 +246,19 @@ export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT
     if (pick.action) {
       s.score = 0
       s.stepsSinceAction = 0
-      if (pick.action === 'swap') { s.tier = nextTier(s.tier); s.progressSignals = 0 }
+      // A swap drops a raised effort: the new model starts from the request's own effort.
+      if (pick.action === 'swap') { s.tier = nextTier(s.tier); s.progressSignals = 0; s.effortBoosted = false }
+      if (pick.action === 'effort') s.effortBoosted = true
       return { state: s, action: pick.action, consultSkipped: pick.skipped }
     }
     return { state: s, consultSkipped: pick.skipped }
   }
   return { state: s }
+}
+
+// The effort level may act: not yet raised on this tier, and the agent's last request carried an effort below the top.
+export function canRaiseEffort(s: AgentState, cfg: Config = DEFAULT_CONFIG): boolean {
+  return s.effortBoosted !== true && raiseEffort(s.effortSeen, cfg.effortBoost) !== undefined
 }
 
 // One model request of a tracked agent. Requests beyond the idle allowance without progress add to the score,
@@ -316,7 +340,8 @@ export function canAskForHelp(s: AgentState, cfg: Config = DEFAULT_CONFIG): bool
   return !s.helped || s.stepsSinceAction >= cfg.grace
 }
 
-// A help call jumps straight to the senior consult: the ladder continues after it (never moves back),
+// A help call jumps straight to the senior consult: the ladder continues after it (the effort level when it is on,
+// else the swap; never moves back),
 // the score restarts and a fresh grace window begins.
 export function afterHelp(s: AgentState, cfg: Config = DEFAULT_CONFIG): AgentState {
   const i = cfg.levels.indexOf('consult')
@@ -325,10 +350,15 @@ export function afterHelp(s: AgentState, cfg: Config = DEFAULT_CONFIG): AgentSta
 
 // True once an agent got past the swap level (it swapped at least once, or had none to make) (or past the last one when swap is disabled).
 // A de-escalated agent moved its level back but did swap up in this run: it still counts.
+// A raised effort alone never counts: the agent kept its model, so the model was not shown to be too weak
+// (without swap, the end of the ladder is the last level other than effort).
 export function escalated(s: AgentState, levels: readonly Action[]): boolean {
   if (s.deescalated === true) return true
   const i = levels.indexOf('swap')
-  return i >= 0 ? s.level > i : s.level >= levels.length
+  if (i >= 0) return s.level > i
+  let last = levels.length - 1
+  while (last >= 0 && levels[last] === 'effort') last--
+  return last >= 0 && s.level > last
 }
 
 // The senior model to retry a refused consult on: the other one of opus and sonnet (never haiku).

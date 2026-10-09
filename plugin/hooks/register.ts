@@ -1,7 +1,7 @@
 import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config'
-import { afterHelp, canAskForHelp, classifyFailure, consultLimit, countStep, escalated, isModelRefusal, isSilent, markStall, newAgent, noteProgress, observe, otherSenior, pauseAgent, pickSenior, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type ModelFailure, type ObservedModels, type Tier } from './detector'
+import { afterHelp, canAskForHelp, classifyFailure, consultLimit, countStep, EFFORTS, escalated, isModelRefusal, isSilent, markStall, newAgent, noteProgress, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type ModelFailure, type ObservedModels, type Tier } from './detector'
 import { buildDossier, inputFromState } from './dossier'
 import { categorize, recommend, record, type Stats } from './learning'
 import { createQueue } from './queue'
@@ -315,8 +315,10 @@ export const register: Register = (on, options) => {
       }
       ledger = addIntervention(ledger, action)
       if (mode === 'observe') {
-        await $.ui.log(`${id} (${state.category}): would ${action}`)
-        agents.set(id, { ...state, tier: a.tier })   // measure only: never swap
+        await $.ui.log(`${id} (${state.category}): would ${labelOf(action)}`)
+        // Measure only: never swap, never raise the effort.
+        const { effortBoosted: _boost, ...rest } = state
+        agents.set(id, a.effortBoosted === undefined ? { ...rest, tier: a.tier } : { ...rest, tier: a.tier, effortBoosted: a.effortBoosted })
         await save($)
         return r
       }
@@ -336,13 +338,22 @@ export const register: Register = (on, options) => {
     let a = e.agentId ? agents.get(e.agentId) : undefined
     seenModels = rememberModel(seenModels, e.model, !e.agentId)
     if (e.agentId && watching() && agents.has(e.agentId)) mark(e.agentId, await clockNow($))
+    // The request's own effort, before any rewrite: the effort level can act only on one it can raise.
+    const ownEffort = effortOf(e)
+    try {
+      const cur = e.agentId && watching() ? agents.get(e.agentId) : undefined
+      if (cur && cur.effortSeen !== ownEffort) { a = { ...cur, effortSeen: ownEffort }; agents.set(cur.id, a) }
+    } catch { /* the request goes on unchanged */ }
     // A tier another agent found refused is out for this one too: back to the highest usable tier.
     if (mode === 'active' && a && a.tier !== usableTier(a, blockedTiers)) {
       a = revertSwap(a, usableTier(a, blockedTiers), config)
       agents.set(a.id, a)
     }
     const swap = mode === 'active' && a !== undefined && a.tier !== a.startTier
-    const r = swap ? yield* guardedSwap($, e, next, a!) : yield* next(e)
+    // A raised effort goes on every request of the agent until its next swap; a request without one is left alone.
+    const boost = mode === 'active' && a?.effortBoosted === true ? raiseEffort(ownEffort, config.effortBoost) : undefined
+    const sent = boost ? ({ ...e, effort: boost } as TurnStepInput) : e
+    const r = swap ? yield* guardedSwap($, sent, next, a!) : yield* next(sent)
     seenModels = rememberModel(seenModels, r.usage?.model, !e.agentId)
     if (e.agentId && watching() && agents.has(e.agentId)) mark(e.agentId, await clockNow($))
     // Idle requests count only where a score is acted on: active, and observe (which measures it).
@@ -571,6 +582,20 @@ type ModelReply = string | { isAnswered: true; text: string; usage?: { output_to
 
 const tag = (text: string): string => tagNote(sessionTag, text)
 
+// The effort of a model request as the engine set it: a level of the scale, a number, or null when it has none.
+// Read loosely: the published types of older engines do not declare the field.
+function effortOf(e: TurnStepInput): Effort | number | null {
+  try {
+    const v = (e as { effort?: unknown }).effort
+    if (typeof v === 'number' && Number.isFinite(v)) return v
+    return EFFORTS.includes(v as Effort) ? (v as Effort) : null
+  } catch {
+    return null
+  }
+}
+
+const labelOf = (action: Action): string => (action === 'effort' ? 'raise effort' : action)
+
 // The refusal for a tool call of a paused agent (active mode only), or undefined when the call may go on.
 function pausedDeny(id: string | undefined): { deny: string } | undefined {
   try {
@@ -606,13 +631,17 @@ async function resumeCommand($: EngineInterface, target: string): Promise<string
 }
 
 async function act($: EngineInterface, s: AgentState, action: Action): Promise<string> {
-  await $.ui.log(`${s.id} (${s.category}): ${action}`)
+  const raised = action === 'effort' ? raiseEffort(s.effortSeen, config.effortBoost) : undefined
+  await $.ui.log(`${s.id} (${s.category}): ${labelOf(action)}${raised ? ` to ${raised}` : ''}`)
   switch (action) {
     case 'nudge':
       return tag('You are not making progress. Pause: re-read the last error or result in full, ' +
         'state one new hypothesis, then continue with a different approach.')
     case 'consult':
       return consult($, s)
+    case 'effort':
+      return tag(`From your next step you think harder (effort ${raised ?? 'raised'}) on the same model. ` +
+        'Re-assess the problem from scratch: question your assumptions before you continue.')
     case 'swap':
       await $.ui.toast(`${s.category}: switched to ${s.tier}`)
       return tag(`From your next step you run on a stronger model (${s.tier}). Re-assess the problem from scratch.`)

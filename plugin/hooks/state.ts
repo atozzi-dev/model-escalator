@@ -1,4 +1,4 @@
-import { MAX_ERROR_TEXT, MAX_RECENT_ERRORS, type AgentState, type ObservedModels, type Tier } from './detector'
+import { EFFORTS, MAX_ERROR_TEXT, MAX_RECENT_ERRORS, type AgentState, type ObservedModels, type Tier } from './detector'
 import type { Ledger } from './savings'
 
 // Pure: the session state that must survive a module reload. The host keeps `$.state` for the session
@@ -39,6 +39,10 @@ export function parseSnapshot(v: unknown): Snapshot | undefined {
     if (typeof a.helped !== 'boolean') delete live.helped
     if (typeof a.paused !== 'boolean') delete live.paused
     if (typeof a.deescalated !== 'boolean') delete live.deescalated
+    if (typeof a.effortBoosted !== 'boolean') delete live.effortBoosted
+    // The last request's effort: a level of the scale, a finite number, or null (the model takes none).
+    const e = a.effortSeen
+    if (!(e === null || EFFORTS.includes(e as never) || (typeof e === 'number' && Number.isFinite(e)))) delete live.effortSeen
     if (typeof a.progressSignals !== 'number' || !Number.isInteger(a.progressSignals) || a.progressSignals < 0) delete live.progressSignals
     // Senior consults of the agent: a whole, non-negative count; anything else is dropped (counts as none).
     if (typeof a.consults !== 'number' || !Number.isInteger(a.consults) || a.consults < 0) delete live.consults
