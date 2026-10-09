@@ -23,7 +23,9 @@ const storeQueue = createQueue()
 
 // Verification commands run strictly one at a time, whatever the number of agents finishing together.
 const verifyQueue = createQueue()
-const pendingVerifications = new Set<Promise<void>>()
+// True once the "could not run" toast was shown in this session.
+let unavailableToasted = false
+const pendingVerifications =new Set<Promise<void>>()
 
 // Resolves once every verification started so far has recorded its outcome. Used by session.end.
 async function flushVerifications(): Promise<void> {
@@ -127,6 +129,7 @@ export const register: Register = (on, options) => {
     } else {
       try {
         sessionTag = newTag()
+        unavailableToasted = false
         mode = readMode(await $.env.get('MODEL_ESCALATOR_MODE'))
         const b = await $.env.get('MODEL_ESCALATOR_BASELINE')
         baselinePinned = Boolean(b)
@@ -288,19 +291,31 @@ function outputTail(r: { stdout?: unknown; stderr?: unknown }): string {
 // Runs the user's verification command (argv from the user's own option, never from agent output)
 // in the session's working directory and records the run as accepted or not. Never throws.
 async function verifyAndRecord($: EngineInterface, a: AgentState, wasEscalated: boolean, argv: string[]): Promise<void> {
+  // Only a command that ran and exited non-zero is a failed verification. One that could not start or
+  // outlived the timeout (the call rejects) says nothing about the agent: the run is recorded as if no
+  // verification were configured, and the user is told once per session to check the option.
   let failed = false
+  let unavailable = ''
   let detail = ''
   try {
     const r = await $.process.run(argv, { timeoutMs: config.verifyTimeoutSeconds * 1000 })
+    if (typeof r.exitCode !== 'number') throw new Error('no exit code')
     failed = r.exitCode !== 0
     detail = `exit ${r.exitCode}: ${outputTail(r)}`
   } catch (err) {
-    failed = true
-    detail = `did not complete: ${String((err as { message?: unknown } | undefined)?.message ?? err).slice(0, 200)}`
+    unavailable = String((err as { message?: unknown } | undefined)?.message ?? err).slice(0, 200)
   }
   try {
-    await $.ui.log(`${a.id} (${a.category}): verification ${failed ? 'failed' : 'passed'} (${detail})`)
-    if (failed) await $.ui.toast(`${a.category}: verification failed`)
+    if (unavailable) {
+      await $.ui.log(`${a.id} (${a.category}): verification could not run: ${unavailable}`)
+      if (!unavailableToasted) {
+        unavailableToasted = true
+        await $.ui.toast('Verification could not run: check the verifyCommand option')
+      }
+    } else {
+      await $.ui.log(`${a.id} (${a.category}): verification ${failed ? 'failed' : 'passed'} (${detail})`)
+      if (failed) await $.ui.toast(`${a.category}: verification failed`)
+    }
   } catch { /* the note is best effort */ }
   try { await recordOutcome($, a, wasEscalated, failed) } catch { /* best effort */ }
 }

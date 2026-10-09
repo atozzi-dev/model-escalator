@@ -102,14 +102,21 @@ test('a very long output is truncated in the log', { options: CMD }, async ($, o
   expect(line.length < 1500).toBe(true)
 })
 
-test('a command that throws counts as failed and does not crash', { options: CMD }, async ($, on) => {
+test('a command that cannot run is not a failure: recorded as unverified, one toast per session', { options: CMD }, async ($, on) => {
   const h = wire(on, {}, () => { throw new Error('spawn ENOENT') })
   await $.session.start({ cwd: '/work' } as never)
-  await finish($, await spawn($))
-  await settle(h, 1)
+  const a = await spawn($)
+  const b = await spawn($)
+  await finish($, a)
+  await finish($, b)
+  await settle(h, 2)
   const c = (await stats($))['general-purpose:tests'].haiku
-  expect(c.failedVerify).toBe(1)
+  expect(c.runs).toBe(2)
+  expect(c.failedVerify ?? 0).toBe(0)
+  expect(c.notAccepted).toBe(0)
+  expect(h.logs.filter((l) => l.includes('verification could not run')).length).toBe(2)
   expect(h.toasts.length).toBe(1)
+  expect(h.toasts[0]!).toContain('verifyCommand')
 })
 
 test('the timeout option is passed to the process call', { options: { ...CMD, verifyTimeoutSeconds: 7 } }, async ($, on) => {
