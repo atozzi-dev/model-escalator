@@ -90,6 +90,11 @@ function textOf(r: { text?: string; result?: unknown }): string {
   try { return JSON.stringify(r.result ?? '') } catch { return '' }
 }
 
+// The engine marks a fork with `fork: true` on agent.spawn (subagentType is `fork` too).
+export function isFork(e: { fork?: boolean; subagentType?: string }): boolean {
+  return e.fork === true || e.subagentType === 'fork'
+}
+
 export function readMode(v: string | undefined): Mode {
   return v === 'observe' || v === 'baseline' || v === 'off' ? v : 'active'
 }
@@ -143,6 +148,8 @@ export const register: Register = (on, options) => {
   // 1. Spawn: remember the agent, and let history (or baseline mode) pick the model.
   on('agent.spawn', async ($, e, next) => {
     if (mode === 'off') return next(e)
+    // A fork inherits the parent's model and context: it is never rewritten, announced or tracked.
+    if (isFork(e)) return next(e)
     let ev = e
     const category = categorize(e.subagentType, e.description)
     try {
