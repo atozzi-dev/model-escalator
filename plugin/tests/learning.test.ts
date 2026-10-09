@@ -1,5 +1,7 @@
 import { expect, test } from 'claude-code/testing'
-import { categorize, formatStats, HALF_LIFE_MS, recommend, record, type Stats } from '../hooks/learning'
+import {
+  categorize, formatStats, goodEnoughChance, HALF_LIFE_MS, mulberry32, recommend, recommendWithExploration, record, type Stats,
+} from '../hooks/learning'
 
 const DAY = 24 * 60 * 60 * 1000
 
@@ -132,4 +134,116 @@ test('formatStats ages: minutes, hours, days, and no age without a clock', async
   expect(formatStats(mk(0), 1_000_000_000 + 5 * 60_000)).toContain('(updated 5 min ago)')
   expect(formatStats(mk(0), 1_000_000_000 + 7 * 3_600_000)).toContain('(updated 7 h ago)')
   expect(formatStats(mk(0))).not.toContain('updated')
+})
+
+// --- Exploration ---
+
+// `bad` of `runs` recorded at `at` for one tier.
+function cell(st: Stats, tier: 'haiku' | 'sonnet' | 'opus', runs: number, bad: number, at?: number): Stats {
+  for (let i = 0; i < runs; i++) st = record(st, 'c', tier, i < bad, 0, false, at)
+  return st
+}
+
+// Share of `n` seeded draws that explored.
+function exploreRate(st: Stats, n: number, opts: { explore?: number; now?: number } = {}, seed = 42): number {
+  const rand = mulberry32(seed)
+  let hits = 0
+  for (let i = 0; i < n; i++) if (recommendWithExploration(st, 'c', 'haiku', { ...opts, rand }).reason === 'explore') hits++
+  return hits / n
+}
+
+test('mulberry32 is deterministic per seed and stays in [0, 1)', async () => {
+  const a = mulberry32(7), b = mulberry32(7), c = mulberry32(8)
+  const xs = Array.from({ length: 1000 }, () => a())
+  expect(xs.every((x, i) => x === b() && x >= 0 && x < 1)).toBe(true)
+  expect(xs[0] === c()).toBe(false)
+  const mean = xs.reduce((s, x) => s + x, 0) / xs.length
+  expect(Math.abs(mean - 0.5)).toBeLessThan(0.05)
+})
+
+test('without a random source exploration matches recommend and explains itself', async () => {
+  const none: Stats = {}
+  expect(recommendWithExploration(none, 'c', 'haiku')).toEqual({ tier: 'haiku', reason: 'requested', learned: 'haiku' })
+  const raised = cell({}, 'haiku', 6, 4)
+  expect(recommendWithExploration(raised, 'c', 'haiku')).toEqual({ tier: 'sonnet', reason: 'raised', learned: 'sonnet' })
+  expect(recommendWithExploration(raised, 'c', 'haiku').tier).toBe(recommend(raised, 'c', 'haiku'))
+  const both = cell(cell({}, 'haiku', 6, 4), 'sonnet', 6, 4)
+  expect(recommendWithExploration(both, 'c', 'haiku').tier).toBe(recommend(both, 'c', 'haiku'))
+})
+
+test('the chance that a tier is good enough is the Beta posterior of its failure rate below the threshold', async () => {
+  // posterior of the failure rate with a uniform prior: Beta(notAccepted + 1, accepted + 1)
+  // 6 runs, 4 not accepted: Beta(5, 3) at 0.4 = P(Bin(7, 0.4) >= 5) = 0.096256
+  const st = cell({}, 'haiku', 6, 4)
+  expect(Math.abs(goodEnoughChance(st['c']!.haiku!) - 0.096256)).toBeLessThan(1e-6)
+  // 7 runs, 4 not accepted: Beta(5, 4) at 0.4 = P(Bin(8, 0.4) >= 5) = 0.1736704
+  expect(Math.abs(goodEnoughChance(cell({}, 'haiku', 7, 4)['c']!.haiku!) - 0.1736704)).toBeLessThan(1e-6)
+  // no evidence: uniform prior, P(p <= 0.4) = 0.4
+  expect(Math.abs(goodEnoughChance({ runs: 0, escalated: 0, tokens: 0 }) - 0.4)).toBeLessThan(1e-9)
+})
+
+test('with a seed the exploration rate matches the posterior chance', async () => {
+  const st = cell({}, 'haiku', 6, 4)
+  const rate = exploreRate(st, 20_000)
+  expect(Math.abs(rate - 0.096256)).toBeLessThan(0.01)
+  const r1 = exploreRate(st, 2000, {}, 3), r2 = exploreRate(st, 2000, {}, 3)
+  expect(r1).toBe(r2)
+})
+
+test('the explore weight scales the exploration rate and zero turns it off', async () => {
+  const st = cell({}, 'haiku', 6, 4)
+  expect(Math.abs(exploreRate(st, 20_000, { explore: 0.5 }) - 0.048128)).toBeLessThan(0.008)
+  expect(exploreRate(st, 5000, { explore: 0 })).toBe(0)
+})
+
+test('an explored run starts on the cheaper tier with reason explore', async () => {
+  const st = cell({}, 'haiku', 6, 4)
+  expect(recommendWithExploration(st, 'c', 'haiku', { rand: () => 0 })).toEqual({ tier: 'haiku', reason: 'explore', learned: 'sonnet' })
+  expect(recommendWithExploration(st, 'c', 'haiku', { rand: () => 0.999 })).toEqual({ tier: 'sonnet', reason: 'raised', learned: 'sonnet' })
+})
+
+test('exploration never goes below the requested tier', async () => {
+  // sonnet requested and bad, haiku never tried: the rule raises to opus, exploration may only go back to sonnet
+  const st = cell({}, 'sonnet', 6, 5)
+  for (const u of [0, 0.01, 0.5, 0.999]) {
+    const r = recommendWithExploration(st, 'c', 'sonnet', { rand: () => u })
+    expect(r.tier === 'haiku').toBe(false)
+  }
+  expect(recommendWithExploration(st, 'c', 'sonnet', { rand: () => 0 }).tier).toBe('sonnet')
+  // nothing raised: no exploration at all, the random source is not even consumed
+  let calls = 0
+  const r = recommendWithExploration(cell({}, 'haiku', 6, 0), 'c', 'sonnet', { rand: () => { calls++; return 0 } })
+  expect(r).toEqual({ tier: 'sonnet', reason: 'requested', learned: 'sonnet' })
+  expect(calls).toBe(0)
+})
+
+test('with two raised tiers exploration tries the cheapest first, then the next', async () => {
+  const st = cell(cell({}, 'haiku', 6, 4), 'sonnet', 6, 4)
+  expect(recommend(st, 'c', 'haiku')).toBe('opus')
+  const seq = (...us: number[]) => { let i = 0; return () => us[i++] ?? 0.999 }
+  expect(recommendWithExploration(st, 'c', 'haiku', { rand: seq(0) }).tier).toBe('haiku')
+  expect(recommendWithExploration(st, 'c', 'haiku', { rand: seq(0.999, 0) })).toEqual({ tier: 'sonnet', reason: 'explore', learned: 'opus' })
+  expect(recommendWithExploration(st, 'c', 'haiku', { rand: seq(0.999, 0.999) }).reason).toBe('raised')
+})
+
+test('strong recent evidence of failure makes exploration vanishingly rare', async () => {
+  const st = cell({}, 'haiku', 20, 18)
+  expect(goodEnoughChance(st['c']!.haiku!)).toBeLessThan(1e-5)
+  expect(exploreRate(st, 20_000)).toBeLessThan(1e-3)
+})
+
+test('old evidence is explored more often than fresh evidence', async () => {
+  const t0 = 1_000_000
+  const st = cell({}, 'haiku', 12, 8, t0)
+  const fresh = goodEnoughChance(st['c']!.haiku!, t0)
+  const old = goodEnoughChance(st['c']!.haiku!, t0 + HALF_LIFE_MS)
+  expect(old > fresh).toBe(true)
+  expect(recommendWithExploration(st, 'c', 'haiku', { now: t0 + HALF_LIFE_MS }).reason).toBe('raised')
+  expect(exploreRate(st, 20_000, { now: t0 + HALF_LIFE_MS }) > exploreRate(st, 20_000, { now: t0 })).toBe(true)
+})
+
+test('a broken random source never explores', async () => {
+  const st = cell({}, 'haiku', 6, 4)
+  expect(recommendWithExploration(st, 'c', 'haiku', { rand: () => NaN }).reason).toBe('raised')
+  expect(recommendWithExploration(st, 'c', 'haiku', { rand: () => 0, explore: NaN }).reason).toBe('raised')
 })
