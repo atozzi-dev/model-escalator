@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Single source for the pinned engine version.
+  CLAUDE_CODE_VERSION: 2.1.295
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -20,7 +24,7 @@ jobs:
         with:
           node-version: 22
       # Pinned: the mods API is in early access and can change between releases.
-      - run: npm install -g @anthropic-ai/claude-code@2.1.295 typescript@5.6.3
+      - run: npm install -g @anthropic-ai/claude-code@${{ env.CLAUDE_CODE_VERSION }} typescript@5.6.3
       - run: claude plugin validate .
       - run: claude plugin test .
       - name: Type check against the published mod API types
@@ -28,4 +32,16 @@ jobs:
           mkdir -p .claude-plugin/types
           curl -fsSL -o .claude-plugin/types/claude-code.d.ts \
             https://raw.githubusercontent.com/anthropics/claude-code/main/mods/types/claude-code.d.ts
-          tsc -p .
+          # The published types are written by a specific Claude Code release.
+          types_version=$(head -n 1 .claude-plugin/types/claude-code.d.ts \
+            | sed -nE 's#^// Written by Claude Code ([0-9]+\.[0-9]+\.[0-9]+)\.?[[:space:]]*$#\1#p')
+          if [ -z "$types_version" ]; then
+            echo "::error title=Type check::Cannot read the version from the first line of the published types"
+            exit 1
+          fi
+          newest=$(printf '%s\n%s\n' "$types_version" "$CLAUDE_CODE_VERSION" | sort -V | tail -n 1)
+          if [ "$newest" = "$types_version" ]; then
+            tsc -p .
+          else
+            echo "::warning title=Type check skipped::Published types are at $types_version, older than the pinned engine $CLAUDE_CODE_VERSION. The type check runs locally against the engine's own types."
+          fi
