@@ -1,7 +1,7 @@
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config'
-import { afterHelp, canAskForHelp, consultLimit, countStep, escalated, isSilent, markStall, newAgent, observe, otherSenior, rememberModel, resolveModelId, skipGrace, tierOf, toolEnd, toolStart, touch, type Action, type AgentState, type ObservedModels, type Tier } from './detector'
+import { afterHelp, canAskForHelp, classifyFailure, consultLimit, countStep, escalated, isModelRefusal, isSilent, markStall, newAgent, observe, otherSenior, pickSenior, refuseTier, rememberModel, resolveModelId, revertSwap, skipGrace, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type ModelFailure, type ObservedModels, type Tier } from './detector'
 import { buildDossier, inputFromState } from './dossier'
 import { categorize, recommend, record, type Stats } from './learning'
 import { createQueue } from './queue'
@@ -44,6 +44,10 @@ let mode: Mode = 'active'
 let baselinePinned = false
 // Full model ids seen on turn.step requests and results, per tier: what a swap must send.
 let seenModels: ObservedModels = {}
+// Tiers the account refused this session: as a swap target (the ladder never goes there or above) and as a
+// senior consult model. Persisted in the snapshot.
+let blockedTiers: Tier[] = []
+let refusedSeniors: Tier[] = []
 
 // Per-session tag that authenticates our notes.
 let sessionTag = newTag()
@@ -94,13 +98,15 @@ export function resetState(): void {
   baseline = 'opus'
   baselinePinned = false
   seenModels = {}
+  blockedTiers = []
+  refusedSeniors = []
   mode = 'active'
   stallTimer?.cancel()
   stallTimer = undefined
 }
 
 function snapshot(): Snapshot {
-  return { agents: [...agents.values()], ledger, seenModels, sessionTag, mode, baseline, baselinePinned }
+  return { agents: [...agents.values()], ledger, seenModels, sessionTag, mode, baseline, baselinePinned, blockedTiers, refusedSeniors }
 }
 
 // Reference to the session snapshot in $.state (the contract lives in types/index.d.ts).
@@ -168,6 +174,8 @@ export const register: Register = (on, options) => {
       mode = saved.mode
       baseline = saved.baseline
       baselinePinned = saved.baselinePinned
+      blockedTiers = saved.blockedTiers
+      refusedSeniors = saved.refusedSeniors
     } else {
       try {
         sessionTag = newTag()
@@ -281,7 +289,7 @@ export const register: Register = (on, options) => {
       const limit = limitFor(a)
       const { state, action, consultSkipped } = observe(a, {
         tool: e.tool, ok: r.isError !== true, text: textOf(r), summary: summarize(e as unknown as Record<string, unknown>),
-      }, config, limit === undefined)
+      }, config, limit === undefined, blockedTiers)
       if (consultSkipped && limit) await noteLimit($, id, state.category, limit)
       if (!action) { agents.set(id, state); await save($); return r }
       ledger = addIntervention(ledger, action)
@@ -303,11 +311,16 @@ export const register: Register = (on, options) => {
   // 3. Swap the model of escalated agents, and meter every request's cost.
   on('turn.step', async function* ($, e, next) {
     if (!e.agentId && !baselinePinned) baseline = tierOf(e.model)
-    const a = e.agentId ? agents.get(e.agentId) : undefined
+    let a = e.agentId ? agents.get(e.agentId) : undefined
     seenModels = rememberModel(seenModels, e.model)
     if (e.agentId && watching() && agents.has(e.agentId)) mark(e.agentId, await clockNow($))
+    // A tier another agent found refused is out for this one too: back to the highest usable tier.
+    if (mode === 'active' && a && a.tier !== usableTier(a, blockedTiers)) {
+      a = revertSwap(a, usableTier(a, blockedTiers), config)
+      agents.set(a.id, a)
+    }
     const swap = mode === 'active' && a !== undefined && a.tier !== a.startTier
-    const r = yield* next(swap ? { ...e, model: resolveModelId(seenModels, a!.tier, config.modelIds) } : e)
+    const r = swap ? yield* guardedSwap($, e, next, a!) : yield* next(e)
     seenModels = rememberModel(seenModels, r.usage?.model)
     if (e.agentId && watching() && agents.has(e.agentId)) mark(e.agentId, await clockNow($))
     // Idle requests count only where a score is acted on: active, and observe (which measures it).
@@ -368,6 +381,90 @@ export const register: Register = (on, options) => {
     } catch { /* best effort */ }
     return next(e)
   })
+}
+
+// What an API failure says about the model, read from whatever the thrown value carries.
+function failureOf(err: unknown): ModelFailure {
+  const o = (typeof err === 'object' && err !== null ? err : {}) as Record<string, unknown>
+  const inner = (typeof o.error === 'object' && o.error !== null ? o.error : {}) as Record<string, unknown>
+  const status = [o.status, o.statusCode, inner.status].find((v): v is number => typeof v === 'number')
+  const kind = [o.error, inner.type, o.type, o.code].find((v): v is string => typeof v === 'string')
+  return { status, error: kind, message: String(typeof o.message === 'string' ? o.message : err).slice(0, 500) }
+}
+
+// A cheap call that names the model: the engine allowlist-checks it and classifies the failure, so a request
+// that came back empty can be told apart (refused model or transient). Never throws.
+async function probeModel($: EngineInterface, model: string): Promise<ModelFailure | undefined> {
+  try {
+    const reply = await $.model.complete({ model, prompt: 'ok', maxTokens: 1 }) as ModelReply
+    if (typeof reply === 'string' || reply.isAnswered) return undefined
+    return { status: reply.status, error: reply.reason === 'api-error' ? reply.error : undefined }
+  } catch (err) {
+    return failureOf(err)
+  }
+}
+
+// A swap target the account refuses: remember it for the session (it caps the ladder like maxTier, and it is
+// no senior either), send every agent that sits on or above it back to the highest usable tier with its
+// ladder at the human level, and tell the user. Returns the tier the asking agent now runs on.
+async function refuseSwapTarget($: EngineInterface, id: string, tier: Tier, model: string): Promise<Tier> {
+  blockedTiers = refuseTier(blockedTiers, tier)
+  refusedSeniors = refuseTier(refusedSeniors, tier)
+  for (const [aid, a] of [...agents]) {
+    const ok = usableTier(a, blockedTiers)
+    if (a.tier !== ok) agents.set(aid, revertSwap(a, ok, config))
+  }
+  const a = agents.get(id)
+  const back = a?.tier ?? tier
+  try {
+    await $.ui.log(`${id} (${a?.category ?? '-'}): ${model} is not available, stays on ${back}`)
+    await $.ui.toast(`${model} is not available: ${a?.category ?? 'agent'} stays on ${back}`)
+  } catch { /* the notice is best effort */ }
+  await save($)
+  return back
+}
+
+// The request of a swapped agent, on its target tier. If the engine refuses the model (unknown id, not on the
+// organisation's allowlist) before any content came back, the same step is sent again on the tier that worked,
+// so the agent never sees the failure; any other failure goes through untouched. Chunks of the engine's own
+// are held back until the first real one, so a failed first attempt leaves nothing in the stream.
+async function* guardedSwap(
+  $: EngineInterface, e: TurnStepInput, next: (e: TurnStepInput) => HookStream<TurnStepChunk, TurnStepResult>, a: AgentState,
+): AsyncGenerator<TurnStepChunk, TurnStepResult> {
+  const target = resolveModelId(seenModels, a.tier, config.modelIds)
+  const held: TurnStepChunk[] = []
+  let live = false
+  let result: TurnStepResult | undefined
+  let thrown: { err: unknown } | undefined
+  try {
+    const stream = next({ ...e, model: target })
+    for (;;) {
+      const it = await stream.next()
+      if (it.done) { result = it.value; break }
+      if (live) { yield it.value; continue }
+      if (it.value.kind === 'engine') { held.push(it.value); continue }
+      live = true
+      yield* held.splice(0)
+      yield it.value
+    }
+  } catch (err) {
+    if (live) throw err
+    thrown = { err }
+  }
+  // A failure that names its cause is classified as it is; one that does not (an empty result, an opaque
+  // error) is probed with a one-token call that the engine classifies.
+  let failure: ModelFailure | undefined
+  if (thrown) failure = failureOf(thrown.err)
+  else if (!live && (!result || (result.stopReason === null && result.usage === null))) failure = {}
+  if (failure && classifyFailure(failure) === 'unknown') failure = await probeModel($, target)
+  if (!failure || !isModelRefusal(failure)) {
+    if (thrown) throw thrown.err
+    yield* held.splice(0)
+    return result!
+  }
+  const back = await refuseSwapTarget($, a.id, a.tier, target)
+  const fallback = back === a.startTier && tierOf(e.model) === back ? e.model : resolveModelId(seenModels, back, config.modelIds)
+  return yield* next({ ...e, model: fallback })
 }
 
 // One tick of the stall check: flags running agents silent past the window (once until they act again).
@@ -492,11 +589,14 @@ async function consult($: EngineInterface, s: AgentState, extra = ''): Promise<s
   const counted = agents.get(s.id)
   if (counted) agents.set(s.id, { ...counted, consults: (counted.consults ?? 0) + 1 })
   const diffStat = await gitDiffStat($)
-  let advice = await askSenior($, config.senior, buildDossier(inputFromState(s, { diffStat, extra })))
-  if (!advice) {
+  // A senior the account refused (not allowed, unknown) is skipped for the rest of the session.
+  const first = pickSenior(config.senior, refusedSeniors)
+  let advice = first ? await askSenior($, first, buildDossier(inputFromState(s, { diffStat, extra }))) : ''
+  const second = first ? otherSenior(first) : undefined
+  if (!advice && second && !refusedSeniors.includes(tierOf(second))) {
     // A refusal (often the safety classifier) is intermittent and model dependent: one retry on the other
     // senior model, with a tighter dossier (same diff stat, git is not run again).
-    advice = await askSenior($, otherSenior(config.senior), buildDossier(inputFromState(s, { diffStat, extra }), RETRY_DOSSIER_LIMITS))
+    advice = await askSenior($, second, buildDossier(inputFromState(s, { diffStat, extra }), RETRY_DOSSIER_LIMITS))
   }
   if (!advice) {
     try {
@@ -525,6 +625,11 @@ async function askSenior($: EngineInterface, model: string, prompt: string): Pro
         const why = r && !r.isAnswered ? `reason=${r.reason ?? 'unknown'} status=${r.status ?? '-'} error=${r.error ?? '-'}` : 'reason=empty-text'
         await $.ui.log(`senior consult (${model}) gave no advice: ${why} output_tokens=${r?.usage?.output_tokens ?? '-'}`, { to: 'debug' })
       } catch { /* diagnostics only */ }
+      // The model itself is unusable for this account: never ask it again this session.
+      if (typeof reply !== 'string' && !reply.isAnswered && reply.reason === 'api-error' && isModelRefusal({ status: reply.status, error: reply.error })) {
+        refusedSeniors = refuseTier(refusedSeniors, tierOf(model))
+        try { await $.ui.log(`senior model ${model} is not available: skipped for the rest of the session`) } catch { /* diagnostics only */ }
+      }
     }
     const usage = typeof reply === 'string' ? undefined : asUsage(reply.usage)
     ledger = addConsult(ledger, { usage, promptChars: prompt.length + SENIOR_SYSTEM.length, replyChars: advice.length }, tierOf(model), config)

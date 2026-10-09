@@ -84,6 +84,7 @@ Real spend comes from the token usage each model request reports, priced at API 
 
 ## Known limitations
 
+- **Models your organisation does not allow.** If a swap target is refused (not on the allowlist, or not offered to your account), the mod sends the step again on the previous model, never swaps to that tier again in the session, and hands the agent to the human level with a notice. A refused senior model is skipped for consults.
 - **The savings report is not a full bill.** It counts the requests that go through the agent loops. A few requests Claude Code makes on its own (for example prompt suggestions) are not visible to the mod, so in short sessions the total can be up to about 15% lower than `/cost`.
 - **Supervisor notes are tagged, not hidden.** The mod's notes reach the agent next to tool results. The announcement in each tracked prompt carries a per-session tag (`[supervisor:xxxxxx]`), so an agent can tell a real note from text injected through tool output. Text that claims to be a supervisor note without that tag is not one.
 

@@ -101,9 +101,9 @@ export function normalizePath(p: string): string {
 // the ladder keeps swapping one tier up instead of moving past the swap level. A swap that cannot happen
 // (swap disabled, or the agent already at `maxTier`) is skipped, and the next enabled level acts in its place.
 // A consult that is closed (a limit was reached) is skipped the same way: `skipped` reports it.
-function nextAction(s: AgentState, cfg: Config, consultOpen: boolean): { action?: Action; skipped: boolean } {
+function nextAction(s: AgentState, cfg: Config, consultOpen: boolean, blocked: readonly Tier[]): { action?: Action; skipped: boolean } {
   const swapAt = cfg.levels.indexOf('swap')
-  const canSwap = swapAt >= 0 && tierRank(s.tier) < tierRank(cfg.maxTier)
+  const canSwap = swapAt >= 0 && tierRank(s.tier) < tierRank(allowedMax(cfg.maxTier, blocked))
   if (canSwap && s.level > swapAt) return { action: 'swap', skipped: false }   // level stays just past the swap
   let skipped = false
   while (s.level < cfg.levels.length) {
@@ -141,7 +141,8 @@ export type Observation = { tool: string; ok: boolean; text: string; summary: st
 
 // `consultOpen` false means a limit forbids consults now: a consult due at this trigger is skipped to the next
 // enabled level, and `consultSkipped` tells the caller that a limit stopped it.
-export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT_CONFIG, consultOpen = true): { state: AgentState; action?: Action; consultSkipped?: boolean } {
+// `blocked` lists the tiers the account refused this session: a swap never reaches them, nor any tier above.
+export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT_CONFIG, consultOpen = true, blocked: readonly Tier[] = []): { state: AgentState; action?: Action; consultSkipped?: boolean } {
   const s: AgentState = { ...prev, errorCounts: { ...prev.errorCounts }, editCounts: { ...prev.editCounts }, log: [...prev.log] }
   s.stepsSinceAction++
   let progress = false
@@ -205,7 +206,7 @@ export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT
 
   const due = s.level === 0 || s.stepsSinceAction >= cfg.grace
   if (s.score >= cfg.threshold[s.tier] && due) {
-    const pick = nextAction(s, cfg, consultOpen)
+    const pick = nextAction(s, cfg, consultOpen, blocked)
     if (pick.action) {
       s.score = 0
       s.stepsSinceAction = 0
@@ -286,4 +287,57 @@ export function otherSenior(senior: string): 'opus' | 'sonnet' {
 // After a refused consult nothing was given to the agent: the next ladder step is due without a grace window.
 export function skipGrace(s: AgentState, cfg: Config = DEFAULT_CONFIG): AgentState {
   return { ...s, stepsSinceAction: Math.max(s.stepsSinceAction, cfg.grace) }
+}
+
+// Blocked models: a tier the account refuses (not on the organisation's allowlist, or not offered to it) is
+// remembered for the session. It caps the ladder like `maxTier` does: the tier itself and all above are out.
+export function refuseTier(blocked: readonly Tier[], tier: Tier): Tier[] {
+  return blocked.includes(tier) ? [...blocked] : [...blocked, tier]
+}
+
+// The highest tier a swap may reach: `max`, or the one just below the lowest refused tier if that is lower.
+export function allowedMax(max: Tier, blocked: readonly Tier[]): Tier {
+  if (blocked.length === 0) return max
+  const lowest = Math.min(...blocked.map(tierRank))
+  return LADDER[Math.max(0, Math.min(tierRank(max), lowest - 1))]!
+}
+
+// The tier an agent should run on given the refused ones: its own tier, capped, never below where it started.
+export function usableTier(s: AgentState, blocked: readonly Tier[]): Tier {
+  const capped = LADDER[Math.min(tierRank(s.tier), tierRank(allowedMax('opus', blocked)))]!
+  return tierRank(capped) < tierRank(s.startTier) ? s.startTier : capped
+}
+
+// After a swap target was refused: the agent goes back to the tier that worked and its ladder moves to the
+// human level, due without a grace window. Without a human level it keeps its place.
+export function revertSwap(s: AgentState, to: Tier, cfg: Config = DEFAULT_CONFIG): AgentState {
+  const human = cfg.levels.indexOf('human')
+  return { ...s, tier: to, level: human >= 0 ? human : s.level, stepsSinceAction: Math.max(s.stepsSinceAction, cfg.grace) }
+}
+
+export type ModelFailure = { status?: number | null; error?: string; message?: string }
+
+// What an API failure says about the model: `model` when it is unusable for this account (unknown id, not
+// allowed, no permission) so retrying cannot help; `transient` for overload, rate limit, server errors and
+// dropped connections, which say nothing about the model; `unknown` when the failure carries no such sign.
+export function classifyFailure(f: ModelFailure): 'model' | 'transient' | 'unknown' {
+  const err = (f.error ?? '').toLowerCase()
+  const msg = (f.message ?? '').toLowerCase()
+  const status = typeof f.status === 'number' ? f.status : undefined
+  if (err === 'model_not_found') return 'model'
+  if (['rate_limit', 'overloaded', 'server_error', 'authentication_failed', 'billing_error'].includes(err)) return 'transient'
+  if (status !== undefined && (status === 429 || status >= 500)) return 'transient'
+  if (status === 404 || status === 403) return 'model'
+  if (/overload|rate.?limit|too many requests|\b(429|5\d\d)\b|timed? ?out|econn|socket|network/.test(msg)) return 'transient'
+  if (/not_found|not found|not allowed|allowlist|not available|invalid model|unknown model|permission|not have access|may not exist/.test(msg)) return 'model'
+  return status === 400 && /model/.test(msg) ? 'model' : 'unknown'
+}
+
+export const isModelRefusal = (f: ModelFailure): boolean => classifyFailure(f) === 'model'
+
+// The senior model for a consult: the configured one, else the other one, skipping refused tiers.
+export function pickSenior(senior: string, refused: readonly Tier[]): string | undefined {
+  if (!refused.includes(tierOf(senior))) return senior
+  const other = otherSenior(senior)
+  return refused.includes(other) ? undefined : other
 }

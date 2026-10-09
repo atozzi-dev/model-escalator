@@ -41,6 +41,8 @@ declare module 'claude-code' {
         mode: 'active' | 'observe' | 'baseline' | 'off'
         baseline: 'haiku' | 'sonnet' | 'opus'
         baselinePinned: boolean
+        blockedTiers?: ('haiku' | 'sonnet' | 'opus')[]
+        refusedSeniors?: ('haiku' | 'sonnet' | 'opus')[]
       }
     }
   }

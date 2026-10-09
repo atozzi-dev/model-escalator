@@ -11,6 +11,8 @@ export type Snapshot = {
   mode: 'active' | 'observe' | 'baseline' | 'off'
   baseline: Tier
   baselinePinned: boolean
+  blockedTiers: Tier[]      // tiers the account refused as a swap target this session
+  refusedSeniors: Tier[]    // tiers refused for senior consults this session
 }
 
 const MODES = ['active', 'observe', 'baseline', 'off']
@@ -43,5 +45,7 @@ export function parseSnapshot(v: unknown): Snapshot | undefined {
     } else delete live.recentErrors
     return live
   })
-  return { ...v, agents } as unknown as Snapshot
+  // Snapshots saved before blocked models existed have no such lists; a malformed one counts as empty.
+  const tiers = (x: unknown): Tier[] => (Array.isArray(x) ? [...new Set(x.filter((t): t is Tier => TIERS.includes(t as string)))] : [])
+  return { ...v, agents, blockedTiers: tiers(v.blockedTiers), refusedSeniors: tiers(v.refusedSeniors) } as unknown as Snapshot
 }
