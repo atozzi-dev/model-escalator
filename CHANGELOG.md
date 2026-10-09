@@ -16,6 +16,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ### Changed
 
+- The senior consult receives the full text of recent failed attempts (hidden failures included), the files the agent touched and the output of a read-only `git diff --stat`, all capped and with obvious secrets redacted.
 - A refused senior consult is retried once on the other senior model with a shorter dossier; if that is refused too, the next ladder step is due immediately instead of after a grace window.
 - Senior consults are priced from the token usage their reply reports instead of an estimate from text length; the estimate remains as a fallback.
 - The escalation ladder keeps swapping an agent one model up (Haiku, then Sonnet, then Opus) before asking a human. The new `maxTier` option (default `opus`) caps how high a swap may go.
