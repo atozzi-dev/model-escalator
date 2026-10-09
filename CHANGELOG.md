@@ -10,6 +10,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Edit oscillation: editing the same file again and again without progress now raises an agent's difficulty score.
 - Test output is parsed run by run (jest, vitest, pytest, go test, cargo test and plain "N failed, M passed" summaries): a loop that repeats a failing test in one command, or a command that hides the failure behind a trailing exit marker, now weighs like separate failing attempts.
 - Optional `verifyCommand` and `verifyTimeoutSeconds` options: the mod runs your check (for example a test command) at the end of each tracked agent's run, and a failed check counts against that model for that kind of task when learning. A check that cannot start or times out is not counted against the model.
+- Agents that keep making model requests without any progress now climb the escalation ladder too, after a generous number of requests.
 
 ### Changed
 
