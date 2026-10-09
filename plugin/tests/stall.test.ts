@@ -37,6 +37,12 @@ test('markStall adds the agent threshold to the score and flags it; activity cle
   expect(t.score).toBe(DEFAULT_CONFIG.threshold.haiku)
 })
 
+test('markStall with a tool call in flight flags the agent but leaves the score alone', async () => {
+  const s = markStall(toolStart(touch(newAgent('a', 'x', 'haiku', 't'), 0), 0), DEFAULT_CONFIG)
+  expect(s.stalled).toBe(true)
+  expect(s.score).toBe(0)
+})
+
 test('a toolEnd never drives the in-flight count below zero', async () => {
   expect(toolEnd(touch(newAgent('a', 'x', 'haiku', 't'), 0), 1).inFlight).toBe(0)
 })
@@ -149,6 +155,24 @@ test('a tool call in flight is not a stall until three windows have passed', asy
   await w.clock.advance(66 * MIN)
   await call
   expect(w.stalls().length).toBe(1)
+})
+
+test('a slow command that succeeds is notified and counted but gets no note', async ($, on) => {
+  const w = await wire(on, $, undefined, 40 * MIN)
+  const call = $.tool.call({ tool: 'Bash', command: 'npm run build', agentId: w.agentId } as never)
+  await w.clock.settle()
+  await w.clock.advance(31 * MIN)
+  expect(w.stalls().length).toBe(1)
+  expect(w.toasts.length).toBe(1)
+  await w.clock.advance(10 * MIN)
+  const r = await call as { context?: readonly string[] }
+  expect(r.context?.length ?? 0).toBe(0)
+  const out = await $.command.run({ command: 'escalator', args: '' } as never) as { text?: string }
+  expect(out.text ?? '').toContain('stall')
+  const next = $.tool.call({ tool: 'Read', file_path: '/src/a.ts', agentId: w.agentId } as never)
+  await w.clock.settle()
+  await w.clock.advance(41 * MIN)
+  expect(((await next) as { context?: readonly string[] }).context?.length ?? 0).toBe(0)
 })
 
 test('an agent whose run completed is never flagged', async ($, on) => {

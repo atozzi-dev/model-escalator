@@ -219,8 +219,11 @@ export function isSilent(s: AgentState, now: number, cfg: Config = DEFAULT_CONFI
   return silent > window ? silent : undefined
 }
 
-// Flags the agent and raises its score to its threshold, so its next tool call earns the next ladder note.
+// Flags the agent. A silent agent with no tool call running also gets its score raised to its threshold, so its
+// next tool call earns the next ladder note. With a tool call in flight the command may simply be slow: only
+// flag it (the lead is notified); if the command fails, the usual error signals take over.
 export function markStall(s: AgentState, cfg: Config = DEFAULT_CONFIG): AgentState {
+  if ((s.inFlight ?? 0) > 0) return { ...s, stalled: true }
   return { ...s, stalled: true, score: Math.max(s.score, cfg.threshold[s.tier]) }
 }
 
