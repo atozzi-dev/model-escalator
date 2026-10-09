@@ -200,10 +200,7 @@ test('a run that only raised the effort is not recorded as escalated', ON, async
   expect(r.kinds).toEqual(['nudge', 'consult', 'effort'])
   await $.turn.complete({ turnId: 't', agentId: id, answer: 'done' } as never)
   const text = await report($, 'stats')
-  const stats = JSON.parse(text.split('\n').slice(1).join('\n')) as Record<string, Record<string, { runs: number; escalated: number }>>
-  const cell = Object.values(stats)[0]!.haiku!
-  expect(cell.runs).toBe(1)
-  expect(cell.escalated).toBe(0)
+  expect(text).toContain('haiku: 1 runs, 0 escalated')
 })
 
 test('observe: logs that it would raise the effort, counts it, never changes a request', { options: { effortStep: true } }, async ($, on) => {

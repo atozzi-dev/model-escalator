@@ -115,11 +115,23 @@
       "description": "Progress signals (failing tests dropping or reaching 0) after which an agent that was swapped up goes back one tier, once per run. Off by default: returning to a cheaper model rewrites the prompt cache and may bring the block back. 0 is off.",
       "default": 0
     },
+    "learningHalfLifeDays": {
+      "type": "number",
+      "title": "Learning half-life (days)",
+      "description": "Days after which learned evidence counts half, so a category is not stuck on a stronger model forever because of old runs. 0 never forgets.",
+      "default": 30
+    },
     "effortStep": {
       "type": "boolean",
       "title": "Raise the effort before a model swap",
       "description": "Adds a level between the senior consult and the model swap: the stuck agent keeps its model and its requests carry a higher effort (one step above their own, at least the effort boost) until its next swap. Skipped for a model that takes no effort or a request already at max. Off by default until measured: a higher effort costs more output tokens and a change of effort rewrites the prompt cache.",
       "default": false
+    },
+    "notifyLead": {
+      "type": "boolean",
+      "title": "Tell the lead about escalations",
+      "description": "Add a short notice to the main conversation, read by the lead, whenever an agent is swapped to a stronger model, cannot be (the model is not available) or needs a human. At most 10 messages per session; active mode only. Off keeps the log and the toasts only.",
+      "default": true
     },
     "effortBoost": {
       "type": "string",

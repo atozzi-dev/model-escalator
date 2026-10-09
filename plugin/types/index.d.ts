@@ -30,6 +30,8 @@ declare module 'claude-code' {
           deescalated?: boolean
           effortSeen?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | number | null
           effortBoosted?: boolean
+          name?: string
+          taskTitle?: string
         }[]
         ledger: {
           actual: number
