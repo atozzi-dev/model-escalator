@@ -13,6 +13,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Agents that keep making model requests without any progress now climb the escalation ladder too, after a generous number of requests.
 - Agents that go silent for `stallMinutes` (default 10) are reported in the log, the status line and a toast, and get a note on their next tool call; a tool call still running counts as activity for three times that window.
 - `ask_for_help` tool: a tracked agent that is stuck can ask for the senior consult directly, once per grace window; in observe mode the request is only logged.
+- Optional de-escalation: with `deescalateAfter` set, an agent that was swapped to a stronger model goes back one tier after that many progress signals, at most once per run (off by default).
 - An agent that reaches the human level is paused: its further tool calls, `ask_for_help` included, are refused until you resume it with `/escalator resume <id>` (or `resume all`). `/escalator` lists paused agents; the `pauseAtHuman` option (default on) turns the pause off.
 - `modelIds` option and broader model id recognition, so swaps pick the right ids on Amazon Bedrock, Vertex and gateways.
 - Swap targets the account does not allow are handled: the step is sent again on the previous model, that model is not tried again in the session, the agent moves to the human level with a notice, and a refused senior model is skipped for consults.
