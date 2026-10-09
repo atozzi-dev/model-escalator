@@ -2,6 +2,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { dossier, newAgent, observe, rememberModel, resolveModelId, tierOf, type Action, type AgentState, type ObservedModels, type Tier } from './detector'
 import { categorize, recommend, record, type Stats } from './learning'
+import { parseSnapshot, type Snapshot } from './state'
 import { addConsult, addIntervention, addStep, emptyLedger, report, statusLine, type Ledger, type Usage } from './savings'
 
 const STATS_KEY = 'stats'
@@ -38,6 +39,35 @@ export function resetState(): void {
   mode = 'active'
 }
 
+function snapshot(): Snapshot {
+  return { agents: [...agents.values()], ledger, seenModels, sessionTag, mode, baseline, baselinePinned }
+}
+
+// Reference to the session snapshot in $.state (the contract lives in types/index.d.ts).
+const SESSION = { plugin: 'model-escalator', key: 'session' } as const
+
+// Write-through with coalescing: only one write runs at a time and the loop always writes the latest
+// in-memory state, so concurrent steps and tool calls cannot lose each other's updates. Never throws.
+let inflight: Promise<void> | null = null
+let dirty = false
+
+function save($: EngineInterface): Promise<void> {
+  dirty = true
+  if (inflight) return inflight
+  inflight = (async () => {
+    try {
+      while (dirty) {
+        dirty = false
+        await $.state.set(SESSION, JSON.parse(JSON.stringify(snapshot())) as Snapshot)
+      }
+    } catch { /* keep working from memory */ } finally {
+      dirty = false
+      inflight = null
+    }
+  })()
+  return inflight
+}
+
 function summarize(e: Record<string, unknown>): string {
   for (const k of ['command', 'file_path', 'pattern', 'url', 'query']) {
     const v = e[k]
@@ -58,13 +88,28 @@ export function readMode(v: string | undefined): Mode {
 
 export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
-    try {
-      sessionTag = newTag()
-      mode = readMode(await $.env.get('MODEL_ESCALATOR_MODE'))
-      const b = await $.env.get('MODEL_ESCALATOR_BASELINE')
-      baselinePinned = Boolean(b)
-      if (b) baseline = tierOf(b)
-    } catch { /* defaults */ }
+    // $.state is session-scoped: a snapshot there means this is a reload of the module, not a new session.
+    let saved: Snapshot | undefined
+    try { saved = parseSnapshot((await $.state.get(SESSION)).value) } catch { saved = undefined }
+    if (saved) {
+      agents.clear()
+      for (const a of saved.agents) agents.set(a.id, a)
+      ledger = saved.ledger
+      seenModels = saved.seenModels
+      sessionTag = saved.sessionTag
+      mode = saved.mode
+      baseline = saved.baseline
+      baselinePinned = saved.baselinePinned
+    } else {
+      try {
+        sessionTag = newTag()
+        mode = readMode(await $.env.get('MODEL_ESCALATOR_MODE'))
+        const b = await $.env.get('MODEL_ESCALATOR_BASELINE')
+        baselinePinned = Boolean(b)
+        if (b) baseline = tierOf(b)
+      } catch { /* defaults */ }
+      await save($)
+    }
     const r = await next(e)
     try {
       await $.command.register({ name: 'escalator', description: 'Model escalator: savings report and stats', argumentHint: '[report|stats|reset]' })
@@ -103,7 +148,10 @@ export const register: Register = (on) => {
       if (mode === 'active') ev = { ...ev, prompt: withAnnouncement(ev.prompt, sessionTag) }
     } catch { /* keep the original prompt */ }
     const r = await next(ev)
-    if (r.agentId) agents.set(r.agentId, newAgent(r.agentId, category, r.model, e.prompt))
+    if (r.agentId) {
+      agents.set(r.agentId, newAgent(r.agentId, category, r.model, e.prompt))
+      await save($)
+    }
     return r
   })
 
@@ -118,15 +166,17 @@ export const register: Register = (on) => {
       const { state, action } = observe(a, {
         tool: e.tool, ok: r.isError !== true, text: textOf(r), summary: summarize(e as unknown as Record<string, unknown>),
       })
-      if (!action) { agents.set(id, state); return r }
+      if (!action) { agents.set(id, state); await save($); return r }
       ledger = addIntervention(ledger, action)
       if (mode === 'observe') {
         await $.ui.log(`${id} (${state.category}): would ${action}`)
         agents.set(id, { ...state, tier: a.tier })   // measure only: never swap
+        await save($)
         return r
       }
       agents.set(id, state)
       const note = await act($, state, action)
+      await save($)
       return { ...r, context: [...(r.context ?? []), note] } as typeof r
     } catch {
       return r
@@ -144,6 +194,7 @@ export const register: Register = (on) => {
     if (mode !== 'off' && r.usage) {
       ledger = addStep(ledger, r.usage as Usage, tierOf(r.usage.model), baseline, Boolean(e.agentId))
     }
+    await save($)
     return r
   })
 
@@ -158,6 +209,7 @@ export const register: Register = (on) => {
           await $.store.set(STATS_KEY, record(stats, a.category, a.startTier, a.level >= 3, 0))
         }
         agents.set(id, { ...a, level: 0, score: 0, stepsSinceAction: 0 })
+        await save($)
         await $.ui.status(statusLine(ledger))
       } catch { /* best effort */ }
     }
