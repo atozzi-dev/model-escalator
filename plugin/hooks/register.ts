@@ -3,6 +3,7 @@ import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, parseConfig, type Config } from './config'
 import { dossier, escalated, newAgent, observe, rememberModel, resolveModelId, tierOf, type Action, type AgentState, type ObservedModels, type Tier } from './detector'
 import { categorize, recommend, record, type Stats } from './learning'
+import { createQueue } from './queue'
 import { parseSnapshot, type Snapshot } from './state'
 import { addConsult, addIntervention, addStep, emptyLedger, report, statusLine, type Ledger, type Usage } from './savings'
 
@@ -15,6 +16,10 @@ const SENIOR_SYSTEM =
 // active: full behavior · observe: measure and log what it would do, never intervene
 // baseline: every agent runs on the baseline tier, no interventions (the A/B control arm) · off: pass through
 export type Mode = 'active' | 'observe' | 'baseline' | 'off'
+
+// Every read-modify-write of $.store goes through this queue, so agents that finish together
+// cannot both read the old value and overwrite each other's update.
+const storeQueue = createQueue()
 
 const agents = new Map<string, AgentState>()
 let ledger: Ledger = emptyLedger()
@@ -129,7 +134,7 @@ export const register: Register = (on, options) => {
       return { text: 'Learned stats per category (runs / escalated):\n' + JSON.stringify(stats, null, 2) }
     }
     if (arg === 'reset') {
-      await $.store.delete(STATS_KEY)
+      await storeQueue(async () => { await $.store.delete(STATS_KEY) })
       return { text: 'Learned stats cleared.' }
     }
     return { text: `Mode: ${mode}\n` + report(ledger, baseline) }
@@ -210,8 +215,11 @@ export const register: Register = (on, options) => {
     if (id && a && mode !== 'off') {
       try {
         if (mode !== 'baseline') {
-          const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
-          await $.store.set(STATS_KEY, record(stats, a.category, a.startTier, escalated(a, config.levels), 0))
+          const wasEscalated = escalated(a, config.levels)
+          await storeQueue(async () => {
+            const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
+            await $.store.set(STATS_KEY, record(stats, a.category, a.startTier, wasEscalated, 0))
+          })
         }
         agents.set(id, { ...a, level: 0, score: 0, stepsSinceAction: 0 })
         await save($)
@@ -225,8 +233,11 @@ export const register: Register = (on, options) => {
   on('session.end', async ($, e, next) => {
     try {
       if (mode !== 'off' && ledger.agentSteps > 0) {
-        const past = ((await $.store.get(SESSIONS_KEY)) ?? []) as unknown[]
-        await $.store.set(SESSIONS_KEY, [...past, { at: await $.clock.now(), mode, baseline, ledger }].slice(-50))
+        const entry = { at: await $.clock.now(), mode, baseline, ledger }
+        await storeQueue(async () => {
+          const past = ((await $.store.get(SESSIONS_KEY)) ?? []) as unknown[]
+          await $.store.set(SESSIONS_KEY, [...past, entry].slice(-50))
+        })
       }
     } catch { /* best effort */ }
     return next(e)

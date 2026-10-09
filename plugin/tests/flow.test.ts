@@ -115,3 +115,44 @@ test('the nudge asks to pause the repetition and does not read as a stop order',
   expect(notes[0]).not.toMatch(/\bStop\b/)
   expect(notes[0]).toContain('continue')
 })
+
+// Store whose get/set/delete yield several times, so unserialized read-modify-writes interleave.
+function slowStore(on: any, data: Record<string, unknown>): void {
+  const ticks = async (): Promise<void> => { for (let i = 0; i < 5; i++) await Promise.resolve() }
+  on('store.get', async (_$: unknown, e: any) => { await ticks(); return { value: data[e.key] } })
+  on('store.set', async (_$: unknown, e: any) => { await ticks(); data[e.key] = e.value; return { value: undefined } })
+  on('store.delete', async (_$: unknown, e: any) => { await ticks(); delete data[e.key]; return { value: undefined } })
+}
+
+function quiet(on: any): void {
+  let n = 0
+  on('agent.spawn', (_$: unknown, e: any) => ({ model: e.model ?? 'haiku', agentId: 'q' + ++n }) as never)
+  on('turn.complete', () => ({ text: 'done' }) as never)
+  for (const k of ['ui.log', 'ui.toast', 'ui.status'] as const) on(k, () => ({ value: undefined }) as never)
+}
+
+const spawnOne = async ($: any): Promise<string> =>
+  (await $.agent.spawn({ prompt: 'p', description: 'fix db test', subagentType: 'general-purpose', model: 'haiku' } as never) as { agentId: string }).agentId
+
+const totalRuns = (stats: Record<string, Record<string, { runs: number }>> | undefined): number =>
+  Object.values(stats ?? {}).flatMap((tiers) => Object.values(tiers)).reduce((sum, c) => sum + c.runs, 0)
+
+test('agents completing together all land in the learned stats', async ($, on) => {
+  const data: Record<string, unknown> = {}
+  slowStore(on, data)
+  quiet(on)
+  const ids = [await spawnOne($), await spawnOne($), await spawnOne($)]
+  await Promise.all(ids.map((agentId) => $.turn.complete({ turnId: 't' + agentId, agentId, answer: 'done' } as never)))
+  expect(totalRuns(data['stats'] as never)).toBe(3)
+})
+
+test('reset waits for pending updates instead of racing them', async ($, on) => {
+  const data: Record<string, unknown> = {}
+  slowStore(on, data)
+  quiet(on)
+  const ids = [await spawnOne($), await spawnOne($)]
+  const pending = ids.map((agentId) => $.turn.complete({ turnId: 't' + agentId, agentId, answer: 'done' } as never))
+  const reset = $.command.run({ command: 'escalator', args: 'reset', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as never)
+  await Promise.all([...pending, reset])
+  expect(data['stats']).toBe(undefined)
+})
