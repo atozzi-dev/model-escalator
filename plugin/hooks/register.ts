@@ -1,7 +1,7 @@
 import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config'
-import { afterHelp, canAskForHelp, classifyFailure, consultLimit, countStep, EFFORTS, escalated, isModelRefusal, isSilent, markStall, newAgent, noteProgress, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type ModelFailure, type ObservedModels, type Tier } from './detector'
+import { afterHelp, canAskForHelp, classifyFailure, consultLimit, countStep, EFFORTS, escalated, isModelRefusal, isPauseAllowedTool, isSilent, markStall, newAgent, noteProgress, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type ModelFailure, type ObservedModels, type Tier } from './detector'
 import { buildDossier, inputFromState } from './dossier'
 import { categorize, recommend, record, type Stats } from './learning'
 import { createQueue } from './queue'
@@ -268,7 +268,7 @@ export const register: Register = (on, options) => {
   // The help tool: a tracked agent asks for the senior consult directly. Answered here, never passed on.
   on('tool.call', { tool: HELP_TOOL as never }, async ($, e) => {
     const ev = e as unknown as Record<string, unknown>
-    const stop = pausedDeny(typeof ev.agentId === 'string' ? ev.agentId : undefined)
+    const stop = pausedDeny(typeof ev.agentId === 'string' ? ev.agentId : undefined, ev.tool)
     if (stop) return stop as never
     const text = await handleHelp($, ev, typeof ev.agentId === 'string' ? ev.agentId : undefined)
     return { result: text } as never
@@ -276,7 +276,7 @@ export const register: Register = (on, options) => {
 
   // 2. Every tool call of a watched agent updates its difficulty score.
   on('tool.call', async ($, e, next) => {
-    const stop = pausedDeny(e.agentId)
+    const stop = pausedDeny(e.agentId, e.tool)
     if (stop) return stop
     if ((e.tool as string) === HELP_TOOL) return next(e)
     const id = e.agentId
@@ -597,11 +597,13 @@ function effortOf(e: TurnStepInput): Effort | number | null {
 const labelOf = (action: Action): string => (action === 'effort' ? 'raise effort' : action)
 
 // The refusal for a tool call of a paused agent (active mode only), or undefined when the call may go on.
-function pausedDeny(id: string | undefined): { deny: string } | undefined {
+// Report and communication tools (see PAUSE_ALLOWED_TOOLS) are never refused.
+function pausedDeny(id: string | undefined, tool?: unknown): { deny: string } | undefined {
   try {
-    if (mode !== 'active' || !id || !agents.get(id)?.paused) return undefined
-    return { deny: tag('You are paused by the supervisor: a human has to step in. Stop now, do not retry this tool or call any other, ' +
-      'and reply with a short summary of what you tried and what blocks you. Tool calls stay refused until the user resumes you.') }
+    if (mode !== 'active' || !id || !agents.get(id)?.paused || isPauseAllowedTool(tool)) return undefined
+    return { deny: tag('You are paused by the supervisor until a human resumes you. Do not continue the task and do not retry this tool. ' +
+      'Hand back your summary for the human now (what you tried and what blocks you) with your usual report tool, ' +
+      'or reply in text, then stop.') }
   } catch {
     return undefined
   }
@@ -624,7 +626,8 @@ async function resumeCommand($: EngineInterface, target: string): Promise<string
       try { await $.ui.log(`${a.id} (${a.category}): resumed by the user, ladder restarted on ${a.tier}`) } catch { /* best effort */ }
     }
     try { await $.ui.status(statusLine(ledger)) } catch { /* best effort */ }
-    return `Resumed ${chosen.length === 1 ? 'agent' : 'agents'}: ${lines.join(', ')}. The ladder restarts on the current tier.`
+    return `Resumed ${chosen.length === 1 ? 'agent' : 'agents'}: ${lines.join(', ')}. The ladder restarts on the current tier.\n` +
+      'If an agent already ended its turn, send it a message (for instance ask the lead to message it) to make it continue: the mod cannot wake it.'
   } catch {
     return 'Could not resume the agent.'
   }
@@ -648,8 +651,8 @@ async function act($: EngineInterface, s: AgentState, action: Action): Promise<s
     case 'human':
       await $.ui.toast(`${s.category}: needs a human` + (config.pauseAtHuman ? ` (paused: /escalator resume ${s.id})` : ''))
       await $.ui.status(`stuck: ${s.category} (${s.id})`)
-      return tag('Stop now. Summarize what you tried and what blocks you, and end your turn so a human can step in.' +
-        (config.pauseAtHuman ? ' Your further tool calls are refused until the user resumes you with /escalator resume.' : ''))
+      return tag('Stop now. Do not continue the task: summarize what you tried and what blocks you, hand back the summary with your usual report tool, then stop so a human can step in.' +
+        (config.pauseAtHuman ? ' Your other tool calls are refused until the user resumes you with /escalator resume.' : ''))
   }
 }
 

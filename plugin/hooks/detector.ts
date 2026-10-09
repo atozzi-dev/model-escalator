@@ -423,3 +423,9 @@ export function pickSenior(senior: string, refused: readonly Tier[]): string | u
   const other = otherSenior(senior)
   return refused.includes(other) ? undefined : other
 }
+
+// Tools a paused agent may still call: the ones it uses to report or communicate. Pausing at the human level asks the
+// agent to stop and summarise for a human, so refusing its hand-back would swallow the very report that is asked for.
+export const PAUSE_ALLOWED_TOOLS: readonly string[] = ['SubagentHandback', 'SendMessage', 'TaskList', 'TaskGet', 'TaskUpdate']
+
+export const isPauseAllowedTool = (tool: unknown): boolean => typeof tool === 'string' && PAUSE_ALLOWED_TOOLS.includes(tool)

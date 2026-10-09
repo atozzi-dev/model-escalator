@@ -78,6 +78,40 @@ test('after the human note the agent tool calls are denied with a tagged reason'
   expect(core.toasts.some((t) => t.includes('/escalator resume'))).toBe(true)
 })
 
+test('the denial lets the agent hand back its summary and the human note says so', HUMAN, async ($, on) => {
+  wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  const id = await spawn($)
+  const note = await reachHuman($, id)
+  const text = note.context!.join(' ')
+  expect(text).toContain('Stop now')
+  expect(text).toContain('hand back')
+  expect(text).toContain('/escalator resume')
+  const denied = (await call($, id)).deny!
+  expect(denied.toLowerCase()).toContain('hand back')
+  expect(denied).toContain('summary')
+  expect(denied).not.toMatch(/call any other/)
+})
+
+test('a paused agent can still report and communicate, other tools stay denied', HUMAN, async ($, on) => {
+  const core = wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  const id = await spawn($)
+  await reachHuman($, id)
+  for (const tool of ['SubagentHandback', 'SendMessage', 'TaskList', 'TaskGet', 'TaskUpdate']) {
+    const before = core.calls.length
+    const r = await $.tool.call({ tool, agentId: id } as never) as CallResult
+    expect(r.deny).toBeUndefined()
+    expect(core.calls.length).toBe(before + 1)
+  }
+  for (const tool of ['Bash', 'Edit', 'mcp__model-escalator__ask_for_help']) {
+    const before = core.calls.length
+    const r = await $.tool.call({ tool, agentId: id, command: 'ls', problem: 'x' } as never) as CallResult
+    expect(r.deny).toContain('paused')
+    expect(core.calls.length).toBe(before)
+  }
+})
+
 test('other agents are unaffected by a pause', HUMAN, async ($, on) => {
   const core = wire(on)
   await $.session.start({ cwd: '/work' } as never)
@@ -121,6 +155,8 @@ test('resume <id> lets calls through and restarts the ladder on the current tier
   const out = await escalator($, `resume ${id}`)
   expect(out).toContain(id)
   expect(out.toLowerCase()).toContain('resumed')
+  expect(out).toContain('already ended its turn')
+  expect(out).toContain('send it a message')
   expect(core.logs.some((l) => l.includes(id) && l.toLowerCase().includes('resumed'))).toBe(true)
   expect(await escalator($)).not.toContain('Paused')
   const r = await call($, id)
