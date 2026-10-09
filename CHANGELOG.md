@@ -13,6 +13,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Agents that keep making model requests without any progress now climb the escalation ladder too, after a generous number of requests.
 - Agents that go silent for `stallMinutes` (default 10) are reported in the log, the status line and a toast, and get a note on their next tool call; a tool call still running counts as activity for three times that window.
 - `ask_for_help` tool: a tracked agent that is stuck can ask for the senior consult directly, once per grace window; in observe mode the request is only logged.
+- Senior consults are capped per agent (`maxConsultsPerAgent`, default 3), per session (`maxConsultsPerSession`, default 20) and by dollar budget (`consultBudgetUsd`, default off); a stopped consult falls through to the next ladder level.
 
 ### Changed
 
