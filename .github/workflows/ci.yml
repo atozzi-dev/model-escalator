@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Pinned: the mods API is in early access and can change between releases.
+      - run: npm install -g @anthropic-ai/claude-code@2.1.295 typescript@5.6.3
+      - run: claude plugin validate .
+      - run: claude plugin test .
+      - name: Type check against the published mod API types
+        run: |
+          mkdir -p .claude-plugin/types
+          curl -fsSL -o .claude-plugin/types/claude-code.d.ts \
+            https://raw.githubusercontent.com/anthropics/claude-code/main/mods/types/claude-code.d.ts
+          tsc -p .
