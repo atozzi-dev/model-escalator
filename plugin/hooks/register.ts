@@ -24,14 +24,12 @@ let baselinePinned = false
 // Full model ids seen on turn.step requests and results, per tier: what a swap must send.
 let seenModels: ObservedModels = {}
 
-// Restores the module state to its defaults. Used by tests so each one starts clean.
-// Per-session tag that authenticates our notes; fixedTag is set only by tests.
+// Per-session tag that authenticates our notes.
 let sessionTag = newTag()
-let fixedTag: string | undefined
 
-export function resetState(tag?: string): void {
-  fixedTag = tag
-  sessionTag = tag ?? newTag()
+// Restores the module state to its defaults. Used by tests so each one starts clean.
+export function resetState(): void {
+  sessionTag = newTag()
   agents.clear()
   ledger = emptyLedger()
   baseline = 'opus'
@@ -61,7 +59,7 @@ export function readMode(v: string | undefined): Mode {
 export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     try {
-      sessionTag = fixedTag ?? newTag()
+      sessionTag = newTag()
       mode = readMode(await $.env.get('MODEL_ESCALATOR_MODE'))
       const b = await $.env.get('MODEL_ESCALATOR_BASELINE')
       baselinePinned = Boolean(b)
