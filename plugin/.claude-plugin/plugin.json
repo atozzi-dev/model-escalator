@@ -85,6 +85,12 @@
       "description": "Optional JSON overriding USD per million token rates, e.g. {\"sonnet\":{\"input\":3,\"output\":15}}. Rates: input, output, cacheRead, cacheWrite5m, cacheWrite1h.",
       "default": ""
     },
+    "modelIds": {
+      "type": "string",
+      "title": "Model ids",
+      "description": "Optional JSON with the full model id to send on a swap, per tier, e.g. {\"sonnet\":\"us.anthropic.claude-sonnet-...\",\"opus\":\"...\"}. Needed on Bedrock, Vertex or a gateway when swaps report a model not available. Beats ids seen in the session and the defaults.",
+      "default": ""
+    },
     "maxConsultsPerAgent": {
       "type": "number",
       "title": "Consults per agent",

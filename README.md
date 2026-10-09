@@ -64,6 +64,7 @@ Options are set from `/config` (or under `pluginConfigs` in settings) and apply 
 | `maxConsultsPerSession` | 20 | Senior consults across all agents of the session, counted the same way. `0` allows none |
 | `consultBudgetUsd` | 0 | Dollars the senior calls may cost in the session, retried calls included, from the same prices as the savings report. Once reached, no further consult. `0` means no dollar limit |
 | `prudentTokenRatio` | 0.65 | Share of the tokens a stronger baseline model is assumed to need, between 0 (exclusive) and 1. Used for the prudent end of the savings estimate |
+| `modelIds` | empty | Optional JSON with the full model id to send on a swap, per tier, e.g. `{"sonnet":"us.anthropic.claude-sonnet-...","opus":"..."}`. Beats the ids seen in the session and the built-in defaults. Invalid JSON or non-string values are ignored |
 | `prices` | built-in list prices | Optional JSON overriding USD per million token rates per model, e.g. `{"sonnet":{"input":3,"output":15}}`. Rates: `input`, `output`, `cacheRead`, `cacheWrite5m`, `cacheWrite1h` |
 
 `verifyCommand` runs without a shell (no pipes, redirects or variables), so on Windows name the real executable, for example `npm.cmd test` or `node node_modules/jest/bin/jest.js`. A command that cannot start or hits the timeout is not counted as a failed run: the run is recorded as if no check were set, and the mod logs it and shows one toast per session.
@@ -85,6 +86,7 @@ Real spend comes from the token usage each model request reports, priced at API 
 ## Known limitations
 
 - **Models your organisation does not allow.** If a swap target is refused (not on the allowlist, or not offered to your account), the mod sends the step again on the previous model, never swaps to that tier again in the session, and hands the agent to the human level with a notice. A refused senior model is skipped for consults.
+- **Bedrock, Vertex and gateways.** The mod learns each tier's id from the requests it sees (provider prefixes and suffixes are fine) and prefers the shape of the lead's own id; for a tier it never saw it sends the first-party default. If swaps report a model not available, set `modelIds`.
 - **The savings report is not a full bill.** It counts the requests that go through the agent loops. A few requests Claude Code makes on its own (for example prompt suggestions) are not visible to the mod, so in short sessions the total can be up to about 15% lower than `/cost`.
 - **Supervisor notes are tagged, not hidden.** The mod's notes reach the agent next to tool results. The announcement in each tracked prompt carries a per-session tag (`[supervisor:xxxxxx]`), so an agent can tell a real note from text injected through tool output. Text that claims to be a supervisor note without that tag is not one.
 

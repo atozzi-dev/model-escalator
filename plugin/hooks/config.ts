@@ -15,7 +15,8 @@ export type Config = {
   prices: Record<Tier, Price>       // USD per million tokens
   prudentTokenRatio: number         // fraction of tokens the baseline model would need
   modelIds: Record<Tier, string>    // full ids sent on a swap when none was observed
-  verifyCommand: string             // optional check run at the end of each tracked agent's run; empty = off
+  modelOverrides: Partial<Record<Tier, string>>  // explicit ids from the modelIds option; beat observed ids and defaults
+  verifyCommand: string           // optional check run at the end of each tracked agent's run; empty = off
   verifyTimeoutSeconds: number      // how long the check may run before it counts as failed (at most 600)
   oscillationEdits: number          // edits of one file tolerated since the last progress; each further edit adds to the score
   idleSteps: number                 // model requests tolerated without progress
@@ -58,6 +59,7 @@ export const DEFAULT_CONFIG: Config = {
   maxConsultsPerAgent: 3,
   maxConsultsPerSession: 20,
   consultBudgetUsd: 0,
+  modelOverrides: {},
   verifyCommand: '',
   verifyTimeoutSeconds: 120,
   modelIds: { haiku: 'claude-haiku-5-5', sonnet: 'claude-sonnet-5-5', opus: 'claude-opus-5-5' },
@@ -123,6 +125,21 @@ function parsePrices(v: unknown, base: Record<Tier, Price>): Record<Tier, Price>
   return { haiku: mergePrice(base.haiku, o.haiku), sonnet: mergePrice(base.sonnet, o.sonnet), opus: mergePrice(base.opus, o.opus) }
 }
 
+// `modelIds` is a JSON object keyed by tier: {"sonnet":"us.anthropic.claude-sonnet-..."}. Entries that are not
+// non-empty strings, and unknown keys, are ignored; malformed JSON gives no overrides.
+function parseModelIds(v: unknown): Partial<Record<Tier, string>> {
+  if (typeof v !== 'string' || v.trim() === '') return {}
+  let obj: unknown
+  try { obj = JSON.parse(v) } catch { return {} }
+  if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) return {}
+  const out: Partial<Record<Tier, string>> = {}
+  for (const t of ['haiku', 'sonnet', 'opus'] as const) {
+    const id = (obj as Raw)[t]
+    if (typeof id === 'string' && id.trim() !== '' && id.length <= 200) out[t] = id.trim()
+  }
+  return out
+}
+
 // Splits a command line into an argument vector: spaces separate, single or double quotes group.
 // There is no shell, so no pipes, redirects or variable expansion. An unbalanced quote yields [] (nothing runs).
 export function splitCommand(line: string): string[] {
@@ -182,6 +199,7 @@ export function parseConfig(raw: Raw | undefined): Config {
       levels: parseLevels(o.levels, d.levels),
       maxTier: parseMaxTier(o.maxTier, d.maxTier),
       prices: parsePrices(o.prices, d.prices),
+      modelOverrides: parseModelIds(o.modelIds),
       prudentTokenRatio: ratio !== undefined && ratio > 0 && ratio <= 1 ? ratio : d.prudentTokenRatio,
       maxConsultsPerAgent: perAgent !== undefined && perAgent >= 0 ? Math.floor(perAgent) : d.maxConsultsPerAgent,
       maxConsultsPerSession: perSession !== undefined && perSession >= 0 ? Math.floor(perSession) : d.maxConsultsPerSession,

@@ -40,21 +40,37 @@ export function tierOf(model: string | undefined): Tier {
   return 'sonnet'
 }
 
-export type ObservedModels = Partial<Record<Tier, string>>
+export type ObservedModels = Partial<Record<Tier, string>> & { leadShape?: string }
 
-// Remembers a resolved full id (never a bare alias such as "sonnet") under its own tier.
-export function rememberModel(seen: ObservedModels, model: string | undefined): ObservedModels {
+// Provider shape of an id: whatever precedes "claude-" ("us.anthropic." on Bedrock, "" for first-party and Vertex ids).
+const shapeOf = (lower: string): string => lower.slice(0, lower.indexOf('claude-'))
+
+// Remembers a resolved full id (never a bare alias such as "sonnet") under its own tier. Any provider prefix or
+// suffix is fine (Bedrock region prefixes, "anthropic.", "@date", "-v1:0", "[1m]"): the family word must follow "claude-".
+// `isLead` marks the id as the lead's own: its shape is then preferred, so a Bedrock lead keeps Bedrock-shaped targets
+// even when an id of another shape shows up later for the same tier.
+export function rememberModel(seen: ObservedModels, model: string | undefined, isLead = false): ObservedModels {
   const m = (model ?? '').trim()
   const lower = m.toLowerCase()
-  if (!lower.startsWith('claude-')) return seen
+  const at = lower.indexOf('claude-')
+  if (at < 0) return seen
   // Only the ladder's own families: fable/mythos/unknown ids must never become a swap target.
-  const tier = LADDER.find((t) => lower.includes(t))
-  return tier ? { ...seen, [tier]: m } : seen
+  if (lower.includes('fable') || lower.includes('mythos')) return seen
+  const tier = LADDER.find((t) => lower.indexOf(t, at + 7) >= 0)
+  if (!tier) return seen
+  const next: ObservedModels = { ...seen }
+  if (isLead) next.leadShape = shapeOf(lower)
+  const kept = seen[tier]
+  const keepsLead = kept !== undefined && next.leadShape !== undefined
+    && shapeOf(kept.toLowerCase()) === next.leadShape && shapeOf(lower) !== next.leadShape
+  if (!keepsLead) next[tier] = m
+  return next
 }
 
-// Full model id to send for a tier: the one observed in this session, else the default.
-export function resolveModelId(seen: ObservedModels, tier: Tier, ids: Record<Tier, string> = DEFAULT_CONFIG.modelIds): string {
-  return seen[tier] ?? ids[tier]
+// Full model id to send for a tier: the user's explicit id, else the one observed in this session, else the default.
+export function resolveModelId(seen: ObservedModels, tier: Tier, ids: Record<Tier, string> = DEFAULT_CONFIG.modelIds,
+  overrides: Partial<Record<Tier, string>> = {}): string {
+  return overrides[tier] ?? seen[tier] ?? ids[tier]
 }
 
 export const tierRank = (t: Tier): number => LADDER.indexOf(t)

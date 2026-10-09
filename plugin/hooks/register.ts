@@ -312,7 +312,7 @@ export const register: Register = (on, options) => {
   on('turn.step', async function* ($, e, next) {
     if (!e.agentId && !baselinePinned) baseline = tierOf(e.model)
     let a = e.agentId ? agents.get(e.agentId) : undefined
-    seenModels = rememberModel(seenModels, e.model)
+    seenModels = rememberModel(seenModels, e.model, !e.agentId)
     if (e.agentId && watching() && agents.has(e.agentId)) mark(e.agentId, await clockNow($))
     // A tier another agent found refused is out for this one too: back to the highest usable tier.
     if (mode === 'active' && a && a.tier !== usableTier(a, blockedTiers)) {
@@ -321,7 +321,7 @@ export const register: Register = (on, options) => {
     }
     const swap = mode === 'active' && a !== undefined && a.tier !== a.startTier
     const r = swap ? yield* guardedSwap($, e, next, a!) : yield* next(e)
-    seenModels = rememberModel(seenModels, r.usage?.model)
+    seenModels = rememberModel(seenModels, r.usage?.model, !e.agentId)
     if (e.agentId && watching() && agents.has(e.agentId)) mark(e.agentId, await clockNow($))
     // Idle requests count only where a score is acted on: active, and observe (which measures it).
     try {
@@ -431,7 +431,7 @@ async function refuseSwapTarget($: EngineInterface, id: string, tier: Tier, mode
 async function* guardedSwap(
   $: EngineInterface, e: TurnStepInput, next: (e: TurnStepInput) => HookStream<TurnStepChunk, TurnStepResult>, a: AgentState,
 ): AsyncGenerator<TurnStepChunk, TurnStepResult> {
-  const target = resolveModelId(seenModels, a.tier, config.modelIds)
+  const target = resolveModelId(seenModels, a.tier, config.modelIds, config.modelOverrides)
   const held: TurnStepChunk[] = []
   let live = false
   let result: TurnStepResult | undefined
@@ -463,7 +463,7 @@ async function* guardedSwap(
     return result!
   }
   const back = await refuseSwapTarget($, a.id, a.tier, target)
-  const fallback = back === a.startTier && tierOf(e.model) === back ? e.model : resolveModelId(seenModels, back, config.modelIds)
+  const fallback = back === a.startTier && tierOf(e.model) === back ? e.model : resolveModelId(seenModels, back, config.modelIds, config.modelOverrides)
   return yield* next({ ...e, model: fallback })
 }
 
