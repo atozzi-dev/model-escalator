@@ -4,6 +4,10 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Fixed
+
+- `MODEL_ESCALATOR_BASELINE` now stays the reference model instead of being overwritten by the lead's model on every request.
+
 ## [0.1.0] - 2026-10-09
 
 ### Added
