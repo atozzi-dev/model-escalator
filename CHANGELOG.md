@@ -12,6 +12,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Optional `verifyCommand` and `verifyTimeoutSeconds` options: the mod runs your check (for example a test command) at the end of each tracked agent's run, and a failed check counts against that model for that kind of task when learning. A check that cannot start or times out is not counted against the model.
 - Agents that keep making model requests without any progress now climb the escalation ladder too, after a generous number of requests.
 - Agents that go silent for `stallMinutes` (default 10) are reported in the log, the status line and a toast, and get a note on their next tool call; a tool call still running counts as activity for three times that window.
+- `ask_for_help` tool: a tracked agent that is stuck can ask for the senior consult directly, once per grace window; in observe mode the request is only logged.
 
 ### Changed
 
