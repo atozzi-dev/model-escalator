@@ -324,7 +324,9 @@ export function afterHelp(s: AgentState, cfg: Config = DEFAULT_CONFIG): AgentSta
 }
 
 // True once an agent got past the swap level (it swapped at least once, or had none to make) (or past the last one when swap is disabled).
+// A de-escalated agent moved its level back but did swap up in this run: it still counts.
 export function escalated(s: AgentState, levels: readonly Action[]): boolean {
+  if (s.deescalated === true) return true
   const i = levels.indexOf('swap')
   return i >= 0 ? s.level > i : s.level >= levels.length
 }

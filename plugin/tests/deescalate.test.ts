@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import { DEFAULT_CONFIG, parseConfig } from '../hooks/config'
-import { newAgent, noteProgress, pauseAgent } from '../hooks/detector'
+import { escalated, newAgent, noteProgress, pauseAgent } from '../hooks/detector'
 import { resetState } from '../hooks/register'
 import { parseSnapshot } from '../hooks/state'
 
@@ -131,7 +131,7 @@ test('the allowance restarts when the run is over', OPT, async ($, on) => {
   const id = await spawn($)
   await escalate($, h, id, 1)
   await progress($, h, id, 2)
-  await $.turn.complete({ turnId: 't', agentId: id } as never)
+  await $.turn.complete({ turnId: 't', agentId: id, answer: 'done' } as never)
   await escalate($, h, id, 1)
   const notes = await progress($, h, id, 2)
   expect(notes.some((c) => c.includes('Progress noted'))).toBe(true)
@@ -183,4 +183,23 @@ test('a snapshot without the new fields hydrates, a malformed value is dropped',
   const ok = parseSnapshot({ ...base, agents: [{ id: 'a', progressSignals: 1, deescalated: true }] })!
   expect(ok.agents[0]!.progressSignals).toBe(1)
   expect(ok.agents[0]!.deescalated).toBe(true)
+})
+
+test('a run that swapped up and came back is recorded as escalated', OPT, async ($, on) => {
+  const h = wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  const id = await spawn($)
+  await escalate($, h, id, 1)
+  await progress($, h, id, 2)
+  await $.turn.complete({ turnId: 't', agentId: id, answer: 'done' } as never)
+  const text = ((await $.command.run({ command: 'escalator', args: 'stats', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as never)) as { text: string }).text
+  const stats = JSON.parse(text.split('\n').slice(1).join('\n')) as Record<string, Record<string, { runs: number; escalated: number }>>
+  const cell = Object.values(stats)[0]!.haiku!
+  expect(cell.runs).toBe(1)
+  expect(cell.escalated).toBe(1)
+})
+
+test('escalated() is true for a de-escalated agent', () => {
+  const s = { ...newAgent('a', 'c', 'haiku', 't'), level: 0, deescalated: true }
+  expect(escalated(s, DEFAULT_CONFIG.levels)).toBe(true)
 })
