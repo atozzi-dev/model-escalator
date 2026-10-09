@@ -11,6 +11,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - The senior consult now has a 2000-token cap and logs the reason and token usage to the debug log when it returns no advice.
 - Savings estimate now uses verified Haiku 5.5 prices, its long-context rates, and the cache write price of each loop (1-hour for the main loop, 5-minute for subagents and teammates).
 - Supervisor notes are now tagged with a per-session id announced in the subagent's prompt, so agents can tell them from injected text and follow them.
+- The savings ledger, tracked agents and supervisor tag are kept when Claude Code reloads the plugin mid-session.
 
 ## [0.1.0] - 2026-10-09
 
