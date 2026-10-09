@@ -29,6 +29,7 @@ export type Config = {
   pauseAtHuman: boolean             // refuse the tool calls of an agent that reached the human level until it is resumed
   effortStep: boolean               // adds the effort level between consult and swap
   effortBoost: Effort               // lowest effort the effort level raises a request to (it always goes at least one step up)
+  notifyLead: boolean               // message the lead (main conversation) when an agent is swapped up or needs a human
 }
 
 // USD per million tokens, Anthropic API list prices (Oct 2026), checked against /cost.
@@ -70,6 +71,7 @@ export const DEFAULT_CONFIG: Config = {
   deescalateAfter: 0,
   effortStep: false,
   effortBoost: 'high',
+  notifyLead: true,
   modelOverrides: {},
   verifyCommand: '',
   verifyTimeoutSeconds: 120,
@@ -240,6 +242,7 @@ export function parseConfig(raw: Raw | undefined): Config {
       deescalateAfter: deesc !== undefined && deesc >= 1 ? Math.floor(deesc) : d.deescalateAfter,
       effortStep,
       effortBoost: parseEffort(o.effortBoost, d.effortBoost),
+      notifyLead: bool(o.notifyLead, d.notifyLead),
     }
   } catch {
     return d

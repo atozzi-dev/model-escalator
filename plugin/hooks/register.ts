@@ -1,7 +1,7 @@
 import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config'
-import { afterHelp, canAskForHelp, classifyFailure, consultLimit, countStep, EFFORTS, escalated, isModelRefusal, isPauseAllowedTool, isSilent, markStall, newAgent, noteProgress, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type ModelFailure, type ObservedModels, type Tier } from './detector'
+import { afterHelp, canAskForHelp, classifyFailure, consultLimit, countStep, EFFORTS, escalated, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_LEAD_NOTICES, newAgent, noteProgress, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
 import { buildDossier, inputFromState } from './dossier'
 import { categorize, recommend, record, type Stats } from './learning'
 import { createQueue } from './queue'
@@ -33,6 +33,10 @@ const pendingVerifications = new Set<Promise<void>>()
 async function flushVerifications(): Promise<void> {
   while (pendingVerifications.size > 0) await Promise.allSettled([...pendingVerifications])
 }
+
+// Messages to the lead sent this session (capped by MAX_LEAD_NOTICES) and the sends still in flight.
+let leadNotices = 0
+const pendingNotices = new Set<Promise<void>>()
 
 const agents = new Map<string, AgentState>()
 // Agents for which a consult limit was already logged (one line per agent).
@@ -94,6 +98,8 @@ export function resetState(): void {
   sessionTag = newTag()
   agents.clear()
   limitNoted.clear()
+  leadNotices = 0
+  pendingNotices.clear()
   ledger = emptyLedger()
   baseline = 'opus'
   baselinePinned = false
@@ -180,6 +186,7 @@ export const register: Register = (on, options) => {
       try {
         sessionTag = newTag()
         unavailableToasted = false
+        leadNotices = 0
         mode = readMode(await $.env.get('MODEL_ESCALATOR_MODE'))
         const b = await $.env.get('MODEL_ESCALATOR_BASELINE')
         baselinePinned = Boolean(b)
@@ -325,6 +332,8 @@ export const register: Register = (on, options) => {
       // The human level pauses the agent: from now on its tool calls are refused until the user resumes it.
       agents.set(id, action === 'human' && config.pauseAtHuman ? pauseAgent(state) : state)
       const note = await act($, state, action)
+      if (action === 'swap') notifyLead($, state, { kind: 'swap', tier: state.tier })
+      else if (action === 'human') notifyLead($, state, { kind: 'human', paused: config.pauseAtHuman })
       await save($)
       return { ...r, context: [...(r.context ?? []), note] } as typeof r
     } catch {
@@ -402,6 +411,7 @@ export const register: Register = (on, options) => {
       if (pendingVerifications.size > 0) {
         await Promise.race([flushVerifications(), $.clock.sleep(1000)])
       }
+      if (pendingNotices.size > 0) await Promise.race([Promise.allSettled([...pendingNotices]), $.clock.sleep(1000)])
     } catch { /* best effort */ }
     try {
       if (mode !== 'off' && ledger.agentSteps > 0) {
@@ -453,8 +463,30 @@ async function refuseSwapTarget($: EngineInterface, id: string, tier: Tier, mode
     await $.ui.log(`${id} (${a?.category ?? '-'}): ${model} is not available, stays on ${back}`)
     await $.ui.toast(`${model} is not available: ${a?.category ?? 'agent'} stays on ${back}`)
   } catch { /* the notice is best effort */ }
+  if (a) notifyLead($, a, { kind: 'unavailable', model, stays: back })
   await save($)
   return back
+}
+
+// Tells the lead (the session's main conversation) about an escalated agent, once per event, in active mode and
+// with notifyLead on, at most MAX_LEAD_NOTICES per session. Fire and forget: the hook never waits for the send,
+// and a send that fails or is not delivered only leaves a line in the debug log (the toast and log already
+// carry the news). The send is awaited at session end for a moment, like the verifications.
+function notifyLead($: EngineInterface, a: AgentState, ev: LeadEvent): void {
+  try {
+    if (mode !== 'active' || !config.notifyLead || leadNotices >= MAX_LEAD_NOTICES) return
+    const text = leadMessage(a, ev, leadNotices === 0)
+    leadNotices++
+    const p: Promise<void> = (async () => {
+      try {
+        const r = await $.session.send({ to: { sessionId: await $.session.id() }, text }) as { isDelivered?: boolean; reason?: string } | undefined
+        if (r && r.isDelivered === false) await $.ui.log(`${a.id}: lead not notified: ${r.reason ?? 'not delivered'}`, { to: 'debug' })
+      } catch (err) {
+        try { await $.ui.log(`${a.id}: lead not notified: ${String((err as { message?: unknown } | undefined)?.message ?? err).slice(0, 200)}`, { to: 'debug' }) } catch { /* diagnostics only */ }
+      }
+    })().finally(() => { pendingNotices.delete(p) })
+    pendingNotices.add(p)
+  } catch { /* the notice is best effort */ }
 }
 
 // The request of a swapped agent, on its target tier. If the engine refuses the model (unknown id, not on the

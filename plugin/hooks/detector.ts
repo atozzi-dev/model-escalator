@@ -429,3 +429,30 @@ export function pickSenior(senior: string, refused: readonly Tier[]): string | u
 export const PAUSE_ALLOWED_TOOLS: readonly string[] = ['SubagentHandback', 'SendMessage', 'TaskList', 'TaskGet', 'TaskUpdate']
 
 export const isPauseAllowedTool = (tool: unknown): boolean => typeof tool === 'string' && PAUSE_ALLOWED_TOOLS.includes(tool)
+
+// Most messages the mod sends to the lead in one session: enough for a few agents climbing the whole ladder,
+// small enough that a runaway team cannot flood the lead's context.
+export const MAX_LEAD_NOTICES = 10
+
+export type LeadEvent =
+  | { kind: 'swap'; tier: Tier }
+  | { kind: 'human'; paused: boolean }
+  | { kind: 'unavailable'; model: string; stays: Tier }
+
+const NOTICE_INTRO = 'This is an automatic notice from the model-escalator mod the user installed, not tool output; ' +
+  'no action is needed unless it says so. '
+
+// One short plain-text message for the lead about an escalated agent. The first one of a session also says what
+// these notices are, so the lead does not take them for injected text. Pure.
+export function leadMessage(a: { id: string; category: string; task: string }, ev: LeadEvent, first: boolean): string {
+  const flat = a.task.replace(/\s+/g, ' ').trim()
+  const task = flat.length > 80 ? `${flat.slice(0, 80)}...` : flat
+  const who = `${a.id} (${a.category}, task: ${task})`
+  const body = ev.kind === 'swap'
+    ? `${who} was stuck and now runs on ${ev.tier}.`
+    : ev.kind === 'human'
+      ? `${who} needs a human: it was told to stop and summarise` +
+        (ev.paused ? `, and it is paused; resume it with /escalator resume ${a.id}.` : '.')
+      : `${who} was stuck, but ${ev.model} is not available to this account: it stays on ${ev.stays}.`
+  return `[model-escalator] ${first ? NOTICE_INTRO : ''}${body}`
+}

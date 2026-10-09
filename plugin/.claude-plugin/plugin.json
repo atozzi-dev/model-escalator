@@ -121,6 +121,12 @@
       "description": "Adds a level between the senior consult and the model swap: the stuck agent keeps its model and its requests carry a higher effort (one step above their own, at least the effort boost) until its next swap. Skipped for a model that takes no effort or a request already at max. Off by default until measured: a higher effort costs more output tokens and a change of effort rewrites the prompt cache.",
       "default": false
     },
+    "notifyLead": {
+      "type": "boolean",
+      "title": "Tell the lead about escalations",
+      "description": "Send a short message to the main conversation whenever an agent is swapped to a stronger model, cannot be (the model is not available) or needs a human. At most 10 messages per session; active mode only. Off keeps the log and the toasts only.",
+      "default": true
+    },
     "effortBoost": {
       "type": "string",
       "title": "Effort boost",
