@@ -1,5 +1,72 @@
 import { expect, test } from 'claude-code/testing'
-import { categorize, recommend, record, type Stats } from '../hooks/learning'
+import { categorize, HALF_LIFE_MS, recommend, record, type Stats } from '../hooks/learning'
+
+const DAY = 24 * 60 * 60 * 1000
+
+test('a cell untouched for one half-life counts half when a run is recorded', async () => {
+  const t0 = 1_000_000
+  let st: Stats = {}
+  for (let i = 0; i < 8; i++) st = record(st, 'c', 'haiku', i < 4, 100, false, t0)
+  const next = record(st, 'c', 'haiku', false, 100, false, t0 + HALF_LIFE_MS)
+  const c = next['c']!.haiku!
+  expect(Math.abs(c.runs - 5)).toBeLessThan(1e-9)
+  expect(Math.abs(c.escalated - 2)).toBeLessThan(1e-9)
+  expect(Math.abs(c.tokens - 500)).toBeLessThan(1e-9)
+  expect(c.updatedAt).toBe(t0 + HALF_LIFE_MS)
+})
+
+test('recording with the same timestamp does not decay', async () => {
+  const st = record(record({}, 'c', 'haiku', true, 10, false, 5), 'c', 'haiku', true, 10, false, 5)
+  expect(st['c']!.haiku!.runs).toBe(2)
+})
+
+test('recommend ignores evidence that decayed below the threshold', async () => {
+  const t0 = 1_000_000
+  let st: Stats = {}
+  for (let i = 0; i < 8; i++) st = record(st, 'c', 'haiku', i < 6, 100, false, t0)
+  expect(recommend(st, 'c', 'haiku', t0)).toBe('sonnet')
+  expect(recommend(st, 'c', 'haiku', t0 + HALF_LIFE_MS / 2)).toBe('sonnet')
+  expect(recommend(st, 'c', 'haiku', t0 + HALF_LIFE_MS)).toBe('haiku')
+})
+
+test('recommend accepts a custom half-life', async () => {
+  const t0 = 1_000_000
+  let st: Stats = {}
+  for (let i = 0; i < 6; i++) st = record(st, 'c', 'haiku', i < 4, 100, false, t0)
+  expect(recommend(st, 'c', 'haiku', t0 + 10 * DAY, 100 * DAY)).toBe('sonnet')
+  expect(recommend(st, 'c', 'haiku', t0 + 10 * DAY, DAY)).toBe('haiku')
+})
+
+test('without a timestamp nothing decays and nothing is stamped', async () => {
+  const st = record(record({}, 'c', 'haiku', true, 10), 'c', 'haiku', false, 10)
+  expect(st['c']!.haiku!.runs).toBe(2)
+  expect(st['c']!.haiku!.updatedAt).toBeUndefined()
+  const old: Stats = { c: { haiku: { runs: 6, escalated: 4, tokens: 0, updatedAt: 1 } } }
+  expect(recommend(old, 'c', 'haiku')).toBe('sonnet')
+})
+
+test('cells without updatedAt are read as undecayed and gain a timestamp', async () => {
+  const old: Stats = { c: { haiku: { runs: 6, escalated: 4, tokens: 0 } } }
+  expect(recommend(old, 'c', 'haiku', 9 * HALF_LIFE_MS)).toBe('sonnet')
+  const next = record(old, 'c', 'haiku', false, 0, false, 9 * HALF_LIFE_MS)
+  expect(next['c']!.haiku!.runs).toBe(7)
+  expect(next['c']!.haiku!.updatedAt).toBe(9 * HALF_LIFE_MS)
+})
+
+test('decay never mutates the input stats', async () => {
+  const t0 = 1_000_000
+  const st: Stats = { c: { haiku: { runs: 6, escalated: 4, tokens: 0, updatedAt: t0 } } }
+  const snap = JSON.stringify(st)
+  recommend(st, 'c', 'haiku', t0 + 5 * HALF_LIFE_MS)
+  record(st, 'c', 'haiku', true, 0, false, t0 + 5 * HALF_LIFE_MS)
+  expect(JSON.stringify(st)).toBe(snap)
+})
+
+test('a clock that went backwards does not inflate counters', async () => {
+  const st: Stats = { c: { haiku: { runs: 6, escalated: 4, tokens: 0, updatedAt: 1000 } } }
+  const next = record(st, 'c', 'haiku', false, 0, false, 10)
+  expect(next['c']!.haiku!.runs).toBe(7)
+})
 
 test('categorizes by agent type and task keywords', async () => {
   expect(categorize('general-purpose', 'Fix the login bug')).toBe('general-purpose:bugfix')
