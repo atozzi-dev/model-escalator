@@ -32,6 +32,8 @@ export type AgentState = {
   recentErrors?: string[]               // full text (cut) of the last failed calls, oldest first, for the senior dossier
   consults?: number                     // senior consult actions for this agent (a refused call and its retry count once)
   paused?: boolean                      // stopped at the human level: its tool calls are refused until the user resumes it
+  progressSignals?: number              // progress signals since the last swap (or de-escalation), counted only while the agent runs above its start tier
+  deescalated?: boolean                 // already returned to a cheaper tier in this run: never again until the run is over
 }
 
 export function tierOf(model: string | undefined): Tier {
@@ -159,7 +161,7 @@ export type Observation = { tool: string; ok: boolean; text: string; summary: st
 // `consultOpen` false means a limit forbids consults now: a consult due at this trigger is skipped to the next
 // enabled level, and `consultSkipped` tells the caller that a limit stopped it.
 // `blocked` lists the tiers the account refused this session: a swap never reaches them, nor any tier above.
-export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT_CONFIG, consultOpen = true, blocked: readonly Tier[] = []): { state: AgentState; action?: Action; consultSkipped?: boolean } {
+export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT_CONFIG, consultOpen = true, blocked: readonly Tier[] = []): { state: AgentState; action?: Action; consultSkipped?: boolean; progress?: boolean } {
   const s: AgentState = { ...prev, errorCounts: { ...prev.errorCounts }, editCounts: { ...prev.editCounts }, log: [...prev.log] }
   s.stepsSinceAction++
   let progress = false
@@ -218,7 +220,7 @@ export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT
     s.stepsSinceProgress = 0
     s.errorCounts = {}
     s.editCounts = {}
-    return { state: s }
+    return { state: s, progress: true }
   }
 
   const due = s.level === 0 || s.stepsSinceAction >= cfg.grace
@@ -227,7 +229,7 @@ export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT
     if (pick.action) {
       s.score = 0
       s.stepsSinceAction = 0
-      if (pick.action === 'swap') s.tier = nextTier(s.tier)
+      if (pick.action === 'swap') { s.tier = nextTier(s.tier); s.progressSignals = 0 }
       return { state: s, action: pick.action, consultSkipped: pick.skipped }
     }
     return { state: s, consultSkipped: pick.skipped }
@@ -288,6 +290,24 @@ export function resumeAgent(s: AgentState, now?: number): AgentState {
   const { paused: _paused, lastFailing: _lastFailing, ...rest } = s
   const fresh: AgentState = { ...rest, score: 0, level: 0, stepsSinceAction: 0, stepsSinceProgress: 0, errorCounts: {}, editCounts: {}, stalled: false }
   return now === undefined ? fresh : { ...fresh, lastEventAt: now }
+}
+
+// One progress signal of an agent. While it runs above its start tier (in `observe`, where the tier never
+// changes, while its ladder is past the swap level) signals are counted; at `deescalateAfter` the agent goes back
+// ONE tier, towards its start tier, with a fresh ladder: score 0, level just before the swap level (a new block
+// can swap again), a fresh grace window. `decided` reports the decision and `tier` is set only when the agent must
+// actually go back; `simulated` (observe) decides without touching the tier. Once per run (`deescalated`), never when paused.
+export function noteProgress(s: AgentState, cfg: Config = DEFAULT_CONFIG, simulated = false): { state: AgentState; decided?: boolean; tier?: Tier } {
+  const swapAt = cfg.levels.indexOf('swap')
+  if (cfg.deescalateAfter < 1 || s.paused || s.deescalated || swapAt < 0) return { state: s }
+  const above = simulated ? escalated(s, cfg.levels) : tierRank(s.tier) > tierRank(s.startTier)
+  if (!above) return { state: s }
+  const n = (s.progressSignals ?? 0) + 1
+  if (n < cfg.deescalateAfter) return { state: { ...s, progressSignals: n } }
+  const back = LADDER[Math.max(tierRank(s.startTier), tierRank(s.tier) - 1)]!
+  const state: AgentState = { ...s, tier: simulated ? s.tier : back, progressSignals: 0, deescalated: true,
+    score: 0, level: swapAt, stepsSinceAction: 0, errorCounts: {}, editCounts: {} }
+  return { state, decided: true, tier: simulated ? undefined : back }
 }
 
 // An agent may ask for help once per grace window: after a help call (or any intervention) it waits

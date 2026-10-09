@@ -109,6 +109,12 @@
       "description": "When an agent reaches the human level, refuse all its further tool calls until you resume it with /escalator resume <id> (or all). Off keeps the note only.",
       "default": true
     },
+    "deescalateAfter": {
+      "type": "number",
+      "title": "Return to a cheaper model after progress",
+      "description": "Progress signals (failing tests dropping or reaching 0) after which an agent that was swapped up goes back one tier, once per run. Off by default: returning to a cheaper model rewrites the prompt cache and may bring the block back. 0 is off.",
+      "default": 0
+    },
     "consultBudgetUsd": {
       "type": "number",
       "title": "Consult budget (USD)",

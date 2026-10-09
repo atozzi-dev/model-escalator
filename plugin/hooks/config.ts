@@ -25,6 +25,7 @@ export type Config = {
   maxConsultsPerAgent: number       // senior consults one agent may get; a refused call and its retry count once; 0 = none
   maxConsultsPerSession: number     // senior consults across all agents of the session; 0 = none
   consultBudgetUsd: number          // USD the senior calls may cost in the session; 0 = no limit
+  deescalateAfter: number           // progress signals after which a swapped agent goes back one tier; 0 = off
   pauseAtHuman: boolean             // refuse the tool calls of an agent that reached the human level until it is resumed
 }
 
@@ -61,6 +62,7 @@ export const DEFAULT_CONFIG: Config = {
   maxConsultsPerSession: 20,
   consultBudgetUsd: 0,
   pauseAtHuman: true,
+  deescalateAfter: 0,
   modelOverrides: {},
   verifyCommand: '',
   verifyTimeoutSeconds: 120,
@@ -190,6 +192,7 @@ export function parseConfig(raw: Raw | undefined): Config {
     const perAgent = num(o.maxConsultsPerAgent)
     const perSession = num(o.maxConsultsPerSession)
     const budget = num(o.consultBudgetUsd)
+    const deesc = num(o.deescalateAfter)
     return {
       ...d,
       threshold: {
@@ -214,6 +217,7 @@ export function parseConfig(raw: Raw | undefined): Config {
       maxConsultsPerSession: perSession !== undefined && perSession >= 0 ? Math.floor(perSession) : d.maxConsultsPerSession,
       consultBudgetUsd: budget !== undefined && budget >= 0 ? budget : d.consultBudgetUsd,
       pauseAtHuman: bool(o.pauseAtHuman, d.pauseAtHuman),
+      deescalateAfter: deesc !== undefined && deesc >= 1 ? Math.floor(deesc) : d.deescalateAfter,
     }
   } catch {
     return d

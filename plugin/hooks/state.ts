@@ -38,6 +38,8 @@ export function parseSnapshot(v: unknown): Snapshot | undefined {
     if (typeof a.stalled !== 'boolean') delete live.stalled
     if (typeof a.helped !== 'boolean') delete live.helped
     if (typeof a.paused !== 'boolean') delete live.paused
+    if (typeof a.deescalated !== 'boolean') delete live.deescalated
+    if (typeof a.progressSignals !== 'number' || !Number.isInteger(a.progressSignals) || a.progressSignals < 0) delete live.progressSignals
     // Senior consults of the agent: a whole, non-negative count; anything else is dropped (counts as none).
     if (typeof a.consults !== 'number' || !Number.isInteger(a.consults) || a.consults < 0) delete live.consults
     // The ring of full error texts: kept only as an array of strings, and cut to its bounds.

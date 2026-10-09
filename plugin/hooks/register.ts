@@ -1,7 +1,7 @@
 import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config'
-import { afterHelp, canAskForHelp, classifyFailure, consultLimit, countStep, escalated, isModelRefusal, isSilent, markStall, newAgent, observe, otherSenior, pauseAgent, pickSenior, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type ModelFailure, type ObservedModels, type Tier } from './detector'
+import { afterHelp, canAskForHelp, classifyFailure, consultLimit, countStep, escalated, isModelRefusal, isSilent, markStall, newAgent, noteProgress, observe, otherSenior, pauseAgent, pickSenior, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type ModelFailure, type ObservedModels, type Tier } from './detector'
 import { buildDossier, inputFromState } from './dossier'
 import { categorize, recommend, record, type Stats } from './learning'
 import { createQueue } from './queue'
@@ -295,11 +295,24 @@ export const register: Register = (on, options) => {
     if (!id || !a || r.deny !== undefined) return r
     try {
       const limit = limitFor(a)
-      const { state, action, consultSkipped } = observe(a, {
+      const { state, action, consultSkipped, progress } = observe(a, {
         tool: e.tool, ok: r.isError !== true, text: textOf(r), summary: summarize(e as unknown as Record<string, unknown>),
       }, config, limit === undefined, blockedTiers)
       if (consultSkipped && limit) await noteLimit($, id, state.category, limit)
-      if (!action) { agents.set(id, state); await save($); return r }
+      if (!action) {
+        // Progress while swapped up may send the agent back one tier (option deescalateAfter).
+        const back = progress ? noteProgress(state, config, mode === 'observe') : { state }
+        agents.set(id, back.state)
+        if (back.decided) {
+          ledger = addIntervention(ledger, 'deescalate')
+          await $.ui.log(`${id} (${state.category}): ${mode === 'observe' ? 'would de-escalate' : `de-escalate to ${back.state.tier}`}`)
+        }
+        await save($)
+        if (back.decided && mode === 'active') {
+          return { ...r, context: [...(r.context ?? []), tag(`Progress noted: from your next step you run on ${back.state.tier} again.`)] } as typeof r
+        }
+        return r
+      }
       ledger = addIntervention(ledger, action)
       if (mode === 'observe') {
         await $.ui.log(`${id} (${state.category}): would ${action}`)
@@ -363,7 +376,7 @@ export const register: Register = (on, options) => {
             pendingVerifications.add(p)
           }
         }
-        agents.set(id, { ...(agents.get(id) ?? a), level: 0, score: 0, stepsSinceAction: 0, running: false, inFlight: 0, stalled: false })
+        agents.set(id, { ...(agents.get(id) ?? a), level: 0, score: 0, stepsSinceAction: 0, deescalated: false, progressSignals: 0, running: false, inFlight: 0, stalled: false })
         await save($)
         await $.ui.status(statusLine(ledger))
       } catch { /* best effort */ }
