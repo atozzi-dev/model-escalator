@@ -9,6 +9,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - `MODEL_ESCALATOR_BASELINE` now stays the reference model instead of being overwritten by the lead's model on every request.
 - Hot model swap now sends a full model id (the one seen in the session, else the current default) instead of the bare alias, which the API rejected with a 404.
 - The senior consult now has a 2000-token cap and logs the reason and token usage to the debug log when it returns no advice.
+- Savings estimate now uses verified Haiku 5.5 prices, its long-context rates, and the cache write price of each loop (1-hour for the main loop, 5-minute for subagents and teammates).
 
 ## [0.1.0] - 2026-10-09
 
