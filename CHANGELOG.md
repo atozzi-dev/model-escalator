@@ -9,6 +9,10 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Plugin options for the difficulty thresholds, grace steps, edit oscillation count, senior model, enabled escalation levels, prudent token ratio and price overrides; defaults are unchanged.
 - Edit oscillation: editing the same file again and again without progress now raises an agent's difficulty score.
 
+### Changed
+
+- Fork subagents keep their model and prompt and are no longer tracked, nudged or escalated.
+
 ### Fixed
 
 - Learned statistics no longer lose updates when several agents finish at the same time: all store writes go through a single queue.
