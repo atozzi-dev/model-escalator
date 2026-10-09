@@ -50,7 +50,7 @@ test('the levels option removes the consult from the ladder', { options: { level
   const notes = await run($, 40)
   expect(h.consultModels.length).toBe(0)
   expect(notes.length).toBe(3)
-  expect(notes[0]).toContain('Pause the repetition')
+  expect(notes[0]).toContain('Pause: re-read')
   expect(notes[1]).toContain('stronger model')
 })
 

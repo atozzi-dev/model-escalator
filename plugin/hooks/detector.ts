@@ -23,6 +23,11 @@ export type AgentState = {
   lastFailing?: number
   log: string[]
   tokens: number
+  // Liveness, for stall detection. All optional: snapshots saved before they existed lack them.
+  lastEventAt?: number                  // $.clock.now() of the agent's last event (spawn, tool call start or end, model request)
+  inFlight?: number                     // tool calls started and not yet finished
+  running?: boolean                     // true from the first event of a run until turn.complete
+  stalled?: boolean                     // already flagged as silent; cleared by any event
 }
 
 export function tierOf(model: string | undefined): Tier {
@@ -167,6 +172,37 @@ export function countStep(prev: AgentState, cfg: Config = DEFAULT_CONFIG): Agent
   const s: AgentState = { ...prev, stepsSinceProgress: prev.stepsSinceProgress + 1 }
   if (s.stepsSinceProgress > cfg.idleSteps) s.score += cfg.idleWeight
   return s
+}
+
+// Any event of the agent: it is running, not silent, and no longer flagged.
+export function touch(s: AgentState, now: number): AgentState {
+  return { ...s, lastEventAt: now, running: true, stalled: false }
+}
+
+export function toolStart(s: AgentState, now: number): AgentState {
+  return { ...touch(s, now), inFlight: (s.inFlight ?? 0) + 1 }
+}
+
+export function toolEnd(s: AgentState, now: number): AgentState {
+  return { ...touch(s, now), inFlight: Math.max(0, (s.inFlight ?? 0) - 1) }
+}
+
+// A tool call in flight (a build, a test suite) is legitimate silence: the window is three times longer,
+// so only a call that hangs for very long is flagged.
+export const BUSY_FACTOR = 3
+
+// How long (ms) a running, not yet flagged agent has been silent, when that exceeds its window; else undefined.
+// An agent without a timestamp (old snapshot) or whose run is over is never silent.
+export function isSilent(s: AgentState, now: number, cfg: Config = DEFAULT_CONFIG): number | undefined {
+  if (!s.running || s.stalled || s.lastEventAt === undefined) return undefined
+  const window = cfg.stallMinutes * 60_000 * ((s.inFlight ?? 0) > 0 ? BUSY_FACTOR : 1)
+  const silent = now - s.lastEventAt
+  return silent > window ? silent : undefined
+}
+
+// Flags the agent and raises its score to its threshold, so its next tool call earns the next ladder note.
+export function markStall(s: AgentState, cfg: Config = DEFAULT_CONFIG): AgentState {
+  return { ...s, stalled: true, score: Math.max(s.score, cfg.threshold[s.tier]) }
 }
 
 // True once an agent got past the swap level (or past the last one when swap is disabled).

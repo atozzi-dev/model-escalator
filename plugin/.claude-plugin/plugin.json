@@ -37,6 +37,12 @@
       "description": "Edits of the same file without progress tolerated before each further edit raises the difficulty score.",
       "default": 3
     },
+    "stallMinutes": {
+      "type": "number",
+      "title": "Stall window (minutes)",
+      "description": "Minutes without any event after which a running agent is reported as stalled and gets the next ladder note on its next tool call. A tool call still running counts as activity until three times this long.",
+      "default": 10
+    },
     "verifyCommand": {
       "type": "string",
       "title": "Verification command",

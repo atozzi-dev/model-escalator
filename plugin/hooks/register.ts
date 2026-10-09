@@ -1,7 +1,7 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config'
-import { countStep, dossier, escalated, newAgent, observe, rememberModel, resolveModelId, tierOf, type Action, type AgentState, type ObservedModels, type Tier } from './detector'
+import { countStep, dossier, escalated, isSilent, markStall, newAgent, observe, rememberModel, resolveModelId, tierOf, toolEnd, toolStart, touch, type Action, type AgentState, type ObservedModels, type Tier } from './detector'
 import { categorize, recommend, record, type Stats } from './learning'
 import { createQueue } from './queue'
 import { parseSnapshot, type Snapshot } from './state'
@@ -47,6 +47,23 @@ let sessionTag = newTag()
 // Tunables, built once from the plugin options when the module loads.
 let config: Config = DEFAULT_CONFIG
 
+// Stall detection: one periodic check per module load (a reload cancels the old one with its environment).
+let stallTimer: { cancel: () => void } | undefined
+
+// Current time from the host clock, or undefined when it cannot be read (liveness is then simply not tracked).
+async function clockNow($: EngineInterface): Promise<number | undefined> {
+  try { return await $.clock.now() } catch { return undefined }
+}
+
+// Records an event of a tracked agent (it is running and not silent). Synchronous on `agents`, so it
+// cannot interleave with another handler's read-modify-write.
+function mark(id: string | undefined, now: number | undefined, f: typeof touch = touch): void {
+  const a = id ? agents.get(id) : undefined
+  if (id && a && now !== undefined) agents.set(id, f(a, now))
+}
+
+const watching = (): boolean => mode === 'active' || mode === 'observe'
+
 // Restores the module state to its defaults. Used by tests so each one starts clean.
 export function resetState(): void {
   sessionTag = newTag()
@@ -56,6 +73,8 @@ export function resetState(): void {
   baselinePinned = false
   seenModels = {}
   mode = 'active'
+  stallTimer?.cancel()
+  stallTimer = undefined
 }
 
 function snapshot(): Snapshot {
@@ -119,7 +138,8 @@ export const register: Register = (on, options) => {
     try { saved = parseSnapshot((await $.state.get(SESSION)).value) } catch { saved = undefined }
     if (saved) {
       agents.clear()
-      for (const a of saved.agents) agents.set(a.id, a)
+      // A tool call in flight at the reload never reports its end to the new module: start from zero.
+      for (const a of saved.agents) agents.set(a.id, { ...a, inFlight: 0 })
       ledger = saved.ledger
       seenModels = saved.seenModels
       sessionTag = saved.sessionTag
@@ -136,6 +156,14 @@ export const register: Register = (on, options) => {
         if (b) baseline = tierOf(b)
       } catch { /* defaults */ }
       await save($)
+    }
+    stallTimer?.cancel()
+    stallTimer = undefined
+    if (watching()) {
+      try {
+        const period = Math.max(1000, Math.min(30_000, (config.stallMinutes * 60_000) / 4))
+        stallTimer = $.clock.every(period, () => { void checkStalls($) })
+      } catch { /* no stall detection, everything else works */ }
     }
     const r = await next(e)
     try {
@@ -179,6 +207,7 @@ export const register: Register = (on, options) => {
     const r = await next(ev)
     if (r.agentId) {
       agents.set(r.agentId, newAgent(r.agentId, category, r.model, e.prompt))
+      if (watching()) mark(r.agentId, await clockNow($))
       await save($)
     }
     return r
@@ -186,9 +215,18 @@ export const register: Register = (on, options) => {
 
   // 2. Every tool call of a watched agent updates its difficulty score.
   on('tool.call', async ($, e, next) => {
-    const r = await next(e)
-    if (mode === 'off' || mode === 'baseline') return r
     const id = e.agentId
+    const tracked = watching() && id !== undefined && agents.has(id)
+    if (tracked) mark(id, await clockNow($), toolStart)
+    let r: Awaited<ReturnType<typeof next>>
+    try {
+      r = await next(e)
+    } catch (err) {
+      if (tracked) mark(id, await clockNow($), toolEnd)
+      throw err
+    }
+    if (tracked) mark(id, await clockNow($), toolEnd)
+    if (mode === 'off' || mode === 'baseline') return r
     const a = id ? agents.get(id) : undefined
     if (!id || !a || r.deny !== undefined) return r
     try {
@@ -217,9 +255,11 @@ export const register: Register = (on, options) => {
     if (!e.agentId && !baselinePinned) baseline = tierOf(e.model)
     const a = e.agentId ? agents.get(e.agentId) : undefined
     seenModels = rememberModel(seenModels, e.model)
+    if (e.agentId && watching() && agents.has(e.agentId)) mark(e.agentId, await clockNow($))
     const swap = mode === 'active' && a !== undefined && a.tier !== a.startTier
     const r = yield* next(swap ? { ...e, model: resolveModelId(seenModels, a!.tier, config.modelIds) } : e)
     seenModels = rememberModel(seenModels, r.usage?.model)
+    if (e.agentId && watching() && agents.has(e.agentId)) mark(e.agentId, await clockNow($))
     // Idle requests count only where a score is acted on: active, and observe (which measures it).
     try {
       const counted = e.agentId ? agents.get(e.agentId) : undefined
@@ -251,7 +291,7 @@ export const register: Register = (on, options) => {
             pendingVerifications.add(p)
           }
         }
-        agents.set(id, { ...a, level: 0, score: 0, stepsSinceAction: 0 })
+        agents.set(id, { ...(agents.get(id) ?? a), level: 0, score: 0, stepsSinceAction: 0, running: false, inFlight: 0, stalled: false })
         await save($)
         await $.ui.status(statusLine(ledger))
       } catch { /* best effort */ }
@@ -278,6 +318,38 @@ export const register: Register = (on, options) => {
     } catch { /* best effort */ }
     return next(e)
   })
+}
+
+// One tick of the stall check: flags running agents silent past the window (once until they act again).
+// The lead is told through the log, the status line and, in active mode, a toast; the agent itself is only
+// reached by the next ladder note on its next tool call, because a note travels with a tool result.
+async function checkStalls($: EngineInterface): Promise<void> {
+  try {
+    if (!watching()) return
+    const now = await clockNow($)
+    if (now === undefined) return
+    const found: { a: AgentState; silent: number }[] = []
+    for (const [id, a] of [...agents]) {
+      if (a.running && a.lastEventAt === undefined) { agents.set(id, { ...a, lastEventAt: now }); continue }
+      const silent = isSilent(a, now, config)
+      if (silent === undefined) continue
+      const stalled = markStall(a, config)
+      agents.set(id, stalled)
+      ledger = addIntervention(ledger, 'stall')
+      found.push({ a: stalled, silent })
+    }
+    if (found.length === 0) return
+    await save($)
+    for (const { a, silent } of found) {
+      const min = Math.max(1, Math.round(silent / 60_000))
+      const busy = (a.inFlight ?? 0) > 0 ? ' (a tool call is still running)' : ''
+      try {
+        await $.ui.log(`${a.id} (${a.category}): no activity for ${min} min${busy}`)
+        await $.ui.status(`stalled: ${a.category} (${a.id}) silent for ${min} min`)
+        if (mode === 'active') await $.ui.toast(`${a.category}: no activity for ${min} min`)
+      } catch { /* the notice is best effort */ }
+    }
+  } catch { /* a failing check must never disturb the session */ }
 }
 
 async function recordOutcome($: EngineInterface, a: AgentState, wasEscalated: boolean, verifyFailed: boolean): Promise<void> {
@@ -334,7 +406,7 @@ async function act($: EngineInterface, s: AgentState, action: Action): Promise<s
   await $.ui.log(`${s.id} (${s.category}): ${action}`)
   switch (action) {
     case 'nudge':
-      return tag('You are repeating the same failing step. Pause the repetition: re-read the last error in full, ' +
+      return tag('You are not making progress. Pause: re-read the last error or result in full, ' +
         'state one new hypothesis, then continue with a different approach.')
     case 'consult': {
       const prompt = dossier(s)

@@ -19,6 +19,7 @@ export type Config = {
   oscillationEdits: number          // edits of one file tolerated since the last progress; each further edit adds to the score
   idleSteps: number                 // model requests tolerated without progress
   idleWeight: number                // score added by each model request past idleSteps
+  stallMinutes: number              // minutes without any event after which a running agent is flagged as stalled
 }
 
 // USD per million tokens, Anthropic API list prices (Oct 2026), checked against /cost.
@@ -48,6 +49,7 @@ export const DEFAULT_CONFIG: Config = {
   // need headroom. Recalibrate on the observe-week data before relying on these values.
   idleSteps: 40,
   idleWeight: 0.25,
+  stallMinutes: 10,
   verifyCommand: '',
   verifyTimeoutSeconds: 120,
   modelIds: { haiku: 'claude-haiku-5-5', sonnet: 'claude-sonnet-5-5', opus: 'claude-opus-5-5' },
@@ -156,6 +158,7 @@ export function parseConfig(raw: Raw | undefined): Config {
       oscillationEdits: osc !== undefined && osc >= 1 ? Math.floor(osc) : d.oscillationEdits,
       idleSteps: idle !== undefined && idle >= 1 ? Math.floor(idle) : d.idleSteps,
       idleWeight: idleW !== undefined && idleW >= 0 ? idleW : d.idleWeight,
+      stallMinutes: positive(o.stallMinutes, d.stallMinutes),
       verifyCommand: vc.length <= 1000 ? vc : d.verifyCommand,
       verifyTimeoutSeconds: vt !== undefined && vt > 0 ? Math.min(vt, 600) : d.verifyTimeoutSeconds,
       grace: grace !== undefined && grace >= 0 ? Math.floor(grace) : d.grace,

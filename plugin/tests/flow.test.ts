@@ -25,7 +25,7 @@ test('stuck cheap agent: nudge, senior consult, then hot swap of the model', asy
     for (const c of r.context ?? []) notes.push(c)
   }
   expect(notes.length).toBe(3)
-  expect(notes[0]).toContain('repeating the same failing step')
+  expect(notes[0]).toContain('not making progress')
   expect(notes[1]).toContain('db/index.ts')
   expect(seniorPrompts[0]).toContain('Cannot find module')
   expect(notes[2]).toContain('stronger model (sonnet)')
@@ -111,7 +111,7 @@ test('the nudge asks to pause the repetition and does not read as a stop order',
     for (const c of r.context ?? []) notes.push(c)
   }
   expect(notes.length).toBe(1)
-  expect(notes[0]).toContain('repeating the same failing step')
+  expect(notes[0]).toContain('not making progress')
   expect(notes[0]).not.toMatch(/\bStop\b/)
   expect(notes[0]).toContain('continue')
 })

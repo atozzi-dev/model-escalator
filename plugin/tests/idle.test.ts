@@ -95,7 +95,7 @@ test('an agent that only makes requests gets a nudge at its next tool call once 
   // 52 requests: 12 past the allowance, 12 x 0.25 = 3.0 points, which is the haiku threshold.
   const r = await run(on, $, undefined, 52)
   expect(r.notes.length).toBe(1)
-  expect(r.notes[0]).toContain('repeating the same failing step')
+  expect(r.notes[0]).toContain('not making progress')
 })
 
 test('no nudge while the requests are still within the idle allowance', async ($, on) => {

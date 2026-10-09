@@ -52,6 +52,7 @@ Options are set from `/config` (or under `pluginConfigs` in settings) and apply 
 | `thresholdHaiku` / `thresholdSonnet` / `thresholdOpus` | 3 / 4 / 6 | Difficulty score at which an agent that started on that model gets its next intervention. Lower means earlier intervention |
 | `graceSteps` | 4 | Steps to wait after an intervention before the next one |
 | `oscillationEdits` | 3 | Number of edits of the same file without progress after which each further edit raises the difficulty score |
+| `stallMinutes` | 10 | Minutes without any event after which a running agent is reported as stalled (log line, status line, and a toast in `active` mode). Its next tool call then gets the next ladder note, since a note can only reach an agent through a tool result. A tool call that is still running counts as activity until three times this long. Agents whose run is over are never flagged |
 | `verifyCommand` | empty (off) | Optional check run at the end of each tracked agent's run, for example `npm test`. Split on spaces, quotes group, no shell (no pipes or redirects). A non-zero exit counts like an escalation when the mod learns which model to use, and is reported in the log and a toast. Runs in the session's working directory, one at a time |
 | `verifyTimeoutSeconds` | 120 | How long the verification command may run before it is abandoned and ignored, at most 600 |
 | `seniorModel` | `opus` | Model asked for advice at the consult level, alias or full id |

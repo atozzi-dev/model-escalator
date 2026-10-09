@@ -27,7 +27,14 @@ export function parseSnapshot(v: unknown): Snapshot | undefined {
   // Snapshots saved before edit counts or the request counter existed have no such fields on their agents.
   const agents = v.agents.map((a: Record<string, unknown>) => {
     const withEdits = isObj(a.editCounts) ? a : { ...a, editCounts: {} }
-    return typeof a.stepsSinceProgress === 'number' ? withEdits : { ...withEdits, stepsSinceProgress: 0 }
+    const withSteps = typeof a.stepsSinceProgress === 'number' ? withEdits : { ...withEdits, stepsSinceProgress: 0 }
+    // Liveness fields are optional: drop any that is malformed, so a bad value can never flag an agent.
+    const live: Record<string, unknown> = { ...withSteps }
+    if (typeof a.lastEventAt !== 'number' || !Number.isFinite(a.lastEventAt)) delete live.lastEventAt
+    if (typeof a.inFlight !== 'number' || !(a.inFlight >= 0)) delete live.inFlight
+    if (typeof a.running !== 'boolean') delete live.running
+    if (typeof a.stalled !== 'boolean') delete live.stalled
+    return live
   })
   return { ...v, agents } as unknown as Snapshot
 }

@@ -19,6 +19,10 @@ declare module 'claude-code' {
           lastFailing?: number
           log: string[]
           tokens: number
+          lastEventAt?: number
+          inFlight?: number
+          running?: boolean
+          stalled?: boolean
         }[]
         ledger: {
           actual: number
