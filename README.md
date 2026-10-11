@@ -113,7 +113,7 @@ In `active` mode the mod also adds one announcement paragraph to the prompt of e
 
 ## How savings are estimated
 
-Real spend comes from the token usage each model request reports, priced at API list prices. The reference prices the same requests on the lead's model, in an optimistic version (same tokens) and a prudent one (a stronger model would have needed fewer tokens). The hidden costs of escalating (wasted steps before a swap, cache rewrites, consults) are part of real spend, so savings can come out negative, and the report says so. On a subscription plan, read the percentage as the share of usage limits saved.
+Real spend comes from the token usage each model request reports, priced at API list prices. The reference prices the same requests on the lead's model, in an optimistic version (same tokens) and a prudent one (a stronger model would have needed fewer tokens). The hidden costs of escalating (wasted steps before a swap, cache rewrites, consults) are part of real spend, so savings can come out negative, and the report says so. On a subscription plan, read the percentage as the share of usage limits saved. There `/escalator` also adds a short "Plan usage" block with the plan windows as Claude Code reports them (for example the five-hour and seven-day shares used) next to the ladder's estimated saving; the saving is the API-price estimate above, not a reading of the plan limits. With API billing the engine reports no plan windows and the block is left out. The mod reads the windows with `$.session.usage()`, a free call that changes nothing.
 
 ## Known limitations
 

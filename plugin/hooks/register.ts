@@ -12,7 +12,7 @@ import { renderTree } from './render-text'
 import { createQueue } from './queue'
 import { buildReviewPrompt, diffArgv, editedPath, formatReviews, isCheaper, parseReview, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun } from './review'
 import { parseSnapshot, type Snapshot, type TrackedAgent } from './state'
-import { addAgent, addConsult, addEscalation, addIntervention, addStep, asUsage, cost as stepCost, emptyLedger, report, reportByCategory, savings, statusLine, type Ledger, type Usage } from './savings'
+import { addAgent, addConsult, addEscalation, addIntervention, addStep, asUsage, cost as stepCost, emptyLedger, planBlock, report, reportByCategory, savings, statusLine, type Ledger, type Usage } from './savings'
 
 export const HELP_TOOL = 'mcp__model-escalator__ask_for_help'
 const STATS_KEY = 'stats'
@@ -502,9 +502,13 @@ export const register: Register = (on, options) => {
     if (arg === 'map') return { text: await openMap($) }
     if (arg !== '' && arg !== 'report') return { text: `Unknown subcommand "${arg.split(/\s+/)[0]}".\n\n${COMMAND_HELP}` }
     const paused = [...agents.values()].filter((a) => a.paused)
+    // On a subscription the engine reports the plan windows; on API billing there are none and the block is left out.
+    let plan = ''
+    try { plan = planBlock((await $.session.usage()).rateLimits, ledger) } catch { /* the report does not need it */ }
+    const planText = plan ? '\n\n' + plan : ''
     const pausedText = paused.length === 0 ? '' : '\n\nPaused (resume with /escalator resume <id>|all):\n' +
       paused.map((a) => `- ${agentLabel(a)} (${a.category}, ${a.tier})`).join('\n')
-    return { text: `Mode: ${mode}\n` + report(ledger, baseline) + pausedText +
+    return { text: `Mode: ${mode}\n` + report(ledger, baseline) + planText + pausedText +
       '\n\nMore: /escalator stats, /escalator map (live agent network), /escalator history, /escalator config, /escalator help' }
   })
 

@@ -189,6 +189,29 @@ export function reportByCategory(l: Ledger, baseline: Tier): string {
   }
 }
 
+// The "Plan usage" block of the report: the plan windows as the engine reports them (`$.session.usage().rateLimits`)
+// and the ladder's estimated saving. '' when no window has a valid reading (API billing). Never throws.
+export function planBlock(limits: unknown, l: Ledger): string {
+  try {
+    if (!Array.isArray(limits)) return ''
+    const rows: string[] = []
+    for (const w of limits) {
+      const o = w as { kind?: unknown; percentUsed?: unknown; resetsAt?: unknown } | null
+      if (!o || typeof o.kind !== 'string' || typeof o.percentUsed !== 'number' || !Number.isFinite(o.percentUsed)) continue
+      const reset = typeof o.resetsAt === 'string' && o.resetsAt ? `, resets ${o.resetsAt}` : ''
+      rows.push(`  ${o.kind.slice(0, 40)}: ${Math.round(o.percentUsed * 10) / 10}% used${reset}`)
+    }
+    if (!rows.length) return ''
+    const s = savings(l)
+    const saved = l.agentSteps > 0 && s.highPct > 0
+      ? `Estimate: the ladder saved about ${Math.max(0, s.lowPct)}% to ${s.highPct}% of this session's usage (API-price estimate, not a reading of the plan limits).`
+      : 'No saving estimated for this session yet.'
+    return ['Plan usage (as Claude Code reports it):', ...rows, saved].join('\n')
+  } catch {
+    return ''
+  }
+}
+
 export function report(l: Ledger, baseline: Tier): string {
   const s = savings(l)
   const tiers = (Object.entries(l.byTier) as [Tier, { steps: number; cost: number }][])
