@@ -34,6 +34,7 @@ export type Config = {
   reviewRate: number                // share (0 to 1) of the runs of cheap models reviewed by a senior model; 0 = off
   reviewModel: string               // model that reviews a sampled run; empty = the senior model
   explore: number                   // weight (0 to 1) of exploring a tier below the learned one at spawn; 0 = off
+  respectExplicitModel: boolean     // a model asked for in the Agent call is never changed at spawn by learning or exploration
   learnByCost: boolean              // pick the start tier by cost per accepted run once there is enough cost data
   modelCategories: boolean          // classify tasks with a small model (one short call per uncached spawn) instead of keywords only
   minReviewScore: number            // lowest review score (1 to 5) of an accepted run
@@ -89,6 +90,7 @@ export const DEFAULT_CONFIG: Config = {
   reviewModel: '',
   // Off by default: exploring deliberately runs some tasks on a model learning had ruled out.
   explore: 0,
+  respectExplicitModel: true,
   learnByCost: true,
   modelCategories: false,
   minReviewScore: 3,
@@ -270,6 +272,7 @@ export function parseConfig(raw: Raw | undefined): Config {
       learningHalfLifeDays: halfLife !== undefined && halfLife >= 0 ? halfLife : d.learningHalfLifeDays,
       reviewRate: rate !== undefined && rate >= 0 && rate <= 1 ? rate : d.reviewRate,
       explore: explore !== undefined && explore >= 0 && explore <= 1 ? explore : d.explore,
+      respectExplicitModel: bool(o.respectExplicitModel, d.respectExplicitModel),
       learnByCost: bool(o.learnByCost, d.learnByCost),
       modelCategories: bool(o.modelCategories, d.modelCategories),
       minReviewScore: minScore !== undefined && minScore >= 1 && minScore <= 5 ? minScore : d.minReviewScore,

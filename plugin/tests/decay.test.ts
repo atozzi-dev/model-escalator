@@ -33,7 +33,7 @@ async function wire(on: any, $: any, updatedAt: number) {
 
 const spawn = ($: any) => $.agent.spawn({ prompt: 'p', description: 'fix db test', subagentType: 'general-purpose', model: 'haiku' } as never)
 
-test('recent bad evidence still forces a stronger model at spawn', async ($, on) => {
+test('recent bad evidence still forces a stronger model at spawn', { options: { respectExplicitModel: false } }, async ($, on) => {
   const w = await wire(on, $, T0 - 1 * DAY)
   await spawn($)
   expect(w.spawned[0]).not.toBe('haiku')
@@ -45,7 +45,7 @@ test('evidence recorded long ago no longer forces a stronger model', async ($, o
   expect(w.spawned[0]).toBe('haiku')
 })
 
-test('learningHalfLifeDays: 0 keeps old evidence', { options: { learningHalfLifeDays: 0 } }, async ($, on) => {
+test('learningHalfLifeDays: 0 keeps old evidence', { options: { respectExplicitModel: false, learningHalfLifeDays: 0 } }, async ($, on) => {
   const w = await wire(on, $, T0 - 120 * DAY)
   await spawn($)
   expect(w.spawned[0]).not.toBe('haiku')

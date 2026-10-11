@@ -51,14 +51,14 @@ test('off by default: the option is 0 and invalid values fall back to it', () =>
   expect(parseConfig({ explore: 0.25 }).explore).toBe(0.25)
 })
 
-test('without the option learning alone decides: every spawn goes to sonnet', async ($, on) => {
+test('without the option learning alone decides: every spawn goes to sonnet', { options: { respectExplicitModel: false } }, async ($, on) => {
   const w = await wire(on, $)
   await spawnMany($, N)
   expect(w.spawned.every((m) => m === 'sonnet')).toBe(true)
   expect(w.logs.some((l) => l.includes('explor'))).toBe(false)
 })
 
-test('explore 1: some spawns go back to haiku with a log line, the others stay on sonnet', { options: { explore: 1 } }, async ($, on) => {
+test('explore 1: some spawns go back to haiku with a log line, the others stay on sonnet', { options: { respectExplicitModel: false, explore: 1 } }, async ($, on) => {
   const w = await wire(on, $)
   await spawnMany($, N)
   const haiku = w.spawned.filter((m) => m === 'haiku').length
@@ -69,7 +69,7 @@ test('explore 1: some spawns go back to haiku with a log line, the others stay o
   expect(lines.length).toBe(haiku)
 })
 
-test('observe: only logs that it would explore, the spawn keeps the requested model', { options: { explore: 1 } }, async ($, on) => {
+test('observe: only logs that it would explore, the spawn keeps the requested model', { options: { respectExplicitModel: false, explore: 1 } }, async ($, on) => {
   const w = await wire(on, $, { MODEL_ESCALATOR_MODE: 'observe' })
   await spawnMany($, N)
   expect(w.spawned.every((m) => m === 'haiku')).toBe(true)
@@ -91,7 +91,7 @@ test('off never explores', { options: { explore: 1 } }, async ($, on) => {
   expect(w.logs.length).toBe(0)
 })
 
-test('each run is recorded under the tier it ran on', { options: { explore: 1 } }, async ($, on) => {
+test('each run is recorded under the tier it ran on', { options: { respectExplicitModel: false, explore: 1 } }, async ($, on) => {
   const w = await wire(on, $)
   const ids = await spawnMany($, N)
   for (const [i, id] of ids.entries()) await $.turn.complete({ turnId: 'r' + i, agentId: id, answer: 'x' } as never)

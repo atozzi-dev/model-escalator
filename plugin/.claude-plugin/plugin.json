@@ -139,6 +139,12 @@
       "description": "From 0 to 1: how often a task starts on the cheaper model that learning had ruled out, to check whether it became good enough. It only lowers a tier that learning raised, never below the model you asked for, and is rarer the stronger the evidence (Thompson sampling). Some tasks deliberately run on a weaker model. 0 is off.",
       "default": 0
     },
+    "respectExplicitModel": {
+      "type": "boolean",
+      "title": "Respect a model asked for explicitly",
+      "description": "When the Agent call names a model, the task starts on it: learning and exploration do not change the starting model (the log says what they would have suggested). The ladder still moves the agent up when it is stuck. Off lets learning raise an explicitly requested model too.",
+      "default": true
+    },
     "learnByCost": {
       "type": "boolean",
       "title": "Choose the model by cost per accepted run",

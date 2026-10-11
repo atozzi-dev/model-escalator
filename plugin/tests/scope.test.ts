@@ -20,14 +20,14 @@ function wire(on: any, preload: Record<string, unknown> = {}): H {
   on('session.start', () => ({ cwd }) as never)
   on('command.register', () => ({ value: undefined }) as never)
   let n = 0
-  on('agent.spawn', (_$: unknown, e: any) => { h.spawned.push(e.model); return { model: e.model ?? 'haiku', agentId: 'a' + ++n } })
+  on('agent.spawn', (_$: unknown, e: any) => { h.spawned.push(e.model ?? 'haiku'); return { model: e.model ?? 'haiku', agentId: 'a' + ++n } })
   on('turn.complete', () => ({ text: 'done' }) as never)
   for (const k of ['ui.log', 'ui.toast', 'ui.status'] as const) on(k, () => ({ value: undefined }) as never)
   return h
 }
 
 const spawn = async ($: any): Promise<string> =>
-  ((await $.agent.spawn({ prompt: 'p', description: 'fix db test', subagentType: 'general-purpose', model: 'haiku' } as never)) as { agentId: string }).agentId
+  ((await $.agent.spawn({ prompt: 'p', description: 'fix db test', subagentType: 'general-purpose', parentModel: 'haiku' } as never)) as { agentId: string }).agentId
 const finish = ($: any, id: string) => $.turn.complete({ turnId: 't-' + id, agentId: id, answer: 'x' } as never)
 const run = async ($: any): Promise<void> => { await finish($, await spawn($)) }
 const command = async ($: any, args: string): Promise<string> =>

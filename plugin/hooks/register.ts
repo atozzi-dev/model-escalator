@@ -550,23 +550,27 @@ export const register: Register = (on, options) => {
     const category = await taskCategory($, e)
     try {
       const asked = tierOf(e.model ?? e.parentModel)
+      // `model` is what the Agent call asked for; when it is absent the agent definition or the parent decides, and
+      // the types give no way to tell those two apart: only a present `model` counts as an explicit choice.
+      const explicit = config.respectExplicitModel && mode !== 'baseline' && typeof e.model === 'string' && e.model !== ''
       const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
       const projects = parseProjects(await $.store.get(PROJECTS_KEY))
       const choice = mode === 'baseline'
         ? { tier: baseline, reason: 'requested' as const, learned: baseline }
         : recommendScopedWithExploration(stats, projects, projectId, category, asked, {
           now: await clockNow($), halfLifeMs: halfLifeMs(), explore: config.explore, byCost: config.learnByCost,
-          ...(config.explore > 0 ? { rand: explorationRandom() } : {}),
+          ...(config.explore > 0 && !explicit ? { rand: explorationRandom() } : {}),
         })
       // In observe mode the model stays as asked: exploring is only logged, the learned tier is what "would" happen.
-      const exploring = choice.reason === 'explore'
-      const best = exploring && mode === 'observe' ? choice.learned : choice.tier
+      const exploring = !explicit && choice.reason === 'explore'
+      const best = explicit ? asked : exploring && mode === 'observe' ? choice.learned : choice.tier
       const label = clipLabel(e.name, MAX_AGENT_NAME) ?? category
       if (best !== asked) {
         if (mode !== 'observe') ev = { ...e, model: best }
         await $.ui.log(`${label}: ${asked} -> ${best}${mode === 'observe' ? ' (would)' : ''}`)
       }
-      if (choice.basis === 'cost') await $.ui.log(`${label}: chosen by cost per accepted run (${costLine(scopedStats(stats, projects, projectId, category, await clockNow($), halfLifeMs()), category, asked, await clockNow($))})`)
+      if (explicit && choice.learned !== asked) await $.ui.log(`${label}: kept the requested ${asked} (explicit), learning suggested ${choice.learned}`)
+      if (!explicit && choice.basis === 'cost') await $.ui.log(`${label}: chosen by cost per accepted run (${costLine(scopedStats(stats, projects, projectId, category, await clockNow($), halfLifeMs()), category, asked, await clockNow($))})`)
       if (exploring) {
         await $.ui.log(mode === 'observe'
           ? `${label}: would explore ${choice.tier} for ${category} (learned ${choice.learned})`
