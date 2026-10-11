@@ -51,6 +51,47 @@ declare module 'claude-code' {
         baselinePinned: boolean
         blockedTiers?: ('haiku' | 'sonnet' | 'opus')[]
         refusedSeniors?: ('haiku' | 'sonnet' | 'opus')[]
+        graph?: {
+          readonly nodes: readonly {
+            readonly id: string
+            readonly kind: 'lead' | 'worker' | 'senior'
+            readonly label: string
+            readonly model: string
+            readonly tier: 'haiku' | 'sonnet' | 'opus'
+            readonly status: 'active' | 'waiting' | 'done' | 'stuck' | 'paused'
+            readonly action: string
+            readonly level: number
+            readonly score: number
+            readonly cost: number
+            readonly interventions: number
+            readonly consults: number
+            readonly since: number
+          }[]
+          readonly edges: readonly {
+            readonly id: string
+            readonly kind: 'spawn' | 'message' | 'consult' | 'notice'
+            readonly from: string
+            readonly to: string
+            readonly count: number
+            readonly at: number
+          }[]
+          readonly events: readonly {
+            readonly seq: number
+            readonly kind: 'spawn' | 'message' | 'consult' | 'swap' | 'nudge' | 'effort' | 'human' | 'notice' | 'stall' | 'pause' | 'resume' | 'done'
+            readonly at: number
+            readonly nodes: readonly string[]
+            readonly fromTier?: 'haiku' | 'sonnet' | 'opus'
+            readonly toTier?: 'haiku' | 'sonnet' | 'opus'
+          }[]
+          readonly seq: number
+          readonly collapsed: number
+          readonly dropped: number
+        }
+        layout?: {
+          readonly slots?: Readonly<Record<string, number>>
+          readonly retired?: readonly string[]
+        }
+        drawnSeq?: number
       }
     }
   }

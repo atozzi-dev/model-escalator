@@ -4,6 +4,9 @@ import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config
 import { LADDER, afterHelp, agentLabel, canAskForHelp, classifyFailure, clipLabel, consultLimit, countStep, EFFORTS, escalated, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_AGENT_NAME, MAX_LEAD_NOTICES, newAgent, noteProgress, normalizePath, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
 import { buildDossier, inputFromState } from './dossier'
 import { categorize, costPerAccepted, formatStats, isAccepted, mulberry32, recommendWithExploration, record, recordReview, recordRework, type Stats } from './learning'
+import { emptyGraph, LEAD_ID, reduce, SENIOR_ID, type GraphInput, type GraphState } from './graph'
+import { layoutGraph, type LayoutMemory } from './layout'
+import { renderSvg } from './render-svg'
 import { createQueue } from './queue'
 import { buildReviewPrompt, diffArgv, editedPath, formatReviews, isCheaper, parseReview, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun } from './review'
 import { parseSnapshot, type Snapshot, type TrackedAgent } from './state'
@@ -89,6 +92,68 @@ let seenModels: ObservedModels = {}
 // senior consult model. Persisted in the snapshot.
 let blockedTiers: Tier[] = []
 let refusedSeniors: Tier[] = []
+
+// The agent network of the map (`/escalator map`). Fed by pure reducers from the hooks, kept in the session snapshot.
+export const MAP_PANE = 'escalator-map'
+const REDRAW_MS = 250      // one redraw check per tick: at most four redraws a second
+const SETTLE_MS = 4500     // quiet this long after the last change: one last redraw, so the animations stop
+let graph: GraphState = emptyGraph('opus')
+let layoutMem: LayoutMemory | undefined
+let drawnSeq = 0           // the last graph event a draw showed: later ones animate
+let mapDirty = false       // the graph changed since the last redraw request
+let mapSettled = true      // the quiet redraw after the last change was requested
+let mapChangedAt = 0
+let mapTimer: { cancel: () => void } | undefined
+
+type GraphFeed = GraphInput extends infer I ? (I extends GraphInput ? Omit<I, 'at'> : never) : never
+
+// True when two graphs would draw the same picture (the reducers hand back new objects for unchanged values).
+function sameGraph(a: GraphState, b: GraphState): boolean {
+  if (a === b) return true
+  if (a.seq !== b.seq || a.collapsed !== b.collapsed || a.dropped !== b.dropped) return false
+  if (a.nodes.length !== b.nodes.length || a.edges.length !== b.edges.length) return false
+  return a.nodes.every((n, i) => {
+    const m = b.nodes[i]
+    return m !== undefined && (Object.keys(n) as (keyof typeof n)[]).every((k) => n[k] === m[k])
+  })
+}
+
+// Applies one input record to the graph. Pure reducer, no waiting: the draw happens later, on the redraw tick.
+// The time is the latest read of the host clock; the read it starts is not awaited. Never throws.
+function feed($: EngineInterface, input: GraphFeed): void {
+  try {
+    if (mode === 'off') return
+    const at = lastNow ?? 0
+    void clockNow($)
+    const next = reduce(graph, { ...input, at } as GraphInput)
+    if (sameGraph(graph, next)) return
+    graph = next
+    mapDirty = true
+    mapSettled = false
+    mapChangedAt = at
+  } catch { /* the map is optional */ }
+}
+
+// Draws the map again once the graph changed, one tick at a time: hooks only mark the graph changed.
+async function mapTick($: EngineInterface): Promise<void> {
+  try {
+    const now = (await clockNow($)) ?? mapChangedAt
+    if (mapDirty) mapDirty = false
+    else if (!mapSettled && now - mapChangedAt >= SETTLE_MS) mapSettled = true
+    else return
+    $.ui.invalidate('ui.render')
+  } catch { /* a missed redraw is drawn on the next change */ }
+}
+
+function startMapTimer($: EngineInterface): void {
+  if (mapTimer) return
+  try { mapTimer = $.clock.every(REDRAW_MS, () => { void mapTick($) }) } catch { /* the pane still draws on open */ }
+}
+
+function stopMapTimer(): void {
+  mapTimer?.cancel()
+  mapTimer = undefined
+}
 
 // Per-session tag that authenticates our notes.
 let sessionTag = newTag()
@@ -190,6 +255,13 @@ export function resetState(): void {
   mode = 'active'
   stallTimer?.cancel()
   stallTimer = undefined
+  stopMapTimer()
+  graph = emptyGraph('opus')
+  layoutMem = undefined
+  drawnSeq = 0
+  mapDirty = false
+  mapSettled = true
+  mapChangedAt = 0
   reviewQueue = createQueue()
   pendingReviews.clear()
   editedFiles.clear()
@@ -200,7 +272,10 @@ export function resetState(): void {
 }
 
 function snapshot(): Snapshot {
-  return { agents: [...agents.values()], ledger, seenModels, sessionTag, mode, baseline, baselinePinned, blockedTiers, refusedSeniors }
+  return {
+    agents: [...agents.values()], ledger, seenModels, sessionTag, mode, baseline, baselinePinned, blockedTiers, refusedSeniors,
+    graph, ...(layoutMem ? { layout: layoutMem } : {}), drawnSeq,
+  }
 }
 
 // Reference to the session snapshot in $.state (the contract lives in types/index.d.ts).
@@ -270,7 +345,18 @@ export const register: Register = (on, options) => {
       baselinePinned = saved.baselinePinned
       blockedTiers = saved.blockedTiers
       refusedSeniors = saved.refusedSeniors
+      graph = saved.graph ?? emptyGraph(baseline)
+      layoutMem = saved.layout
+      drawnSeq = saved.drawnSeq ?? 0
+      // A map pane left open across the reload keeps being redrawn.
+      try {
+        if ((await $.ui.panes()).some((p) => p.id === MAP_PANE)) { mapDirty = true; startMapTimer($) }
+      } catch { /* no pane list: the map redraws when it is opened again */ }
     } else {
+      graph = emptyGraph(baseline)
+      layoutMem = undefined
+      drawnSeq = 0
+      stopMapTimer()
       try {
         sessionTag = newTag()
         unavailableToasted = false
@@ -312,7 +398,7 @@ export const register: Register = (on, options) => {
       } catch { /* the tool is optional: the ladder works without it */ }
     }
     try {
-      await $.command.register({ name: 'escalator', description: 'Model escalator: savings report and stats', argumentHint: '[report|stats|reset|resume <id>|resume all]' })
+      await $.command.register({ name: 'escalator', description: 'Model escalator: savings report, stats and the live agent network', argumentHint: '[report|stats|map|reset|resume <id>|resume all]' })
     } catch { /* name taken: the report stays reachable through the status line */ }
     return r
   })
@@ -330,13 +416,51 @@ export const register: Register = (on, options) => {
       return { text: 'Learned stats cleared.' }
     }
     if (arg === 'resume' || arg.startsWith('resume ')) return { text: await resumeCommand($, arg.slice(6).trim()) }
+    if (arg === 'map') return { text: await openMap($) }
     const paused = [...agents.values()].filter((a) => a.paused)
     const pausedText = paused.length === 0 ? '' : '\n\nPaused (resume with /escalator resume <id>|all):\n' +
       paused.map((a) => `- ${agentLabel(a)} (${a.category}, ${a.tier})`).join('\n')
-    return { text: `Mode: ${mode}\n` + report(ledger, baseline) + pausedText }
+    return { text: `Mode: ${mode}\n` + report(ledger, baseline) + pausedText +
+      '\n\nMore: /escalator stats, /escalator map (live agent network), /escalator reset, /escalator resume <id>|all' }
+  })
+
+  // The map pane. Desktop, VS Code and mobile draw an interactive Svg; the terminal a short text for now.
+  on('ui.render', { component: 'Pane', requestId: MAP_PANE }, async ($, e, next) => {
+    try {
+      const now = (await clockNow($)) ?? lastNow ?? 0
+      const g = graph
+      const layout = layoutGraph(g, layoutMem)
+      layoutMem = { slots: layout.slots, retired: layout.retired }
+      const workers = g.nodes.filter((n) => n.kind === 'worker').length
+      const alt = `Agent network: ${workers} worker${workers === 1 ? '' : 's'}${g.nodes.some((n) => n.id === SENIOR_ID) ? ', a senior' : ''}`
+      let out
+      if (e.surface === 'terminal') {
+        const { Box, Text } = $.ui.resolve(e)
+        out = Box({ flexDirection: 'column', children: [
+          Text({ children: alt }),
+          Text({ dimColor: true, children: 'Open the map on desktop or VS Code to see the live network; the terminal view is coming.' }),
+        ] })
+      } else {
+        const { Svg } = $.ui.resolve(e)
+        out = Svg({ source: renderSvg(g, layout, { lastSeq: drawnSeq, now }), alt, isInteractive: true })
+        drawnSeq = g.seq
+      }
+      void save($)
+      return out
+    } catch {
+      return next(e)
+    }
+  })
+
+  // Closing the pane stops the redraw ticks.
+  on('ui.close', async ($, e, next) => {
+    const r = await next(e)
+    try { if (e.id === MAP_PANE) stopMapTimer() } catch { /* best effort */ }
+    return r
   })
 
   // 1. Spawn: remember the agent, and let history (or baseline mode) pick the model.
+  // (The map is fed from here, from the tool, step, complete and ladder paths below, and from the helpers.)
   on('agent.spawn', async ($, e, next) => {
     if (mode === 'off') return next(e)
     // A fork inherits the parent's model and context: it is never rewritten, announced or tracked.
@@ -376,6 +500,7 @@ export const register: Register = (on, options) => {
       const fresh = newAgent(r.agentId, category, r.model, e.prompt)
       agents.set(r.agentId, name === undefined ? fresh : { ...fresh, name })
       if (watching()) mark(r.agentId, await clockNow($))
+      feed($, { type: 'spawn', agentId: r.agentId, label: name ?? category, model: String(r.model ?? '') })
       await save($)
     }
     return r
@@ -386,7 +511,10 @@ export const register: Register = (on, options) => {
     const ev = e as unknown as Record<string, unknown>
     const stop = pausedDeny(typeof ev.agentId === 'string' ? ev.agentId : undefined, ev.tool)
     if (stop) return stop as never
-    const text = await handleHelp($, ev, typeof ev.agentId === 'string' ? ev.agentId : undefined)
+    const helper = typeof ev.agentId === 'string' ? ev.agentId : undefined
+    feed($, { type: 'tool-start', ...(helper ? { agentId: helper } : {}), tool: 'ask_for_help' })
+    const text = await handleHelp($, ev, helper)
+    feed($, { type: 'tool-end', ...(helper ? { agentId: helper } : {}), tool: 'ask_for_help' })
     return { result: text } as never
   })
 
@@ -398,13 +526,17 @@ export const register: Register = (on, options) => {
     const id = e.agentId
     const tracked = watching() && id !== undefined && agents.has(id)
     if (tracked) mark(id, await clockNow($), toolStart)
+    const who = id ? { agentId: id } : {}
+    feed($, { type: 'tool-start', ...who, tool: String(e.tool), summary: summarize(e as unknown as Record<string, unknown>) })
     let r: Awaited<ReturnType<typeof next>>
     try {
       r = await next(e)
     } catch (err) {
+      feed($, { type: 'tool-end', ...who, tool: String(e.tool) })
       if (tracked) mark(id, await clockNow($), toolEnd)
       throw err
     }
+    feed($, { type: 'tool-end', ...who, tool: String(e.tool) })
     if (tracked) mark(id, await clockNow($), toolEnd)
     if (tracked && config.reviewRate > 0 && r.isError !== true && r.deny === undefined) noteEdit(id, e as unknown as Record<string, unknown>)
     if (config.reworkWindowMinutes > 0 && r.isError !== true && r.deny === undefined) {
@@ -429,6 +561,7 @@ export const register: Register = (on, options) => {
           ledger = addIntervention(ledger, 'deescalate')
           await $.ui.log(`${agentLabel(state)} (${state.category}): ${mode === 'observe' ? 'would de-escalate' : `de-escalate to ${back.state.tier}`}`)
         }
+        if (back.decided && mode === 'active') feed($, { type: 'ladder', agentId: id, action: 'swap', toModel: back.state.tier, level: back.state.level, score: back.state.score })
         await save($)
         if (back.decided && mode === 'active') {
           return { ...r, context: [...(r.context ?? []), tag(`Progress noted: from your next step you run on ${back.state.tier} again.`)] } as typeof r
@@ -446,6 +579,11 @@ export const register: Register = (on, options) => {
       }
       // The human level pauses the agent: from now on its tool calls are refused until the user resumes it.
       agents.set(id, action === 'human' && config.pauseAtHuman ? pauseAgent(state) : state)
+      // A consult reaches the map through consult() itself, with the senior's side of it.
+      if (action !== 'consult') {
+        feed($, { type: 'ladder', agentId: id, action, ...(action === 'swap' ? { toModel: state.tier } : {}), level: state.level, score: state.score })
+        if (action === 'human' && config.pauseAtHuman) feed($, { type: 'pause', agentId: id })
+      }
       const note = await act($, state, action)
       if (action === 'swap') notifyLead($, state, { kind: 'swap', tier: state.tier })
       else if (action === 'human') notifyLead($, state, { kind: 'human', paused: config.pauseAtHuman })
@@ -472,6 +610,7 @@ export const register: Register = (on, options) => {
     if (mode === 'active' && a && a.tier !== usableTier(a, blockedTiers)) {
       a = revertSwap(a, usableTier(a, blockedTiers), config)
       agents.set(a.id, a)
+      feed($, { type: 'ladder', agentId: a.id, action: 'swap', toModel: a.tier, level: a.level, score: a.score })
     }
     const swap = mode === 'active' && a !== undefined && a.tier !== a.startTier
     // A raised effort goes on every request of the agent until its next swap; a request without one is left alone.
@@ -493,6 +632,12 @@ export const register: Register = (on, options) => {
     } catch { /* the stream must go on */ }
     if (mode !== 'off' && r.usage) {
       ledger = addStep(ledger, r.usage as Usage, tierOf(r.usage.model), baseline, Boolean(e.agentId), config)
+      // The request's own cost, on the model it ran on, for the map (the lead's cache writes live for an hour).
+      const u = asUsage(r.usage)
+      feed($, {
+        type: 'step', ...(e.agentId ? { agentId: e.agentId } : {}), model: String(r.usage.model ?? e.model),
+        cost: u ? stepCost(u, config.prices[tierOf(r.usage.model)], e.agentId ? '5m' : '1h') : 0,
+      })
     }
     await save($)
     return r
@@ -502,6 +647,7 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const id = e.agentId
     const a = id ? agents.get(id) : undefined
+    feed($, { type: 'complete', ...(id ? { agentId: id } : {}) })
     if (id && a && mode !== 'off') {
       const written = writtenFiles.get(id) ?? []
       writtenFiles.delete(id)
@@ -586,7 +732,11 @@ async function refuseSwapTarget($: EngineInterface, id: string, tier: Tier, mode
   refusedSeniors = refuseTier(refusedSeniors, tier)
   for (const [aid, a] of [...agents]) {
     const ok = usableTier(a, blockedTiers)
-    if (a.tier !== ok) agents.set(aid, revertSwap(a, ok, config))
+    if (a.tier !== ok) {
+      const back = revertSwap(a, ok, config)
+      agents.set(aid, back)
+      feed($, { type: 'ladder', agentId: aid, action: 'swap', toModel: back.tier, level: back.level, score: back.score })
+    }
   }
   const a = agents.get(id)
   const back = a?.tier ?? tier
@@ -608,6 +758,7 @@ function notifyLead($: EngineInterface, a: AgentState, ev: LeadEvent): void {
     if (mode !== 'active' || !config.notifyLead || leadNotices >= MAX_LEAD_NOTICES) return
     const text = leadMessage(a, ev, leadNotices === 0)
     leadNotices++
+    feed($, { type: 'notice', agentId: a.id })
     const p: Promise<void> = (async () => {
       try {
         // $.session.send cannot reach the main loop (it only addresses other sessions and agents), so the notice
@@ -680,6 +831,7 @@ async function checkStalls($: EngineInterface): Promise<void> {
       if (silent === undefined) continue
       const stalled = markStall(a, config)
       agents.set(id, stalled)
+      feed($, { type: 'stall', agentId: id })
       ledger = addIntervention(ledger, 'stall')
       found.push({ a: stalled, silent })
     }
@@ -980,6 +1132,21 @@ function pausedDeny(id: string | undefined, tool?: unknown): { deny: string } | 
   }
 }
 
+// `/escalator map`: opens the pane (a second call only retitles it) and starts the redraw ticks.
+async function openMap($: EngineInterface): Promise<string> {
+  try {
+    await clockNow($)
+    const opened = await $.ui.open({ id: MAP_PANE, title: 'Agent network' })
+    mapDirty = true
+    startMapTimer($)
+    return opened.isPlaced
+      ? 'Agent network opened. It shows every agent with its model, what it is doing and its cost; the animated map needs desktop or VS Code.'
+      : `Agent network pane is waiting: ${opened.reason}`
+  } catch {
+    return 'Could not open the agent network pane.'
+  }
+}
+
 // `/escalator resume <id>|all`: clears the pause and restarts the ladder of the agent on its current tier.
 async function resumeCommand($: EngineInterface, target: string): Promise<string> {
   try {
@@ -990,7 +1157,10 @@ async function resumeCommand($: EngineInterface, target: string): Promise<string
       return target !== 'all' && agents.has(target) ? `Agent ${target} is not paused.` : `No paused agent${target === 'all' ? '' : ` with id ${target}`}.`
     }
     const now = await clockNow($)
-    for (const a of chosen) agents.set(a.id, resumeAgent(a, now))
+    for (const a of chosen) {
+      agents.set(a.id, resumeAgent(a, now))
+      feed($, { type: 'resume', agentId: a.id })
+    }
     await save($)
     const lines = chosen.map((a) => `${agentLabel(a)} (${a.category}, ${a.tier})`)
     for (const a of chosen) {
@@ -1045,6 +1215,17 @@ async function gitDiffStat($: EngineInterface): Promise<string> {
 // account of the problem (help tool), shown to the senior as the agent notes. Falls back to a generic
 // note without advice.
 async function consult($: EngineInterface, s: AgentState, extra = ''): Promise<string> {
+  const senior = pickSenior(config.senior, refusedSeniors) ?? config.senior
+  const before = ledger.consultCost
+  feed($, { type: 'consult', agentId: s.id, phase: 'start', model: senior })
+  try {
+    return await consultRun($, s, extra)
+  } finally {
+    feed($, { type: 'consult', agentId: s.id, phase: 'end', model: senior, cost: Math.max(0, ledger.consultCost - before) })
+  }
+}
+
+async function consultRun($: EngineInterface, s: AgentState, extra: string): Promise<string> {
   // One consult action, counted before the calls so a refused call and its retry make one.
   const counted = agents.get(s.id)
   if (counted) agents.set(s.id, { ...counted, consults: (counted.consults ?? 0) + 1 })
