@@ -53,7 +53,10 @@ type Climb = { kinds: string[]; notes: string[]; after: Record<string, Step[]> }
 async function climb($: any, h: Harness, id: string, model: string, effort: string | undefined, calls = 80): Promise<Climb> {
   const out: Climb = { kinds: [], notes: [], after: {} }
   let pending: string[] = []
-  for (let i = 0; i < calls; i++) {
+  // The human level ends the ladder: ten more calls show that nothing follows it, then the climb stops.
+  let afterHuman = 0
+  for (let i = 0; i < calls && afterHuman < 10; i++) {
+    if (out.kinds.includes('human')) afterHuman++
     await step($, id, model, effort)
     for (const k of pending) (out.after[k] ??= []).push(h.steps.at(-1)!)
     pending = []

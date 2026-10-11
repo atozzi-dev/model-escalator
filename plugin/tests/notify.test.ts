@@ -147,9 +147,11 @@ test('an append that is refused never breaks the hook', async ($, on) => {
 test('the session sends at most MAX_LEAD_NOTICES messages', async ($, on) => {
   const h = wire(on)
   await $.session.start({ cwd: '/work' } as never)
-  for (let i = 0; i < 8; i++) {
+  // Each agent reaches the human level in 24 failing calls and sends 3 notices, so the cap of 10 is hit during the
+  // fourth agent; a fifth and sixth prove nothing goes out beyond it.
+  for (let i = 0; i < 6; i++) {
     const id = await spawn($, `task number ${i}`)
-    await stuck($, id, 60)
+    await stuck($, id, 24)
   }
   expect(h.sent).toHaveLength(MAX_LEAD_NOTICES)
 })
