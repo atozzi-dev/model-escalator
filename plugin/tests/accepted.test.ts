@@ -195,7 +195,7 @@ const PRICED: Stats = {
   },
 }
 
-test('with enough cost data the spawn keeps the cheaper tier by cost and logs it', { options: { respectExplicitModel: false } }, async ($, on) => {
+test('with enough cost data the spawn keeps the cheaper tier by cost and logs it', async ($, on) => {
   const h = wire(on, { stats: PRICED })
   await $.session.start({ cwd: '/work' } as never)
   await spawn($, 'haiku')
@@ -206,7 +206,7 @@ test('with enough cost data the spawn keeps the cheaper tier by cost and logs it
   expect(line!).toContain('sonnet')
 })
 
-test('learnByCost false keeps the failure-rate rule: haiku climbs to sonnet, no cost line', { options: { respectExplicitModel: false, learnByCost: false } }, async ($, on) => {
+test('learnByCost false keeps the failure-rate rule: haiku climbs to sonnet, no cost line', { options: { learnByCost: false } }, async ($, on) => {
   const h = wire(on, { stats: PRICED })
   await $.session.start({ cwd: '/work' } as never)
   await spawn($, 'haiku')
@@ -214,7 +214,7 @@ test('learnByCost false keeps the failure-rate rule: haiku climbs to sonnet, no 
   expect(h.logs.some((l) => l.includes('chosen by cost'))).toBe(false)
 })
 
-test('without cost data the old rule decides and nothing is logged about cost', { options: { respectExplicitModel: false } }, async ($, on) => {
+test('without cost data the old rule decides and nothing is logged about cost', async ($, on) => {
   const stats: Stats = { [CAT]: { haiku: { runs: 10, escalated: 5, tokens: 0, notAccepted: 5 } } }
   const h = wire(on, { stats })
   await $.session.start({ cwd: '/work' } as never)

@@ -37,7 +37,7 @@ test('stuck cheap agent: nudge, senior consult, then hot swap of the model', asy
   expect(stepModels.at(-1)).toBe('opus')
 })
 
-test('history of escalations upgrades the next spawn of the same kind', { options: { respectExplicitModel: false } }, async ($, on) => {
+test('history of escalations upgrades the next spawn of the same kind', async ($, on) => {
   mock.store(on)
   let n = 0
   const spawnModels: (string | undefined)[] = []

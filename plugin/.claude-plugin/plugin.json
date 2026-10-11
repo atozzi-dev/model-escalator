@@ -142,8 +142,8 @@
     "respectExplicitModel": {
       "type": "boolean",
       "title": "Respect a model asked for explicitly",
-      "description": "When the Agent call names a model, the task starts on it: learning and exploration do not change the starting model (the log says what they would have suggested). The ladder still moves the agent up when it is stuck. Off lets learning raise an explicitly requested model too.",
-      "default": true
+      "description": "When on and the Agent call names a model, the task starts on it: learning and exploration do not change the starting model (the log says what they would have suggested). The ladder still moves the agent up when it is stuck. Off by default: the lead usually names a cheap model itself, and learning is there to correct that choice. Turn it on for strict respect of what was asked.",
+      "default": false
     },
     "learnByCost": {
       "type": "boolean",

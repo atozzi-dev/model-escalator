@@ -40,13 +40,13 @@ function wire(on: any, env: Record<string, string> = {}): H {
 const spawn = ($: any, model?: string) =>
   $.agent.spawn({ prompt: 'p', description: 'fix db test', subagentType: 'general-purpose', parentModel: 'haiku', ...(model ? { model } : {}) } as never)
 
-test('config: respectExplicitModel defaults to true, invalid values fall back', () => {
-  expect(parseConfig({}).respectExplicitModel).toBe(true)
-  expect(parseConfig({ respectExplicitModel: false }).respectExplicitModel).toBe(false)
-  expect(parseConfig({ respectExplicitModel: 'x' }).respectExplicitModel).toBe(true)
+test('config: respectExplicitModel defaults to false, invalid values fall back', () => {
+  expect(parseConfig({}).respectExplicitModel).toBe(false)
+  expect(parseConfig({ respectExplicitModel: true }).respectExplicitModel).toBe(true)
+  expect(parseConfig({ respectExplicitModel: 'x' }).respectExplicitModel).toBe(false)
 })
 
-test('an explicit haiku spawn stays haiku and the log says what learning suggested', async ($, on) => {
+test('an explicit haiku spawn stays haiku and the log says what learning suggested', { options: { respectExplicitModel: true } }, async ($, on) => {
   const h = wire(on)
   await $.session.start({ cwd: '/work' } as never)
   await spawn($, 'haiku')
@@ -63,6 +63,14 @@ test('an implicit spawn (no model given) is still raised by learning', async ($,
   expect(h.logs.some((l) => l.includes('kept the requested'))).toBe(false)
 })
 
+test('by default an explicit haiku is raised by learning like any other', async ($, on) => {
+  const h = wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'haiku')
+  expect(h.spawned).toEqual(['sonnet'])
+  expect(h.logs.some((l) => l.includes('kept the requested'))).toBe(false)
+})
+
 test('respectExplicitModel false restores learning over an explicit choice', { options: { respectExplicitModel: false } }, async ($, on) => {
   const h = wire(on)
   await $.session.start({ cwd: '/work' } as never)
@@ -71,7 +79,7 @@ test('respectExplicitModel false restores learning over an explicit choice', { o
   expect(h.logs.some((l) => l.includes('kept the requested'))).toBe(false)
 })
 
-test('an explicit choice is not explored away: no draw, no log, the model asked for is kept', { options: { explore: 1 } }, async ($, on) => {
+test('an explicit choice is not explored away: no draw, no log, the model asked for is kept', { options: { respectExplicitModel: true, explore: 1 } }, async ($, on) => {
   const h = wire(on)
   await $.session.start({ cwd: '/work' } as never)
   for (let i = 0; i < 40; i++) await spawn($, 'haiku')
@@ -79,21 +87,21 @@ test('an explicit choice is not explored away: no draw, no log, the model asked 
   expect(h.logs.some((l) => l.includes('exploring'))).toBe(false)
 })
 
-test('an explicit sonnet is never lowered by exploration either', { options: { explore: 1 } }, async ($, on) => {
+test('an explicit sonnet is never lowered by exploration either', { options: { respectExplicitModel: true, explore: 1 } }, async ($, on) => {
   const h = wire(on)
   await $.session.start({ cwd: '/work' } as never)
   for (let i = 0; i < 40; i++) await spawn($, 'sonnet')
   expect(h.spawned.every((m) => m === 'sonnet')).toBe(true)
 })
 
-test('baseline mode still overrides an explicit model', async ($, on) => {
+test('baseline mode still overrides an explicit model', { options: { respectExplicitModel: true } }, async ($, on) => {
   const h = wire(on, { MODEL_ESCALATOR_MODE: 'baseline', MODEL_ESCALATOR_BASELINE: 'opus' })
   await $.session.start({ cwd: '/work' } as never)
   await spawn($, 'haiku')
   expect(h.spawned).toEqual(['opus'])
 })
 
-test('the ladder still swaps an explicit haiku agent when it is stuck', async ($, on) => {
+test('the ladder still swaps an explicit haiku agent when it is stuck', { options: { respectExplicitModel: true } }, async ($, on) => {
   const h = wire(on)
   await $.session.start({ cwd: '/work' } as never)
   const r = await spawn($, 'haiku') as { agentId: string }

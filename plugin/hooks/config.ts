@@ -90,7 +90,7 @@ export const DEFAULT_CONFIG: Config = {
   reviewModel: '',
   // Off by default: exploring deliberately runs some tasks on a model learning had ruled out.
   explore: 0,
-  respectExplicitModel: true,
+  respectExplicitModel: false,
   learnByCost: true,
   modelCategories: false,
   minReviewScore: 3,
