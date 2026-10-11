@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { DEFAULT_CONFIG } from '../hooks/config'
-import { addConsult, addStep, asUsage, cost, emptyLedger, PRICES, report, savings } from '../hooks/savings'
+import { addAgent, addConsult, addEscalation, addStep, asUsage, cost, emptyLedger, MAX_CATEGORIES, PRICES, report, reportByCategory, savings } from '../hooks/savings'
 
 const U = { input_tokens: 2_000, output_tokens: 1_000, cache_read_input_tokens: 40_000, cache_creation_input_tokens: 3_000 }
 
@@ -113,4 +113,82 @@ test('asUsage accepts a complete usage object of numbers only', async () => {
   expect(asUsage({ ...good, input_tokens: '10' })).toBe(undefined)
   expect(asUsage({ ...good, output_tokens: NaN })).toBe(undefined)
   expect(asUsage({ ...good, cache_read_input_tokens: -1 })).toBe(undefined)
+})
+
+test('addStep with categories fills the breakdown and totals match the sum', async () => {
+  let l = emptyLedger()
+  l = addStep(l, U, 'sonnet', 'opus', true, DEFAULT_CONFIG, 'refactor')
+  l = addStep(l, U, 'haiku', 'opus', true, DEFAULT_CONFIG, 'refactor')
+  l = addStep(l, U, 'haiku', 'opus', true, DEFAULT_CONFIG, 'docs')
+  const rows = Object.values(l.byCategory ?? {})
+  expect(rows.length).toBe(2)
+  expect(l.byCategory?.refactor?.steps).toBe(2)
+  expect(l.byCategory?.docs?.steps).toBe(1)
+  const sum = (k: 'actual' | 'baselineHigh' | 'baselineLow') => rows.reduce((a, r) => a + r[k], 0)
+  expect(Math.abs(sum('actual') - l.actual) < 1e-12).toBe(true)
+  expect(Math.abs(sum('baselineHigh') - l.baselineHigh) < 1e-12).toBe(true)
+  expect(Math.abs(sum('baselineLow') - l.baselineLow) < 1e-12).toBe(true)
+})
+
+test('lead steps are not attributed to a category', async () => {
+  const l = addStep(emptyLedger(), U, 'opus', 'opus', false, DEFAULT_CONFIG, 'refactor')
+  expect(Object.keys(l.byCategory ?? {}).length).toBe(0)
+  const m = addStep(emptyLedger(), U, 'sonnet', 'opus', true)
+  expect(Object.keys(m.byCategory ?? {}).length).toBe(0)
+})
+
+test('a consult is attributed to the category of the agent', async () => {
+  let l = addStep(emptyLedger(), U, 'haiku', 'opus', true, DEFAULT_CONFIG, 'bugfix')
+  const before = l.byCategory?.bugfix?.actual ?? 0
+  l = addConsult(l, { usage: U, promptChars: 1, replyChars: 1 }, 'opus', DEFAULT_CONFIG, 'bugfix')
+  expect(near((l.byCategory?.bugfix?.actual ?? 0) - before, 0.051)).toBe(true)
+  expect(l.byCategory?.bugfix?.steps).toBe(1)
+  const plain = addConsult(emptyLedger(), { usage: U, promptChars: 1, replyChars: 1 }, 'opus')
+  expect(Object.keys(plain.byCategory ?? {}).length).toBe(0)
+})
+
+test('agents and escalations are counted per category', async () => {
+  let l = addAgent(emptyLedger(), 'bugfix')
+  l = addAgent(l, 'bugfix')
+  l = addEscalation(l, 'bugfix')
+  expect(l.byCategory?.bugfix?.agents).toBe(2)
+  expect(l.byCategory?.bugfix?.escalated).toBe(1)
+})
+
+test('categories are capped, the rest goes to other', async () => {
+  let l = emptyLedger()
+  for (let i = 0; i < MAX_CATEGORIES + 10; i++) l = addStep(l, U, 'haiku', 'opus', true, DEFAULT_CONFIG, 'cat' + i)
+  const keys = Object.keys(l.byCategory ?? {})
+  expect(keys.length).toBe(MAX_CATEGORIES + 1)
+  expect(l.byCategory?.other?.steps).toBe(10)
+  expect(l.byCategory?.cat0?.steps).toBe(1)
+  l = addStep(l, U, 'haiku', 'opus', true, DEFAULT_CONFIG, 'cat0')
+  expect(l.byCategory?.cat0?.steps).toBe(2)
+})
+
+test('an old ledger without byCategory stays valid', async () => {
+  const old = { ...emptyLedger() } as Record<string, unknown>
+  delete old.byCategory
+  const oldLedger = old as unknown as ReturnType<typeof emptyLedger>
+  const l = addStep(oldLedger, U, 'haiku', 'opus', true, DEFAULT_CONFIG, 'docs')
+  expect(l.byCategory?.docs?.steps).toBe(1)
+  expect(reportByCategory(oldLedger, 'opus')).toContain('No category data')
+  expect(reportByCategory(undefined as never, 'opus')).toContain('No category data')
+})
+
+test('reportByCategory lists categories by real cost and flags negative savings', async () => {
+  let l = emptyLedger()
+  l = addStep(l, U, 'haiku', 'opus', true, DEFAULT_CONFIG, 'docs')
+  l = addStep(l, U, 'sonnet', 'opus', true, DEFAULT_CONFIG, 'refactor')
+  l = addAgent(l, 'refactor')
+  l = addEscalation(l, 'refactor')
+  for (let i = 0; i < 20; i++) l = addConsult(l, { promptChars: 8_000, replyChars: 2_000 }, 'opus', DEFAULT_CONFIG, 'docs')
+  const out = reportByCategory(l, 'opus')
+  expect(out).toContain('docs')
+  expect(out).toContain('refactor')
+  expect(out.indexOf('docs')).toBeLessThan(out.indexOf('refactor'))
+  expect(out).toContain('negative savings')
+  expect(out).toContain('docs: 1 requests')
+  expect(out).toContain('savings -')
+  expect(reportByCategory(l, 'opus')).toBe(out)
 })
