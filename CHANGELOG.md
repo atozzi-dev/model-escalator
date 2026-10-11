@@ -14,6 +14,8 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Agents that go silent for `stallMinutes` (default 10) are reported in the log, the status line and a toast, and get a note on their next tool call; a tool call still running counts as activity for three times that window.
 - `ask_for_help` tool: a tracked agent that is stuck can ask for the senior consult directly, once per grace window; in observe mode the request is only logged.
 - Sampled senior review (`reviewRate`, off by default): a share of the runs of cheaper models gets its diff reviewed by a senior model against a short rubric; the 1-5 score is stored per category and shown by `/escalator stats`. Reviews count against `consultBudgetUsd`.
+- Eval runs can set the mode and the reference model through `EVAL_MODEL_ESCALATOR_MODE` and `EVAL_MODEL_ESCALATOR_BASELINE`, since `claude plugin eval` only forwards `EVAL_*` variables; the plain variables win when both are set.
+- `explore` option (0 to 1, off by default): sometimes starts a task on the cheaper model that learning had ruled out, using Thompson sampling, never below the requested model; `observe` mode only logs what it would explore.
 - Seven A/B eval cases (easy to hard) with hidden acceptance tests, tamper-proof test checks and a quality judge, to compare the escalation ladder against an all-strong-model baseline.
 - `scripts/ab-compare.mjs` compares the baseline and active A/B eval results per case (score, spread, cost, verdict) and can write the table as Markdown; CI runs its tests.
 - Learned evidence fades over time (`learningHalfLifeDays`, default 30, 0 never forgets), and `/escalator stats` shows readable counters with the age of each entry instead of raw JSON.
