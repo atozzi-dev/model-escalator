@@ -145,6 +145,12 @@
       "description": "Once the mod has enough priced runs of a task category on the models involved, a task starts on the model with the lowest cost per accepted run (the mean cost of a run divided by the share of runs that were accepted). Off keeps the rule that only looks at how often a model failed.",
       "default": true
     },
+    "modelCategories": {
+      "type": "boolean",
+      "title": "Classify tasks with a small model",
+      "description": "Label each new subagent task (tests, bugfix, feature, review, ...) with one short call to a small model instead of keywords only, so the mod learns per task kind more accurately. Adds about a second to a spawn that is not in its cache; the call's cost is not counted in the report. Off by default.",
+      "default": false
+    },
     "minReviewScore": {
       "type": "number",
       "title": "Lowest review score of an accepted run",

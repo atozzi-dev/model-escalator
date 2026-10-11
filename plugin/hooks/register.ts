@@ -3,6 +3,7 @@ import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config'
 import { LADDER, afterHelp, agentLabel, canAskForHelp, classifyFailure, clipLabel, consultLimit, countStep, EFFORTS, escalated, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_AGENT_NAME, MAX_LEAD_NOTICES, newAgent, noteProgress, normalizePath, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
 import { buildDossier, inputFromState } from './dossier'
+import { cacheGet, cachePut, cacheKey, classifierInput, combineCategory, LABELS, parseCache } from './classify'
 import { categorize, costPerAccepted, formatStats, isAccepted, mulberry32, recommendWithExploration, record, recordReview, recordRework, type Stats } from './learning'
 import { emptyGraph, LEAD_ID, reduce, SENIOR_ID, type GraphInput, type GraphState } from './graph'
 import { layoutGraph, type LayoutMemory } from './layout'
@@ -16,6 +17,8 @@ import { addConsult, addIntervention, addStep, asUsage, cost as stepCost, emptyL
 export const HELP_TOOL = 'mcp__model-escalator__ask_for_help'
 const STATS_KEY = 'stats'
 const SESSIONS_KEY = 'sessions'
+const CATEGORIES_KEY = 'categories'
+const CATEGORY_CACHE_MAX = 200
 const SENIOR_SYSTEM =
   'You advise a junior coding agent that is stuck. Read its attempts, name the most likely root cause, ' +
   'and give at most 5 concrete next steps. Do not repeat what already failed. Be brief.'
@@ -347,6 +350,44 @@ export function isFork(e: { fork?: boolean; subagentType?: string }): boolean {
   return e.fork === true || e.subagentType === 'fork'
 }
 
+// The task category of a spawn: the keyword one, or with `modelCategories` the label a small model gave (cached in the
+// store by a key that ignores case and punctuation). Any failure falls back to the keywords; never throws.
+async function taskCategory($: EngineInterface, e: { subagentType?: string; description?: string; prompt?: string }): Promise<string> {
+  const type = e.subagentType ?? ''
+  const description = e.description ?? ''
+  const fallback = categorize(type, description)
+  if (!config.modelCategories || mode === 'off' || mode === 'baseline') return fallback
+  try {
+    const key = cacheKey(type, description, e.prompt ?? '')
+    if (key === '') return fallback
+    const hit = cacheGet(parseCache(await $.store.get(CATEGORIES_KEY)), key)
+    let label = hit.label
+    if (label !== undefined) {
+      await storeQueue(async () => {
+        const fresh = cacheGet(parseCache(await $.store.get(CATEGORIES_KEY)), key)
+        if (fresh.label !== undefined) await $.store.set(CATEGORIES_KEY, fresh.cache)
+      })
+    } else {
+      try { label = await $.model.classify(classifierInput(type, description, e.prompt ?? ''), LABELS, { model: 'haiku' }) } catch { label = undefined }
+      if (typeof label === 'string') {
+        const l = label.trim().toLowerCase()
+        if (!LABELS.includes(l)) label = undefined
+        else {
+          label = l
+          await storeQueue(async () => {
+            await $.store.set(CATEGORIES_KEY, cachePut(parseCache(await $.store.get(CATEGORIES_KEY)), key, l, CATEGORY_CACHE_MAX))
+          })
+        }
+      } else label = undefined
+    }
+    // 'other' from the classifier does not override a specific keyword category.
+    if (label === 'other' && !fallback.endsWith(':other')) return fallback
+    return combineCategory(type, label, fallback)
+  } catch {
+    return fallback
+  }
+}
+
 export function readMode(v: string | undefined): Mode {
   return v === 'observe' || v === 'baseline' || v === 'off' ? v : 'active'
 }
@@ -500,7 +541,7 @@ export const register: Register = (on, options) => {
     // A fork inherits the parent's model and context: it is never rewritten, announced or tracked.
     if (isFork(e)) return next(e)
     let ev = e
-    const category = categorize(e.subagentType, e.description)
+    const category = await taskCategory($, e)
     try {
       const asked = tierOf(e.model ?? e.parentModel)
       const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
