@@ -133,6 +133,12 @@
       "description": "Days after which learned evidence counts half, so a category is not stuck on a stronger model forever because of old runs. 0 never forgets.",
       "default": 30
     },
+    "explore": {
+      "type": "number",
+      "title": "Explore cheaper models",
+      "description": "From 0 to 1: how often a task starts on the cheaper model that learning had ruled out, to check whether it became good enough. It only lowers a tier that learning raised, never below the model you asked for, and is rarer the stronger the evidence (Thompson sampling). Some tasks deliberately run on a weaker model. 0 is off.",
+      "default": 0
+    },
     "effortStep": {
       "type": "boolean",
       "title": "Raise the effort before a model swap",

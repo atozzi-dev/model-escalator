@@ -3,7 +3,7 @@ import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config'
 import { afterHelp, agentLabel, canAskForHelp, classifyFailure, clipLabel, consultLimit, countStep, EFFORTS, escalated, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_AGENT_NAME, MAX_LEAD_NOTICES, newAgent, noteProgress, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
 import { buildDossier, inputFromState } from './dossier'
-import { categorize, formatStats, recommend, record, type Stats } from './learning'
+import { categorize, formatStats, mulberry32, recommendWithExploration, record, type Stats } from './learning'
 import { createQueue } from './queue'
 import { addReview, buildReviewPrompt, carryReview, diffArgv, editedPath, formatReviews, isCheaper, parseReview, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun } from './review'
 import { parseSnapshot, type Snapshot } from './state'
@@ -67,6 +67,18 @@ let refusedSeniors: Tier[] = []
 
 // Per-session tag that authenticates our notes.
 let sessionTag = newTag()
+
+// Random source of the exploration draw: a PRNG seeded from the session tag, so a session has its own sequence
+// and the same tag gives the same one (a reload restarts it, which is harmless for a draw).
+let exploreRandom: (() => number) | undefined
+let exploreRandomTag = ''
+function explorationRandom(): () => number {
+  if (exploreRandom === undefined || exploreRandomTag !== sessionTag) {
+    exploreRandom = mulberry32(parseInt(sessionTag, 16) || 1)
+    exploreRandomTag = sessionTag
+  }
+  return exploreRandom
+}
 
 // Tunables, built once from the plugin options when the module loads.
 let config: Config = DEFAULT_CONFIG
@@ -135,6 +147,7 @@ function noteTask(id: string | undefined, e: Record<string, unknown>, r: unknown
 // Restores the module state to its defaults. Used by tests so each one starts clean.
 export function resetState(): void {
   sessionTag = newTag()
+  exploreRandom = undefined
   agents.clear()
   limitNoted.clear()
   taskSubjects.clear()
@@ -301,10 +314,24 @@ export const register: Register = (on, options) => {
     try {
       const asked = tierOf(e.model ?? e.parentModel)
       const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
-      const best = mode === 'baseline' ? baseline : recommend(stats, category, asked, await clockNow($), halfLifeMs())
+      const choice = mode === 'baseline'
+        ? { tier: baseline, reason: 'requested' as const, learned: baseline }
+        : recommendWithExploration(stats, category, asked, {
+          now: await clockNow($), halfLifeMs: halfLifeMs(), explore: config.explore,
+          ...(config.explore > 0 ? { rand: explorationRandom() } : {}),
+        })
+      // In observe mode the model stays as asked: exploring is only logged, the learned tier is what "would" happen.
+      const exploring = choice.reason === 'explore'
+      const best = exploring && mode === 'observe' ? choice.learned : choice.tier
+      const label = clipLabel(e.name, MAX_AGENT_NAME) ?? category
       if (best !== asked) {
         if (mode !== 'observe') ev = { ...e, model: best }
-        await $.ui.log(`${clipLabel(e.name, MAX_AGENT_NAME) ?? category}: ${asked} -> ${best}${mode === 'observe' ? ' (would)' : ''}`)
+        await $.ui.log(`${label}: ${asked} -> ${best}${mode === 'observe' ? ' (would)' : ''}`)
+      }
+      if (exploring) {
+        await $.ui.log(mode === 'observe'
+          ? `${label}: would explore ${choice.tier} for ${category} (learned ${choice.learned})`
+          : `${label}: exploring ${choice.tier} for ${category} (learned ${choice.learned})`)
       }
     } catch { /* never block a spawn on our own failure */ }
     try {
