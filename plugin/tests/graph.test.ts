@@ -116,8 +116,25 @@ test('stall, pause, resume and done set statuses and events', () => {
   s = reduce(s, { type: 'complete', at: 6, agentId: 'a' })
   expect(node(s, 'a')?.status).toBe('done')
   expect(s.events.at(-1)?.kind).toBe('done')
-  s = reduce(s, { type: 'tool-start', at: 7, agentId: 'a', tool: 'Read', summary: 'x' })
+  s = reduce(s, { type: 'tool-end', at: 7, agentId: 'a', tool: 'Read' })
   expect(node(s, 'a')?.status).toBe('done')
+})
+
+test('a done worker that shows activity again goes back to active', () => {
+  const done = run([spawn('a'), { type: 'complete', at: 2, agentId: 'a' }])
+  expect(node(done, 'a')?.status).toBe('done')
+  const viaTool = reduce(done, { type: 'tool-start', at: 7, agentId: 'a', tool: 'Read', summary: 'x' })
+  expect(node(viaTool, 'a')?.status).toBe('active')
+  expect(node(viaTool, 'a')?.action).toBe('reads x')
+  expect(node(viaTool, 'a')?.since).toBe(7)
+  const viaStep = reduce(done, { type: 'step', at: 8, agentId: 'a', model: 'claude-haiku-5-5', cost: 0.01 })
+  expect(node(viaStep, 'a')?.status).toBe('active')
+  expect(node(viaStep, 'a')?.action).toBe('thinks')
+  // It can finish again.
+  expect(node(reduce(viaStep, { type: 'complete', at: 9, agentId: 'a' }), 'a')?.status).toBe('done')
+  // A paused worker stays paused.
+  const paused = run([spawn('p'), { type: 'pause', at: 2, agentId: 'p' }])
+  expect(node(reduce(paused, { type: 'step', at: 3, agentId: 'p', model: 'claude-haiku-5-5', cost: 0 }), 'p')?.status).toBe('paused')
 })
 
 test('a message between two teammates makes a message edge that counts', () => {

@@ -4,6 +4,7 @@ import { HELP_TOOL, MAP_PANE, resetState } from '../hooks/register'
 import { emptyLedger } from '../hooks/savings'
 import { parseSnapshot } from '../hooks/state'
 import { SVG_MAX } from '../hooks/render-svg'
+import { SPINNER } from '../hooks/render-text'
 
 type Drainable = { result: Promise<unknown> } & AsyncIterable<unknown>
 const drain = async (st: Drainable) => { for await (const _ of st) { /* chunks */ } return st.result }
@@ -171,13 +172,108 @@ test('the pane draws an escaped Svg on desktop, vscode and mobile', async ($, on
   }
 })
 
-test('the terminal gets a text fallback, not an Svg', async ($, on) => {
+// The terminal tree: one row Box per line, one Text per segment.
+const termTexts = async (ui: any): Promise<any[]> => ((await ui.drawn()).children as any[]).flatMap((r) => r.children as any[])
+const termRows = async (ui: any): Promise<string[]> =>
+  ((await ui.drawn()).children as any[]).map((r) => (r.children as any[]).map((t) => String(t.children[0])).join(''))
+const mountTerminal = ($: any, bodyColumns: number) =>
+  $.ui.mount({ plugin: 'model-escalator', surface: 'terminal', component: 'Pane', requestId: MAP_PANE, props: { ...(PANE_PROPS as object), bodyColumns } }) as Promise<any>
+
+test('the terminal draws the tree as rows of Text, not an Svg', async ($, on) => {
   wire(on)
   await $.session.start({ cwd: '/work' } as never)
   await spawn($, 'scout')
+  await spawn($, 'fixer')
   const ui = await mount($, 'terminal')
   expect(await ui.find({ type: 'Svg' })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /desktop or VS Code/ })).toBeDefined()
+  const rows = await termRows(ui)
+  expect(rows.length).toBe(3)
+  expect(rows[0]).toContain('[lead]')
+  expect(rows[1]).toContain('[haiku]')
+  expect(rows[1]).toContain('scout')
+  expect(rows[2]).toContain('fixer')
+  expect(rows[2]).toMatch(/^└─ /)
+  // Segments keep their style: the badge is coloured and bold, the status word dim.
+  const badge = (await termTexts(ui)).find((t) => t.children[0] === '[haiku]')
+  expect(badge.props.bold).toBe(true)
+  expect(String(badge.props.color)).toMatch(/^#[0-9a-f]{6}$/)
+  expect((await termTexts(ui)).some((t) => t.props?.dimColor === true && String(t.children[0]).includes('working'))).toBe(true)
+  await ui.unmount()
+})
+
+test('a stuck agent uses the theme error colour, a finished one the success colour', async ($, on) => {
+  wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  const a = await spawn($, 'fin')
+  await $.turn.complete({ turnId: 't', agentId: a, answer: 'done' } as never)
+  const ui = await mount($, 'terminal')
+  expect((await termTexts(ui)).some((t) => t.children[0] === '✓' && t.props.color === 'success')).toBe(true)
+  await ui.unmount()
+})
+
+test('the terminal tree fits the width of the pane and falls back to 80', async ($, on) => {
+  wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'a-rather-long-agent-name-that-needs-clipping')
+  for (const width of [24, 40, 100]) {
+    const ui = await mountTerminal($, width)
+    for (const row of await termRows(ui)) expect(Array.from(row).length).toBeLessThanOrEqual(width)
+    await ui.unmount()
+  }
+  const odd = await mountTerminal($, Number.NaN)
+  for (const row of await termRows(odd)) expect(Array.from(row).length).toBeLessThanOrEqual(80)
+  await odd.unmount()
+})
+
+test('the spinner advances on the redraw tick while an agent works, and stays still otherwise', async ($, on) => {
+  const h = wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  const id = await spawn($, 'scout')
+  await runCommand($, 'map')
+  const ui = await mount($, 'terminal')
+  const glyph = async () => Array.from((await termRows(ui))[1]!)[3]!   // after the "├─ " prefix
+  const seen = [await glyph()]
+  expect(SPINNER).toContain(seen[0]!)
+  for (let i = 0; i < 4; i++) {
+    const before = h.invalidations
+    await h.clock.advance(250)
+    expect([i, h.invalidations]).toEqual([i, before + 1])       // one redraw per tick, no more than four a second
+    await ui.redraw()
+    seen.push(await glyph())
+  }
+  expect(new Set(seen).size).toBe(5)
+  for (let i = 1; i < seen.length; i++) expect(seen[i]).toBe(SPINNER[i])
+
+  // Once the worker is done nothing animates: after the quiet redraw the ticks stop.
+  await $.turn.complete({ turnId: 't', agentId: id, answer: 'done' } as never)
+  await h.clock.advance(10_000)
+  const settled = h.invalidations
+  await h.clock.advance(5_000)
+  expect(h.invalidations).toBe(settled)
+  await ui.unmount()
+})
+
+test('recent-event suffixes stay for a few seconds, then go', async ($, on) => {
+  const h = wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  const a = await spawn($, 'scout')
+  await runCommand($, 'map')
+  const ui = await mount($, 'terminal')
+  expect((await termRows(ui))[1]).toContain(' new')
+  await h.clock.advance(1000)
+  await ui.redraw()
+  expect((await termRows(ui))[1]).toContain(' new')       // still inside the window
+  await h.clock.advance(3000)
+  await ui.redraw()
+  expect((await termRows(ui))[1]).not.toContain(' new')   // the window passed
+  // A later event gets its own window.
+  await $.turn.complete({ turnId: 't', agentId: a, answer: 'done' } as never)
+  await spawn($, 'late')
+  await h.clock.advance(250)
+  await ui.redraw()
+  const rows = await termRows(ui)
+  expect(rows[2]).toContain(' new')
+  expect(rows[1]).not.toContain(' new')
   await ui.unmount()
 })
 

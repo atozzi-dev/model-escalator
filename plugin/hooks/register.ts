@@ -7,6 +7,7 @@ import { categorize, costPerAccepted, formatStats, isAccepted, mulberry32, recom
 import { emptyGraph, LEAD_ID, reduce, SENIOR_ID, type GraphInput, type GraphState } from './graph'
 import { layoutGraph, type LayoutMemory } from './layout'
 import { renderSvg } from './render-svg'
+import { renderTree } from './render-text'
 import { createQueue } from './queue'
 import { buildReviewPrompt, diffArgv, editedPath, formatReviews, isCheaper, parseReview, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun } from './review'
 import { parseSnapshot, type Snapshot, type TrackedAgent } from './state'
@@ -104,6 +105,17 @@ let mapDirty = false       // the graph changed since the last redraw request
 let mapSettled = true      // the quiet redraw after the last change was requested
 let mapChangedAt = 0
 let mapTimer: { cancel: () => void } | undefined
+// The terminal tree. The spinner frame advances on the redraw tick while the pane is open on the terminal and
+// some agent works (a Client module with a frame clock would need its own file; this reuses the existing tick).
+// Recent-event suffixes stay visible for TEXT_RECENT_MS after they are first drawn: events above `textSeq` are
+// "recent", and `textPendingSeq` becomes the new `textSeq` once the window that started at `textPendingAt` ends.
+const TEXT_RECENT_MS = 3000
+const TEXT_WIDTH = 80
+let terminalOpen = false
+let textFrame = 0
+let textSeq = 0
+let textPendingSeq = 0
+let textPendingAt: number | undefined
 
 type GraphFeed = GraphInput extends infer I ? (I extends GraphInput ? Omit<I, 'at'> : never) : never
 
@@ -138,10 +150,18 @@ function feed($: EngineInterface, input: GraphFeed): void {
 async function mapTick($: EngineInterface): Promise<void> {
   try {
     const now = (await clockNow($)) ?? mapChangedAt
-    if (mapDirty) mapDirty = false
-    else if (!mapSettled && now - mapChangedAt >= SETTLE_MS) mapSettled = true
-    else return
-    $.ui.invalidate('ui.render')
+    let redraw = false
+    if (mapDirty) { mapDirty = false; redraw = true }
+    else if (!mapSettled && now - mapChangedAt >= SETTLE_MS) { mapSettled = true; redraw = true }
+    if (terminalOpen) {
+      if (graph.nodes.some((n) => n.kind !== 'lead' && n.status === 'active')) { textFrame = (textFrame + 1) % 1_000_000; redraw = true }
+      if (textPendingAt !== undefined && now - textPendingAt >= TEXT_RECENT_MS) {
+        textSeq = textPendingSeq
+        textPendingAt = undefined
+        redraw = true
+      }
+    }
+    if (redraw) $.ui.invalidate('ui.render')
   } catch { /* a missed redraw is drawn on the next change */ }
 }
 
@@ -262,6 +282,11 @@ export function resetState(): void {
   mapDirty = false
   mapSettled = true
   mapChangedAt = 0
+  terminalOpen = false
+  textFrame = 0
+  textSeq = 0
+  textPendingSeq = 0
+  textPendingAt = undefined
   reviewQueue = createQueue()
   pendingReviews.clear()
   editedFiles.clear()
@@ -436,10 +461,19 @@ export const register: Register = (on, options) => {
       let out
       if (e.surface === 'terminal') {
         const { Box, Text } = $.ui.resolve(e)
-        out = Box({ flexDirection: 'column', children: [
-          Text({ children: alt }),
-          Text({ dimColor: true, children: 'Open the map on desktop or VS Code to see the live network; the terminal view is coming.' }),
-        ] })
+        terminalOpen = true
+        if (textPendingAt !== undefined && now - textPendingAt >= TEXT_RECENT_MS) { textSeq = textPendingSeq; textPendingAt = undefined }
+        if (g.seq > textSeq && textPendingAt === undefined) { textPendingSeq = g.seq; textPendingAt = now }
+        const cols = Number((e.props as { bodyColumns?: unknown } | undefined)?.bodyColumns)
+        const width = Number.isFinite(cols) && cols >= 1 ? Math.floor(cols) : TEXT_WIDTH
+        const lines = renderTree(g, layout, { frame: textFrame, width, lastSeq: textSeq })
+        out = Box({ flexDirection: 'column', children: lines.map((line) => Box({
+          flexDirection: 'row',
+          children: line.map((s) => Text({
+            ...(s.color ? { color: s.color } : {}), ...(s.bold ? { bold: true } : {}), ...(s.dim ? { dimColor: true } : {}),
+            children: s.text,
+          })),
+        })) })
       } else {
         const { Svg } = $.ui.resolve(e)
         out = Svg({ source: renderSvg(g, layout, { lastSeq: drawnSeq, now }), alt, isInteractive: true })
@@ -455,7 +489,7 @@ export const register: Register = (on, options) => {
   // Closing the pane stops the redraw ticks.
   on('ui.close', async ($, e, next) => {
     const r = await next(e)
-    try { if (e.id === MAP_PANE) stopMapTimer() } catch { /* best effort */ }
+    try { if (e.id === MAP_PANE) { stopMapTimer(); terminalOpen = false } } catch { /* best effort */ }
     return r
   })
 

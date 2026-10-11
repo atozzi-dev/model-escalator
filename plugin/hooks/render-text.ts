@@ -1,8 +1,8 @@
 // Pure text renderer of the agent network for the terminal. No $ calls, no clock: the same graph, layout and
 // options always give the same lines. It returns styled segments, never ANSI codes, so the wiring can map each
 // segment 1:1 onto a `Text` element (props: color, bold, dimColor) inside a `Box flexDirection="column"`, one
-// Box row per line. Colours are raw hex strings (`Color` accepts a raw colour); the palette follows the SVG
-// renderer's dark theme: haiku teal, sonnet blue, opus violet, lead orange, senior pink.
+// Box row per line. Status colours are theme keys (error, warning, success, inactive); tiers are mid-tone
+// hex strings: haiku teal, sonnet blue, opus violet, lead orange, senior pink.
 //
 // One line per visible node, in the layout order (lead, workers by slot, "+N done", "+N more", senior):
 //   <tree glyph><activity glyph> <badge> <label> <status> <action> L<n> $<cost> <marker> <recent event>
@@ -27,11 +27,14 @@ export type TreeOptions = {
 export const SPINNER: readonly string[] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 export const STATIC_GLYPH = '●'
 
+// Tier hues are mid-tone raw colours so they read on dark and light terminals alike; the status colours are
+// engine theme keys, so they follow the person's theme.
 export const TIER_COLORS = {
-  haiku: '#2dd4bf', sonnet: '#60a5fa', opus: '#a78bfa', lead: '#fb923c', senior: '#f472b6', stuck: '#f87171', paused: '#fbbf24',
+  haiku: '#0d9488', sonnet: '#3b82f6', opus: '#8b5cf6', lead: '#ea580c', senior: '#ec4899', stuck: 'error', paused: 'warning',
 } as const
 
-const MUTED = '#9ca3af'
+const MUTED = 'inactive'
+const DONE = 'success'
 const DEFAULT_WIDTH = 80
 const ELLIPSIS = '…'
 
@@ -138,7 +141,7 @@ function nodeLine(
     : n.status === 'done' ? '✓' : n.status === 'waiting' ? '○' : n.status === 'paused' ? '‖' : '!'
   const line: Line = []
   if (prefix) line.push({ text: prefix, dim: true })
-  line.push({ text: activity, color: n.status === 'stuck' ? TIER_COLORS.stuck : n.status === 'paused' ? TIER_COLORS.paused : color })
+  line.push({ text: activity, color: n.status === 'stuck' ? TIER_COLORS.stuck : n.status === 'paused' ? TIER_COLORS.paused : n.status === 'done' ? DONE : color })
   line.push({ text: ' ' })
   line.push({ text: `[${badgeWord}]`, color, bold: true })
   if (n.kind !== 'worker') line.push({ text: ` ${n.tier}`, color: TIER_COLORS[n.tier] ?? MUTED })

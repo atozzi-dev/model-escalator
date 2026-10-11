@@ -37,7 +37,7 @@ The mod works on its own once installed.
 |---|---|
 | `/escalator` | Session cost, estimated savings, interventions |
 | `/escalator stats` | What the mod has learned per task category, with the average review score where runs were reviewed (`reviewRate`) |
-| `/escalator map` | Open a panel with the live network of agents: the lead, every worker and the senior, each with its model, what it is doing, its difficulty level and cost, and the escalations and consults between them. Animated on the desktop app, VS Code and mobile; the terminal shows a short note for now |
+| `/escalator map` | Open a panel with the live network of agents: the lead, every worker and the senior, each with its model, what it is doing, its difficulty level and cost, and the escalations and consults between them. Animated SVG on the desktop app, VS Code and mobile; a coloured text tree with a spinner on working agents in the terminal |
 | `/escalator reset` | Forget what it has learned |
 | `/escalator resume <id>` / `resume all` | Resume an agent paused at the human level (the report lists paused agents). Its ladder restarts on its current model |
 | `MODEL_ESCALATOR_MODE=observe` | Measure and log what it *would* do, without intervening. Recommended for the first days |
@@ -95,7 +95,7 @@ The mod uses only its own key-value store, the UI (log, status line, toasts), tw
 
 Only when `reviewRate` is above 0, at the end of a sampled run of a cheaper model the mod also runs `git diff HEAD` in the project folder (read only, with external diff drivers and text conversion filters turned off), limited to the files the agent edited; their paths, as the agent named them, are passed to git after `--`, so none of them can act as an option. It sends that diff and the agent's task to the review model, through the same provider, capped in size and with the same secret redaction.
 
-When you run `/escalator map` the mod opens a panel (`$.ui.open`) and keeps it up to date, at most four redraws a second and only when the network changed; closing the panel stops the updates. The drawing is an SVG built by the mod from the agents' names, models and actions, with every text escaped, shown in a sandboxed frame without scripts. It adds no files, processes or network access.
+When you run `/escalator map` the mod opens a panel (`$.ui.open`) and keeps it up to date, at most four redraws a second and only when the network changed; closing the panel stops the updates. The drawing is an SVG (desktop, VS Code, mobile) or a text tree (terminal, with theme colours and a spinner that advances with the same redraw tick) built by the mod from the agents' names, models and actions, with every text sanitized or escaped; the SVG is shown in a sandboxed frame without scripts. It adds no files, processes or network access.
 
 In `active` mode the mod may also add short plain-text notices to your main conversation (`session.append`, option `notifyLead`) when an agent is escalated. The lead model reads them at its next request; they are not shown as messages you typed. They are prefixed `[model-escalator]`, capped at 10 per session, and contain the agent id, its category and the first 80 characters of its task.
 
