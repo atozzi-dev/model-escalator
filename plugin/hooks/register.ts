@@ -686,7 +686,7 @@ export const register: Register = (on, options) => {
     try { if (e.id === MAP_PANE) { stopMapTimer(); terminalOpen = false } } catch { /* best effort */ }
     try { if (e.id === STATS_PANE) stopStatsTimer() } catch { /* best effort */ }
     return r
-  })
+  }).catch((_$, e, next) => next(e))
 
   // 1. Spawn: remember the agent, and let history (or baseline mode) pick the model.
   // (The map is fed from here, from the tool, step, complete and ladder paths below, and from the helpers.)
@@ -739,7 +739,7 @@ export const register: Register = (on, options) => {
       await save($)
     }
     return r
-  })
+  }).catch((_$, e, next) => next(e))
 
   // The help tool: a tracked agent asks for the senior consult directly. Answered here, never passed on.
   on('tool.call', { tool: HELP_TOOL as never }, async ($, e) => {
@@ -751,7 +751,7 @@ export const register: Register = (on, options) => {
     const text = await handleHelp($, ev, helper)
     feed($, { type: 'tool-end', ...(helper ? { agentId: helper } : {}), tool: 'ask_for_help' })
     return { result: text } as never
-  })
+  }).catch(() => ({ result: 'Help is not available right now.' }) as never)
 
   // 2. Every tool call of a watched agent updates its difficulty score.
   on('tool.call', async ($, e, next) => {
@@ -840,7 +840,7 @@ export const register: Register = (on, options) => {
     } catch {
       return r
     }
-  })
+  }).catch((_$, e, next) => next(e))
 
   // 3. Swap the model of escalated agents, and meter every request's cost.
   on('turn.step', async function* ($, e, next) {
