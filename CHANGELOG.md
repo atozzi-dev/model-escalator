@@ -26,6 +26,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - `/escalator help`, `/escalator config` (effective options marked when changed, plus mode and baseline sources) and `/escalator history [n]` (recent session summaries); `/escalator reset history` clears the session history.
 - `/escalator stats` shows this session's savings per task category (real cost, savings against the strong model, escalations per agent).
 - On a subscription, `/escalator` shows a "Plan usage" block with the plan windows Claude Code reports (five-hour, seven-day) and the ladder's estimated saving for the session.
+- `/escalator panel` opens a panel with the session cost and savings, plan usage, savings per task category and the learned statistics, refreshed at most once a second while it is open; `/escalator panel close` closes it.
 - Seven A/B eval cases (easy to hard) with hidden acceptance tests, tamper-proof test checks and a quality judge, to compare the escalation ladder against an all-strong-model baseline.
 - `scripts/ab-compare.mjs` compares the baseline and active A/B eval results per case (score, spread, cost, verdict) and can write the table as Markdown; CI runs its tests.
 - Learned evidence fades over time (`learningHalfLifeDays`, default 30, 0 never forgets), and `/escalator stats` shows readable counters with the age of each entry instead of raw JSON.
