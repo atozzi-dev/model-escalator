@@ -465,3 +465,143 @@ export function formatStats(stats: Stats, now?: number, halfLifeMs = HALF_LIFE_M
   }
   return lines.length === 0 ? 'No stats yet.' : lines.join('\n')
 }
+
+// --- Scope: per-project statistics with a global fallback ---
+//
+// The same category can be easy in one repository and hard in another. Besides the global table (store key `stats`,
+// unchanged, so nothing to migrate) the caller keeps a second store key with one small table per project. Every run
+// is recorded in both; reads use the project's cell of a tier when it has enough evidence and the global cell
+// otherwise. Projects are identified by `projectKey`, a hash of the working directory: no raw path is ever stored.
+
+export const MAX_PROJECTS = 30
+
+export type Projects = Record<string, { stats: Stats; seenAt: number }>
+
+// FNV-1a, 32 bit, from a given offset basis.
+function fnv1a(s: string, basis: number): string {
+  let h = basis >>> 0
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return h.toString(16).padStart(8, '0')
+}
+
+// Stable short id of a project directory, or '' when `path` is empty or not a string. Backslashes become slashes,
+// repeated and trailing slashes go, and Windows paths (a drive letter or a backslash) are compared case-insensitively.
+// The id is 16 hex digits (two FNV-1a hashes with different offsets); the path itself cannot be recovered from it.
+export function projectKey(path: unknown): string {
+  if (typeof path !== 'string') return ''
+  const windows = /^[a-z]:/i.test(path.trim()) || path.includes('\\')
+  let p = path.trim().replace(/\\/g, '/').replace(/\/{2,}/g, '/')
+  if (p.length > 1) p = p.replace(/\/+$/, '')
+  if (windows) p = p.toLowerCase()
+  if (p === '') return ''
+  return fnv1a(p, 0x811c9dc5) + fnv1a(p, 0x9747b28c)
+}
+
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
+
+// Reads the stored projects table: entries that are not `{ stats: object, seenAt: number }` are dropped, anything
+// that is not an object gives an empty table. Never throws.
+export function parseProjects(raw: unknown): Projects {
+  const out: Projects = {}
+  if (!isObj(raw)) return out
+  for (const [k, v] of Object.entries(raw)) {
+    if (isObj(v) && isObj(v['stats']) && typeof v['seenAt'] === 'number' && Number.isFinite(v['seenAt'])) {
+      out[k] = { stats: v['stats'] as Stats, seenAt: v['seenAt'] }
+    }
+  }
+  return out
+}
+
+// Puts `stats` at `key`, marks it seen at `now` and keeps at most `max` projects: the least recently seen go first,
+// never the one just written. Never mutates `projects`.
+function putProject(projects: Projects, key: string, stats: Stats, now: number | undefined, max: number): Projects {
+  const seenAt = now ?? projects[key]?.seenAt ?? 0
+  const next: Projects = { ...projects, [key]: { stats, seenAt } }
+  const keys = Object.keys(next)
+  const cap = Math.max(1, Math.floor(max))
+  if (keys.length <= cap) return next
+  const evict = keys.filter((k) => k !== key).sort((a, b) => next[a]!.seenAt - next[b]!.seenAt).slice(0, keys.length - cap)
+  for (const k of evict) delete next[k]
+  return next
+}
+
+export type Scoped = { stats: Stats; projects: Projects }
+
+// `record` on the global table and on the table of project `key` (global only when `key` is empty or absent).
+export function recordScoped(
+  global: Stats,
+  projects: Projects,
+  key: string | undefined,
+  category: string,
+  tier: Tier,
+  escalated: boolean,
+  tokens: number,
+  verifyFailed = false,
+  now?: number,
+  halfLifeMs = HALF_LIFE_MS,
+  opts: RecordOptions = {},
+  maxProjects = MAX_PROJECTS,
+): Scoped {
+  const stats = record(global, category, tier, escalated, tokens, verifyFailed, now, halfLifeMs, opts)
+  if (!key) return { stats, projects }
+  const mine = record(projects[key]?.stats ?? {}, category, tier, escalated, tokens, verifyFailed, now, halfLifeMs, opts)
+  return { stats, projects: putProject(projects, key, mine, now, maxProjects) }
+}
+
+// `recordReview` on both tables. The project table is left alone when it does not know the project yet.
+export function recordReviewScoped(
+  global: Stats, projects: Projects, key: string | undefined, category: string, tier: Tier, score: number, opts: ReviewOptions = {},
+): Scoped {
+  const stats = recordReview(global, category, tier, score, opts)
+  const p = key ? projects[key] : undefined
+  if (!key || p === undefined) return { stats, projects }
+  const mine = recordReview(p.stats, category, tier, score, opts)
+  return { stats, projects: mine === p.stats ? projects : { ...projects, [key]: { ...p, stats: mine } } }
+}
+
+// `recordRework` on both tables, same rule.
+export function recordReworkScoped(
+  global: Stats, projects: Projects, key: string | undefined, category: string, tier: Tier, opts: ReworkOptions = {},
+): Scoped {
+  const stats = recordRework(global, category, tier, opts)
+  const p = key ? projects[key] : undefined
+  if (!key || p === undefined) return { stats, projects }
+  const mine = recordRework(p.stats, category, tier, opts)
+  return { stats, projects: mine === p.stats ? projects : { ...projects, [key]: { ...p, stats: mine } } }
+}
+
+// The stats to read for `category` in project `key`: per tier, the project's cell when it has at least `minRuns`
+// decayed runs, else the global cell. Only `category` is in the result, so `recommend`, `recommendWithExploration`
+// and `costPerAccepted` work on it unchanged. Without a known project it is the global row. Never throws.
+export function scopedStats(
+  global: Stats, projects: Projects, key: string | undefined, category: string, now?: number, halfLifeMs = HALF_LIFE_MS,
+): Stats {
+  const g = global[category] ?? {}
+  const mine = key ? projects[key]?.stats[category] : undefined
+  if (mine === undefined) return { [category]: g }
+  const row: Partial<Record<Tier, Cell>> = { ...g }
+  for (const tier of LADDER) {
+    const c = mine[tier]
+    if (c !== undefined && decayed(c, now, halfLifeMs).runs >= LEARN.minRuns) row[tier] = c
+  }
+  return { [category]: row }
+}
+
+// `recommend` over `scopedStats`.
+export function recommendScoped(
+  global: Stats, projects: Projects, key: string | undefined, category: string, requested: Tier,
+  now?: number, halfLifeMs = HALF_LIFE_MS, byCost = true,
+): Tier {
+  return recommend(scopedStats(global, projects, key, category, now, halfLifeMs), category, requested, now, halfLifeMs, byCost)
+}
+
+// `recommendWithExploration` over `scopedStats`.
+export function recommendScopedWithExploration(
+  global: Stats, projects: Projects, key: string | undefined, category: string, requested: Tier, opts: ExploreOptions = {},
+): Choice {
+  const view = scopedStats(global, projects, key, category, opts.now, opts.halfLifeMs ?? HALF_LIFE_MS)
+  return recommendWithExploration(view, category, requested, opts)
+}

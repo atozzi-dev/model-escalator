@@ -2,6 +2,8 @@ import { expect, test } from 'claude-code/testing'
 import {
   categorize, costPerAccepted, formatStats, goodEnoughChance, HALF_LIFE_MS, isAccepted, LEARN, mulberry32, recommend,
   recommendWithExploration, record, recordReview, type Cell, type Stats,
+  MAX_PROJECTS, parseProjects, projectKey, recommendScoped, recommendScopedWithExploration, recordReviewScoped,
+  recordReworkScoped, recordScoped, scopedStats, type Projects, type Scoped,
 } from '../hooks/learning'
 
 const DAY = 24 * 60 * 60 * 1000
@@ -457,4 +459,134 @@ test('in cost mode exploration tries haiku with the chance its cost per accepted
   expect(recommendWithExploration(st, 'c', 'haiku', { rand: () => chance - 0.001 })).toEqual({ tier: 'haiku', reason: 'explore', learned: 'sonnet', basis: 'cost' })
   expect(recommendWithExploration(st, 'c', 'haiku', { rand: () => chance + 0.001 })).toEqual({ tier: 'sonnet', reason: 'raised', learned: 'sonnet', basis: 'cost' })
   expect(recommendWithExploration(st, 'c', 'haiku', { rand: () => 0, byCost: false }).basis).toBeUndefined()
+})
+
+// --- Scope ---
+
+test('projectKey normalises separators, trailing slashes and Windows case', async () => {
+  const k = projectKey('C:\\Work\\Repo')
+  expect(k).toBe(projectKey('c:/work/repo/'))
+  expect(k).toBe(projectKey('C:\\\\Work\\Repo\\'))
+  expect(projectKey('/home/a/Repo')).toBe(projectKey('/home/a/Repo/'))
+  expect(projectKey('/home/a/Repo') === projectKey('/home/a/repo')).toBe(false)
+  expect(projectKey('/home/a/repo') === projectKey('/home/b/repo')).toBe(false)
+})
+
+test('projectKey is stable, short, and holds no part of the path', async () => {
+  const k = projectKey('/home/alice/secret-project')
+  expect(k).toBe(projectKey('/home/alice/secret-project'))
+  expect(/^[0-9a-f]{16}$/.test(k)).toBe(true)
+  expect(k.includes('alice')).toBe(false)
+  expect(projectKey('')).toBe('')
+  expect(projectKey(undefined)).toBe('')
+  expect(projectKey(42)).toBe('')
+})
+
+test('recordScoped updates the global and the project table alike', async () => {
+  const t = 1_000_000
+  const key = projectKey('/p/a')
+  const r = recordScoped({}, {}, key, 'c', 'haiku', true, 100, false, t, HALF_LIFE_MS, { cost: 0.5 })
+  const plain = record({}, 'c', 'haiku', true, 100, false, t, HALF_LIFE_MS, { cost: 0.5 })
+  expect(r.stats).toEqual(plain)
+  expect(r.projects[key]!.stats).toEqual(plain)
+  expect(r.projects[key]!.seenAt).toBe(t)
+  const other = recordScoped(r.stats, r.projects, projectKey('/p/b'), 'c', 'haiku', false, 10, false, t + 1)
+  expect(Math.abs(other.stats['c']!.haiku!.runs - 2) < 1e-6).toBe(true)
+  expect(other.projects[key]!.stats['c']!.haiku!.runs > 0.99).toBe(true)
+})
+
+test('recordScoped without a project only records globally; old flat stats stay the global table', async () => {
+  const old: Stats = record({}, 'c', 'haiku', false, 5)
+  const r = recordScoped(old, {}, undefined, 'c', 'haiku', false, 5)
+  expect(r.stats['c']!.haiku!.runs).toBe(2)
+  expect(r.projects).toEqual({})
+  expect(recordScoped(old, {}, '', 'c', 'haiku', false, 5).projects).toEqual({})
+})
+
+function runs(st: Stats, pr: Projects, key: string, n: number, bad: number, tier: 'haiku' | 'sonnet' | 'opus' = 'haiku', t = 1000): Scoped {
+  let s = st
+  let p = pr
+  for (let i = 0; i < n; i++) ({ stats: s, projects: p } = recordScoped(s, p, key, 'c', tier, i < bad, 10, false, t))
+  return { stats: s, projects: p }
+}
+
+test('recommendScoped prefers project evidence once it is sufficient', async () => {
+  const a = projectKey('/p/a')
+  const b = projectKey('/p/b')
+  // project a: haiku fails 5 of 6; project b: haiku never fails (10 runs). Global mixes both.
+  let r = runs({}, {}, a, 6, 5)
+  r = runs(r.stats, r.projects, b, 10, 0)
+  expect(recommendScoped(r.stats, r.projects, a, 'c', 'haiku', 1000)).toBe('sonnet')
+  expect(recommendScoped(r.stats, r.projects, b, 'c', 'haiku', 1000)).toBe('haiku')
+  // the mixed global table says 5/16 = 31%: not raised
+  expect(recommend(r.stats, 'c', 'haiku', 1000)).toBe('haiku')
+})
+
+test('recommendScoped falls back to the global cell when the project has too few runs', async () => {
+  const a = projectKey('/p/a')
+  const b = projectKey('/p/b')
+  let r = runs({}, {}, b, 8, 8)
+  r = runs(r.stats, r.projects, a, 2, 0)
+  expect(recommendScoped(r.stats, r.projects, a, 'c', 'haiku', 1000)).toBe('sonnet')
+  expect(recommendScoped(r.stats, r.projects, projectKey('/p/z'), 'c', 'haiku', 1000)).toBe('sonnet')
+  expect(recommendScoped(r.stats, r.projects, undefined, 'c', 'haiku', 1000)).toBe('sonnet')
+  expect(recommendScoped({}, {}, a, 'c', 'haiku')).toBe('haiku')
+})
+
+test('project evidence that decayed below the threshold falls back to the global cell', async () => {
+  const a = projectKey('/p/a')
+  const b = projectKey('/p/b')
+  let r = runs({}, {}, a, 6, 0, 'haiku', 1000)
+  const later = 1000 + 3 * HALF_LIFE_MS
+  r = runs(r.stats, r.projects, b, 40, 40, 'haiku', later)
+  expect(scopedStats(r.stats, r.projects, a, 'c', later)['c']!.haiku).toEqual(r.stats['c']!.haiku)
+  expect(scopedStats(r.stats, r.projects, a, 'c')['c']!.haiku!.runs).toBe(6)
+})
+
+test('the scoped view feeds costPerAccepted and exploration consistently', async () => {
+  const a = projectKey('/p/a')
+  let r: Scoped = { stats: {}, projects: {} }
+  for (let i = 0; i < 6; i++) r = recordScoped(r.stats, r.projects, a, 'c', 'haiku', false, 1, false, 1000, HALF_LIFE_MS, { cost: 0.1 })
+  for (let i = 0; i < 8; i++) r = recordScoped(r.stats, r.projects, projectKey('/p/b'), 'c', 'haiku', true, 1, false, 1000, HALF_LIFE_MS, { cost: 0.3 })
+  const cell = scopedStats(r.stats, r.projects, a, 'c', 1000)['c']!.haiku!
+  expect(cell.runs).toBe(6)
+  const e = costPerAccepted(cell, 1000)
+  expect(e !== undefined && Math.abs(e - 0.1 / (7 / 8)) < 1e-9).toBe(true)
+  expect(scopedStats(r.stats, r.projects, projectKey('/p/b'), 'c', 1000)['c']!.haiku!.runs).toBe(8)
+  const ch = recommendScopedWithExploration(r.stats, r.projects, a, 'c', 'haiku', { now: 1000, rand: () => 0 })
+  expect(ch).toEqual({ tier: 'haiku', reason: 'requested', learned: 'haiku', basis: 'cost' })
+})
+
+test('the projects table is capped and evicts the least recently seen', async () => {
+  let r: Scoped = { stats: {}, projects: {} }
+  for (let i = 0; i < 5; i++) r = recordScoped(r.stats, r.projects, `k${i}`, 'c', 'haiku', false, 1, false, 100 + i, HALF_LIFE_MS, {}, 3)
+  expect(Object.keys(r.projects).sort()).toEqual(['k2', 'k3', 'k4'])
+  // seeing k2 again protects it: k3 is now the oldest
+  r = recordScoped(r.stats, r.projects, 'k2', 'c', 'haiku', false, 1, false, 200, HALF_LIFE_MS, {}, 3)
+  r = recordScoped(r.stats, r.projects, 'k9', 'c', 'haiku', false, 1, false, 201, HALF_LIFE_MS, {}, 3)
+  expect(Object.keys(r.projects).sort()).toEqual(['k2', 'k4', 'k9'])
+  expect(Math.abs(r.stats['c']!.haiku!.runs - 7) < 1e-6).toBe(true)
+  expect(MAX_PROJECTS).toBe(30)
+})
+
+test('late review and rework reach the project table only when it exists', async () => {
+  const a = projectKey('/p/a')
+  const r = runs({}, {}, a, 3, 0)
+  const rv = recordReviewScoped(r.stats, r.projects, a, 'c', 'haiku', 1, { now: 1000, runAccepted: true })
+  expect(rv.stats['c']!.haiku!.notAccepted).toBe(1)
+  expect(rv.projects[a]!.stats['c']!.haiku!.notAccepted).toBe(1)
+  const rw = recordReworkScoped(r.stats, r.projects, a, 'c', 'haiku', { now: 1000, runAccepted: false })
+  expect(rw.stats['c']!.haiku!.reworked).toBe(1)
+  expect(rw.projects[a]!.stats['c']!.haiku!.reworked).toBe(1)
+  const none = recordReviewScoped(r.stats, r.projects, projectKey('/p/z'), 'c', 'haiku', 5)
+  expect(Object.keys(none.projects)).toEqual([a])
+})
+
+test('parseProjects keeps valid entries, drops garbage, and the table survives a JSON round trip', async () => {
+  const a = projectKey('/p/a')
+  const r = runs({}, {}, a, 6, 2)
+  expect(parseProjects(JSON.parse(JSON.stringify(r.projects)))).toEqual(r.projects)
+  expect(parseProjects(null)).toEqual({})
+  expect(parseProjects([1])).toEqual({})
+  expect(parseProjects({ x: 1, y: { stats: {}, seenAt: 'no' }, z: { stats: {}, seenAt: 5 } })).toEqual({ z: { stats: {}, seenAt: 5 } })
 })
