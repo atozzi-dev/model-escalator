@@ -240,3 +240,78 @@ test('a rework before the verification lands is applied once the run is recorded
   expect(cell(h)!.reworked).toBe(1)
   expect(near(cell(h)!.notAccepted, 1)).toBe(true)
 })
+
+// ---------- together with a sampled review ----------
+
+const okDiff = { exitCode: 0, stdout: ' src/a.ts | 2 +-\n\ndiff --git a/src/a.ts b/src/a.ts\n-old\n+new', stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
+const sleep = (ms: number) => new Promise<void>((r) => (globalThis as unknown as { setTimeout: (f: () => void, ms: number) => unknown }).setTimeout(r, ms))
+async function until(cond: () => boolean): Promise<void> {
+  for (let i = 0; i < 300 && !cond(); i++) await sleep(10)
+  await sleep(40)
+}
+
+// A review that answers `score`, once `release` is called when `held` (at once otherwise).
+function withReview(on: any, score: number, held: boolean): { release: () => void; calls: () => number } {
+  let n = 0
+  let release: () => void = () => undefined
+  const gate = held ? new Promise<void>((r) => { release = r }) : Promise.resolve()
+  on('process.run', () => ({ value: okDiff }) as never)
+  on('model.complete', async () => {
+    n++
+    await gate
+    return { value: { isAnswered: true, text: `SCORE: ${score}\n- note`, usage: { input_tokens: 1000, output_tokens: 20, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } } as never
+  })
+  return { release, calls: () => n }
+}
+const reviewed = (h: H): boolean => h.logs.some((l) => l.includes(' review '))
+const REVIEWED = { reviewRate: 1 }
+
+test('review lands first (low score), then the lead reworks: not accepted once', { options: REVIEWED }, async ($, on) => {
+  const h = wire(on)
+  withReview(on, 2, false)
+  await $.session.start({ cwd: '/work' } as never)
+  const id = await spawn($)
+  await edit($, 'src/a.ts', id)
+  await finish($, id)
+  await until(() => reviewed(h))
+  expect(near(cell(h)!.notAccepted, 1)).toBe(true)
+  expect(cell(h)!.reviews).toBe(1)
+  await edit($, 'src/a.ts')
+  expect(cell(h)!.reworked).toBe(1)
+  expect(near(cell(h)!.notAccepted, 1)).toBe(true)
+  expect(cell(h)!.reviews).toBe(1)
+  expect(cell(h)!.runs).toBe(1)
+})
+
+test('rework first, then the low review lands: not accepted once', { options: REVIEWED }, async ($, on) => {
+  const h = wire(on)
+  const rv = withReview(on, 2, true)
+  await $.session.start({ cwd: '/work' } as never)
+  const id = await spawn($)
+  await edit($, 'src/a.ts', id)
+  await finish($, id)
+  await until(() => rv.calls() > 0)
+  await edit($, 'src/a.ts')
+  expect(near(cell(h)!.notAccepted, 1)).toBe(true)
+  rv.release()
+  await until(() => reviewed(h))
+  expect(cell(h)!.reworked).toBe(1)
+  expect(cell(h)!.reviews).toBe(1)
+  expect(near(cell(h)!.notAccepted, 1)).toBe(true)
+  expect(cell(h)!.runs).toBe(1)
+})
+
+test('a good review plus a rework: not accepted once, because of the rework', { options: REVIEWED }, async ($, on) => {
+  const h = wire(on)
+  withReview(on, 5, false)
+  await $.session.start({ cwd: '/work' } as never)
+  const id = await spawn($)
+  await edit($, 'src/a.ts', id)
+  await finish($, id)
+  await until(() => reviewed(h))
+  expect(cell(h)!.notAccepted).toBe(0)
+  await edit($, 'src/a.ts')
+  expect(cell(h)!.reworked).toBe(1)
+  expect(cell(h)!.reviews).toBe(1)
+  expect(near(cell(h)!.notAccepted, 1)).toBe(true)
+})
