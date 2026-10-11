@@ -172,10 +172,11 @@ test('the pane draws an escaped Svg on desktop, vscode and mobile', async ($, on
   }
 })
 
-// The terminal tree: one row Box per line, one Text per segment.
-const termTexts = async (ui: any): Promise<any[]> => ((await ui.drawn()).children as any[]).flatMap((r) => r.children as any[])
+// The terminal tree: one row Box per line, one Text per segment. (The node panel under the tree is a column Box.)
+const treeRows = async (ui: any): Promise<any[]> => ((await ui.drawn()).children as any[]).filter((r) => r.props?.flexDirection === 'row')
+const termTexts = async (ui: any): Promise<any[]> => (await treeRows(ui)).flatMap((r) => r.children as any[])
 const termRows = async (ui: any): Promise<string[]> =>
-  ((await ui.drawn()).children as any[]).map((r) => (r.children as any[]).map((t) => String(t.children[0])).join(''))
+  (await treeRows(ui)).map((r) => (r.children as any[]).map((t) => String(t.children[0])).join(''))
 const mountTerminal = ($: any, bodyColumns: number) =>
   $.ui.mount({ plugin: 'model-escalator', surface: 'terminal', component: 'Pane', requestId: MAP_PANE, props: { ...(PANE_PROPS as object), bodyColumns } }) as Promise<any>
 

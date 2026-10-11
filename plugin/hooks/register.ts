@@ -1,7 +1,7 @@
 import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, describeConfig, parseConfig, splitCommand, type Config } from './config'
-import { LADDER, afterHelp, agentLabel, canAskForHelp, classifyFailure, clipLabel, consultLimit, countStep, EFFORTS, escalated, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_AGENT_NAME, MAX_LEAD_NOTICES, newAgent, noteProgress, normalizePath, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
+import { LADDER, afterHelp, agentHead, agentLabel, allowedMax, nextTier, canAskForHelp, classifyFailure, clipLabel, consultLimit, countStep, EFFORTS, escalated, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_AGENT_NAME, MAX_LEAD_NOTICES, newAgent, noteProgress, normalizePath, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
 import { buildDossier, inputFromState } from './dossier'
 import { cacheGet, cachePut, cacheKey, classifierInput, combineCategory, LABELS, parseCache } from './classify'
 import { categorize, costPerAccepted, formatStats, isAccepted, mulberry32, parseProjects, projectKey, recommendScopedWithExploration, recordReviewScoped, recordReworkScoped, recordScoped, scopedStats, type Projects, type Stats } from './learning'
@@ -10,6 +10,7 @@ import { layoutGraph, type LayoutMemory } from './layout'
 import { renderSvg } from './render-svg'
 import { renderTree } from './render-text'
 import { createQueue } from './queue'
+import { buildDetail, consultGate, findAgent, selectorChips, swapGate } from './node-detail'
 import { buildStatsView, columnWidths, fitView, type ViewCell } from './stats-view'
 import { buildReviewPrompt, diffArgv, editedPath, formatReviews, isCheaper, parseReview, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun } from './review'
 import { parseSnapshot, type Snapshot, type TrackedAgent } from './state'
@@ -117,6 +118,15 @@ let mapTimer: { cancel: () => void } | undefined
 const TEXT_RECENT_MS = 3000
 const TEXT_WIDTH = 80
 let terminalOpen = false
+
+// The map's node detail. The agent a person selected (buttons next to the drawing), the result of the last action on
+// it, and the notes an action queued for an agent: a note travels with the agent's next tool result, like a ladder note.
+let selectedId: string | undefined
+let actionNote: string | undefined
+const pendingNotes = new Map<string, string[]>()
+const MAX_PENDING_NOTES = 3
+// Agents with a "consult now" in flight: a second press waits for the first.
+const consulting = new Set<string>()
 
 // The statistics panel (`/escalator panel`). Its own tick, only while the pane is open: once a second it compares a
 // signature of what the panel shows (ledger, mode, paused agents, learned stats) and asks for a redraw if it changed.
@@ -327,6 +337,10 @@ export function resetState(): void {
   mapSettled = true
   mapChangedAt = 0
   terminalOpen = false
+  selectedId = undefined
+  actionNote = undefined
+  pendingNotes.clear()
+  consulting.clear()
   textFrame = 0
   textSeq = 0
   textPendingSeq = 0
@@ -509,7 +523,7 @@ export const register: Register = (on, options) => {
       } catch { /* the tool is optional: the ladder works without it */ }
     }
     try {
-      await $.command.register({ name: 'escalator', description: 'Model escalator: savings report, stats panel and the live agent network', argumentHint: '[report|stats|config|history [n]|map|panel [close]|reset [history]|resume <id>|all|help]' })
+      await $.command.register({ name: 'escalator', description: 'Model escalator: savings report, stats panel and the live agent network', argumentHint: '[report|stats|config|history [n]|map|panel [close]|consult <id>|swap <id>|reset [history]|resume <id>|all|help]' })
     } catch { /* name taken: the report stays reachable through the status line */ }
     return r
   })
@@ -538,6 +552,8 @@ export const register: Register = (on, options) => {
       return { text: 'Session history cleared. Learned stats are kept.' }
     }
     if (arg === 'resume' || arg.startsWith('resume ')) return { text: await resumeCommand($, arg.slice(6).trim()) }
+    if (arg === 'consult' || arg.startsWith('consult ')) return { text: await consultNow($, arg.slice(7)) }
+    if (arg === 'swap' || arg.startsWith('swap ')) return { text: await swapNow($, arg.slice(4)) }
     if (arg === 'map') return { text: await openMap($) }
     if (arg === 'panel') return { text: await openStatsPanel($) }
     if (arg === 'panel close') return { text: await closeStatsPanel($) }
@@ -563,24 +579,28 @@ export const register: Register = (on, options) => {
       const alt = `Agent network: ${workers} worker${workers === 1 ? '' : 's'}${g.nodes.some((n) => n.id === SENIOR_ID) ? ', a senior' : ''}`
       let out
       if (e.surface === 'terminal') {
-        const { Box, Text } = $.ui.resolve(e)
+        const { Box, Text, Button } = $.ui.resolve(e)
         terminalOpen = true
         if (textPendingAt !== undefined && now - textPendingAt >= TEXT_RECENT_MS) { textSeq = textPendingSeq; textPendingAt = undefined }
         if (g.seq > textSeq && textPendingAt === undefined) { textPendingSeq = g.seq; textPendingAt = now }
         const cols = Number((e.props as { bodyColumns?: unknown } | undefined)?.bodyColumns)
         const width = Number.isFinite(cols) && cols >= 1 ? Math.floor(cols) : TEXT_WIDTH
         const lines = renderTree(g, layout, { frame: textFrame, width, lastSeq: textSeq })
-        out = Box({ flexDirection: 'column', children: lines.map((line) => Box({
+        const rows = lines.map((line) => Box({
           flexDirection: 'row',
           children: line.map((s) => Text({
             ...(s.color ? { color: s.color } : {}), ...(s.bold ? { bold: true } : {}), ...(s.dim ? { dimColor: true } : {}),
             children: s.text,
           })),
-        })) })
+        }))
+        const panel = nodePanel($, { Box, Text, Button } as UiKit, true)
+        out = Box({ flexDirection: 'column', children: panel ? [...rows, panel] : rows })
       } else {
-        const { Svg } = $.ui.resolve(e)
-        out = Svg({ source: renderSvg(g, layout, { lastSeq: drawnSeq, now }), alt, isInteractive: true })
+        const { Svg, Box, Text, Button } = $.ui.resolve(e)
+        const svg = Svg({ source: renderSvg(g, layout, { lastSeq: drawnSeq, now }), alt, isInteractive: true })
         drawnSeq = g.seq
+        const panel = nodePanel($, { Box, Text, Button } as UiKit, false)
+        out = panel ? Box({ flexDirection: 'column', gap: 1, children: [svg, panel] }) : svg
       }
       void save($)
       return out
@@ -721,6 +741,11 @@ export const register: Register = (on, options) => {
     }
     feed($, { type: 'tool-end', ...who, tool: String(e.tool) })
     if (tracked) mark(id, await clockNow($), toolEnd)
+    // What a "consult now" or "swap now" queued for this agent goes out with its next tool result.
+    if (tracked && r.deny === undefined) {
+      const queued = takeNotes(id)
+      if (queued.length > 0) r = { ...r, context: [...(r.context ?? []), ...queued] } as typeof r
+    }
     if (tracked && config.reviewRate > 0 && r.isError !== true && r.deny === undefined) noteEdit(id, e as unknown as Record<string, unknown>)
     if (config.reworkWindowMinutes > 0 && r.isError !== true && r.deny === undefined) {
       if (tracked) noteWritten(id, e as unknown as Record<string, unknown>)
@@ -1343,6 +1368,8 @@ const COMMAND_HELP = [
   '/escalator history [n]: the last n recorded sessions (default 10, at most 50)',
   '/escalator map: open the live network of agents',
   '/escalator panel [close]: open (or close) a panel with the session, plan usage, savings per category and learned statistics',
+  '/escalator consult <id>: ask the senior model about an agent now; the advice reaches it on its next tool call',
+  '/escalator swap <id>: move an agent one tier up, from its next request (the map\'s detail buttons do the same)',
   '/escalator resume <id>|all: resume agents paused at the human level',
   '/escalator reset: forget the learned stats (history and category cache are kept)',
   '/escalator reset history: clear the recorded session history',
@@ -1405,6 +1432,163 @@ async function openMap($: EngineInterface): Promise<string> {
       : `Agent network pane is waiting: ${opened.reason}`
   } catch {
     return 'Could not open the agent network pane.'
+  }
+}
+
+// ---- Node detail: select an agent on the map, see it, consult or swap it now ----
+
+// The element constructors the panel draws with (Box, Text and Button exist on every surface).
+type UiKit = { Box: (p: Record<string, unknown>) => any; Text: (p: Record<string, unknown>) => any; Button: (p: Record<string, unknown>) => any }
+
+// True when the map has folded the agent away or it has finished its work.
+function agentDone(id: string): boolean {
+  const n = graph.nodes.find((x) => x.id === id)
+  return n === undefined || n.status === 'done'
+}
+
+function gatesFor(a: AgentState) {
+  const done = agentDone(a.id)
+  return {
+    consult: consultGate(a, { mode, done, limit: limitFor(a) }),
+    swap: swapGate(a, { mode, done, allowed: allowedMax(config.maxTier, blockedTiers), maxTier: config.maxTier }),
+  }
+}
+
+// The notes queued for the agent, taken out (oldest first). Never throws.
+function takeNotes(id: string | undefined): string[] {
+  try {
+    if (!id) return []
+    const notes = pendingNotes.get(id) ?? []
+    pendingNotes.delete(id)
+    return notes
+  } catch {
+    return []
+  }
+}
+
+function queueNote(id: string, note: string): void {
+  pendingNotes.set(id, [...(pendingNotes.get(id) ?? []), note].slice(-MAX_PENDING_NOTES))
+}
+
+// Runs a button's action in the background: the press returns at once, the result is shown in the detail, and a
+// consult (slow) also says when it is done. Never throws.
+function runAction($: EngineInterface, work: Promise<string>, toast: boolean): void {
+  void work.then(async (msg) => {
+    if (toast) { try { await $.ui.toast(msg.slice(0, 200)) } catch { /* the detail shows it too */ } }
+  }).catch(() => undefined)
+}
+
+// The selector buttons under the drawing and, for the selected agent, its detail with the actions. The same
+// elements on every surface. Undefined when no worker is tracked (the pane is then the drawing alone).
+function nodePanel($: EngineInterface, ui: UiKit, terminal: boolean): any {
+  try {
+    const list = [...agents.values()]
+    if (list.length === 0) return undefined
+    if (selectedId !== undefined && !agents.has(selectedId)) { selectedId = undefined; actionNote = undefined }
+    const { Box, Text, Button } = ui
+    const text = (children: string, extra: Record<string, unknown> = {}) => Text({ ...(terminal ? { wrap: 'truncate-end' } : {}), ...extra, children })
+    const rows: any[] = [Box({
+      key: 'node-select', flexDirection: 'row', gap: 1, flexWrap: 'wrap',
+      children: [text('Inspect:', { dimColor: true }), ...selectorChips(list, selectedId).map((c) => Button({
+        key: `select-${c.id}`, label: c.label, ...(c.selected ? { variant: 'primary' } : {}),
+        onPress: () => { selectedId = c.id; actionNote = undefined; mapDirty = true },
+      }))],
+    })]
+    const a = selectedId === undefined ? undefined : agents.get(selectedId)
+    if (a) {
+      const gates = gatesFor(a)
+      const d = buildDetail({ agent: a, node: graph.nodes.find((n) => n.id === a.id), events: graph.events, ...gates })
+      rows.push(text(d.title, { bold: true }))
+      for (const r of d.rows) rows.push(text(`${r.label}: ${r.value}`))
+      rows.push(text(d.attempts.length > 0 ? 'Last failed attempts:' : 'No failed attempt yet.', { dimColor: true }))
+      for (const l of d.attempts) rows.push(text(`- ${l}`, { dimColor: true }))
+      const id = a.id
+      const buttons: any[] = []
+      if (gates.consult.ok) {
+        buttons.push(Button({ key: 'consult-now', label: 'Consult now', onPress: () => { runAction($, consultNow($, id), true) } }))
+      }
+      if (gates.swap.ok) {
+        buttons.push(Button({ key: 'swap-now', label: 'Swap now', onPress: () => { runAction($, swapNow($, id), false) } }))
+      }
+      buttons.push(Button({ key: 'close-detail', label: 'Close detail', onPress: () => { selectedId = undefined; actionNote = undefined; mapDirty = true } }))
+      rows.push(Box({ key: 'node-actions', flexDirection: 'row', gap: 1, flexWrap: 'wrap', children: buttons }))
+      const why = [...new Set([gates.consult, gates.swap].flatMap((g) => (g.ok ? [] : [g.reason])))]
+      for (const r of why) rows.push(text(r, { dimColor: true }))
+      if (actionNote) rows.push(text(actionNote))
+    }
+    return Box({ key: 'node-panel', flexDirection: 'column', children: rows })
+  } catch {
+    return undefined
+  }
+}
+
+// Say a result and redraw the map on its next tick.
+function actionDone(msg: string): string {
+  actionNote = msg
+  mapDirty = true
+  return msg
+}
+
+// "Consult now": the same senior consult the ladder runs (same dossier, caps and retry on the other senior); the
+// advice is queued and reaches the agent with its next tool result. `query` is an agent id or name. Never throws.
+async function consultNow($: EngineInterface, query: string): Promise<string> {
+  try {
+    const found = findAgent(agents.values(), query)
+    if ('error' in found) return found.error
+    const a = found.agent
+    const gate = gatesFor(a).consult
+    if (!gate.ok) return actionDone(gate.reason)
+    if (consulting.has(a.id)) return actionDone(`A consult for ${agentHead(a)} is already running.`)
+    consulting.add(a.id)
+    try {
+      ledger = addIntervention(ledger, 'consult')
+      try { await $.ui.log(`${agentLabel(a)} (${a.category}): consult now (asked by the user)`) } catch { /* the note is best effort */ }
+      const note = await consult($, a)
+      queueNote(a.id, note)
+      // A fresh grace window, as after any intervention.
+      const cur = agents.get(a.id)
+      if (cur) agents.set(a.id, { ...cur, stepsSinceAction: 0 })
+      await save($)
+      return actionDone(note.includes('Advice from a senior model')
+        ? `Consulted the senior model about ${agentHead(a)}: the advice reaches it on its next tool call.`
+        : `The senior model gave no advice for ${agentHead(a)}: a generic hint reaches it on its next tool call.`)
+    } finally {
+      consulting.delete(a.id)
+    }
+  } catch {
+    return actionDone('Could not run the consult.')
+  }
+}
+
+// "Swap now": the agent runs one tier up from its next request, through the swap path of the ladder (full model id,
+// unavailable-model handling). It counts as an escalated run for learning, like a swap the ladder made: its ladder
+// moves just past the swap level, and its category counts one escalation. `query` is an agent id or name.
+async function swapNow($: EngineInterface, query: string): Promise<string> {
+  try {
+    const found = findAgent(agents.values(), query)
+    if ('error' in found) return found.error
+    const a = found.agent
+    const gate = gatesFor(a).swap
+    if (!gate.ok) return actionDone(gate.reason)
+    const swapAt = config.levels.indexOf('swap')
+    const state: TrackedAgent = {
+      ...a, tier: nextTier(a.tier), score: 0, stepsSinceAction: 0, progressSignals: 0, effortBoosted: false,
+      ...(swapAt >= 0 ? { level: Math.max(a.level, swapAt + 1) } : {}),
+    }
+    agents.set(a.id, state)
+    ledger = addIntervention(ledger, 'swap')
+    feed($, { type: 'ladder', agentId: a.id, action: 'swap', toModel: state.tier, level: state.level, score: state.score })
+    queueNote(a.id, await act($, state, 'swap'))
+    const cur: TrackedAgent = agents.get(a.id) ?? state
+    if (cur.escCounted !== true) {
+      ledger = addEscalation(ledger, cur.category)
+      agents.set(a.id, { ...cur, escCounted: true })
+    }
+    notifyLead($, state, { kind: 'swap', tier: state.tier })
+    await save($)
+    return actionDone(`${agentHead(a)} moves to ${state.tier} from its next request.`)
+  } catch {
+    return actionDone('Could not swap the agent.')
   }
 }
 
