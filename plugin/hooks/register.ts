@@ -1,9 +1,9 @@
 import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config'
-import { LADDER, afterHelp, agentLabel, canAskForHelp, classifyFailure, clipLabel, consultLimit, countStep, EFFORTS, escalated, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_AGENT_NAME, MAX_LEAD_NOTICES, newAgent, noteProgress, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
+import { LADDER, afterHelp, agentLabel, canAskForHelp, classifyFailure, clipLabel, consultLimit, countStep, EFFORTS, escalated, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_AGENT_NAME, MAX_LEAD_NOTICES, newAgent, noteProgress, normalizePath, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
 import { buildDossier, inputFromState } from './dossier'
-import { categorize, costPerAccepted, formatStats, isAccepted, mulberry32, recommendWithExploration, record, recordReview, type Stats } from './learning'
+import { categorize, costPerAccepted, formatStats, isAccepted, mulberry32, recommendWithExploration, record, recordReview, recordRework, type Stats } from './learning'
 import { createQueue } from './queue'
 import { buildReviewPrompt, diffArgv, editedPath, formatReviews, isCheaper, parseReview, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun } from './review'
 import { parseSnapshot, type Snapshot, type TrackedAgent } from './state'
@@ -50,6 +50,22 @@ type ReviewedRun = { accepted?: boolean; at?: number; score?: number }
 const reviewRuns = new Map<string, ReviewedRun>()
 const MAX_REVIEWED_RUNS = 200
 const runKey = (id: string, turnId: unknown): string => `${id}:${typeof turnId === 'string' ? turnId : ''}`
+
+// Rework tracking (option reworkWindowMinutes). Memory only: a module reload loses it, which at worst misses a rework
+// (the snapshot would carry up to 50 runs of 50 paths each on every save, too much for a signal that lasts minutes).
+// Files, normalised, each tracked agent wrote with a successful edit during its current run.
+const writtenFiles = new Map<string, string[]>()
+// Finished runs of cheap agents (key `agentId:turnId`) whose files the lead may rework, oldest first.
+type ReworkRun = {
+  category: string; tier: Tier; label: string; files: Set<string>; endedAt: number
+  reworked: boolean
+  accepted?: boolean   // how the run was counted, once it is recorded
+  at?: number          // when it was recorded
+  pending?: boolean    // reworked before it was recorded: applied by recordOutcome
+}
+const reworkRuns = new Map<string, ReworkRun>()
+const MAX_REWORK_RUNS = 50
+const MAX_REWORK_FILES = 50
 
 // Messages to the lead sent this session (capped by MAX_LEAD_NOTICES) and the sends still in flight.
 let leadNotices = 0
@@ -100,8 +116,11 @@ function halfLifeMs(): number { return config.learningHalfLifeDays * 86_400_000 
 
 // Current time from the host clock, or undefined when it cannot be read (liveness is then simply not tracked).
 async function clockNow($: EngineInterface): Promise<number | undefined> {
-  try { return await $.clock.now() } catch { return undefined }
+  try { return (lastNow = await $.clock.now()) } catch { return undefined }
 }
+// The latest time read from the host clock: the end of a run is stamped with it, without a new await that would
+// delay the recording of the run (every step and tool call of the run just read the clock).
+let lastNow: number | undefined
 
 // Records an event of a tracked agent (it is running and not silent). Synchronous on `agents`, so it
 // cannot interleave with another handler's read-modify-write.
@@ -175,6 +194,9 @@ export function resetState(): void {
   pendingReviews.clear()
   editedFiles.clear()
   reviewRuns.clear()
+  writtenFiles.clear()
+  reworkRuns.clear()
+  lastNow = undefined
 }
 
 function snapshot(): Snapshot {
@@ -385,6 +407,10 @@ export const register: Register = (on, options) => {
     }
     if (tracked) mark(id, await clockNow($), toolEnd)
     if (tracked && config.reviewRate > 0 && r.isError !== true && r.deny === undefined) noteEdit(id, e as unknown as Record<string, unknown>)
+    if (config.reworkWindowMinutes > 0 && r.isError !== true && r.deny === undefined) {
+      if (tracked) noteWritten(id, e as unknown as Record<string, unknown>)
+      else if (id === undefined) await noteLeadEdit($, e as unknown as Record<string, unknown>)
+    }
     if (noteTask(tracked ? id : undefined, e as unknown as Record<string, unknown>, r)) await save($)
     if (mode === 'off' || mode === 'baseline') return r
     const a = id ? agents.get(id) : undefined
@@ -477,6 +503,8 @@ export const register: Register = (on, options) => {
     const id = e.agentId
     const a = id ? agents.get(id) : undefined
     if (id && a && mode !== 'off') {
+      const written = writtenFiles.get(id) ?? []
+      writtenFiles.delete(id)
       try {
         if (mode !== 'baseline') {
           const wasEscalated = escalated(a, config.levels)
@@ -484,6 +512,7 @@ export const register: Register = (on, options) => {
           // Read loosely: older published types may not declare these fields.
           const turn = e as { turnId?: unknown; isAborted?: unknown }
           const key = runKey(id, turn.turnId)
+          trackRun(a, key, written, lastNow, turn.isAborted === true)
           // Before the outcome is recorded, so the run is known as sampled when it is.
           startReview($, a, turn.turnId, turn.isAborted === true)
           if (argv.length === 0) {
@@ -688,10 +717,22 @@ async function recordOutcome($: EngineInterface, a: TrackedAgent, wasEscalated: 
     const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
     const now = await clockNow($)
     const e = reviewRuns.get(key)
-    const next = record(stats, a.category, a.startTier, wasEscalated, 0, verifyFailed, now, halfLifeMs(),
+    let next = record(stats, a.category, a.startTier, wasEscalated, 0, verifyFailed, now, halfLifeMs(),
       { cost: a.runCost, reviewScore: e?.score, minScore: config.minReviewScore })
+    const accepted = isAccepted({ escalated: wasEscalated, verifyFailed, reviewScore: e?.score }, config.minReviewScore)
+    // The lead may have reworked the run before its verification landed: it is moved to not accepted now, once.
+    const run = reworkRuns.get(key)
+    const reworkedEarly = run?.pending === true
+    if (run) {
+      run.accepted = accepted && !reworkedEarly
+      if (now !== undefined) run.at = now
+      if (reworkedEarly) {
+        run.pending = false
+        next = recordRework(next, a.category, a.startTier, { now, halfLifeMs: halfLifeMs(), runAccepted: accepted, runAt: now })
+      }
+    }
     if (e?.score !== undefined) reviewRuns.delete(key)
-    else if (e) reviewRuns.set(key, { accepted: isAccepted({ escalated: wasEscalated, verifyFailed }, config.minReviewScore), ...(now !== undefined ? { at: now } : {}) })
+    else if (e) reviewRuns.set(key, { accepted: accepted && !reworkedEarly, ...(now !== undefined ? { at: now } : {}) })
     await $.store.set(STATS_KEY, next)
   })
 }
@@ -704,6 +745,65 @@ function noteEdit(id: string, input: Record<string, unknown>): void {
     const list = editedFiles.get(id) ?? []
     if (!list.includes(path) && list.length < REVIEW_LIMITS.maxTracked) editedFiles.set(id, [...list, path])
   } catch { /* the review falls back to the whole diff */ }
+}
+
+// Remembers the file a successful edit of a tracked agent wrote, normalised, for the rework check at the end of its run.
+function noteWritten(id: string, input: Record<string, unknown>): void {
+  try {
+    const raw = editedPath(input.tool, input)
+    if (!raw) return
+    const list = writtenFiles.get(id) ?? []
+    const file = normalizePath(raw)
+    if (!list.includes(file) && list.length < MAX_REWORK_FILES) writtenFiles.set(id, [...list, file])
+  } catch { /* rework tracking is optional */ }
+}
+
+// End of a tracked agent's run: keeps the files it wrote for the rework check when it started below the reference tier.
+// The run's end is the clock at turn.complete; without a clock nothing is tracked. Never throws.
+function trackRun(a: AgentState, key: string, files: readonly string[], now: number | undefined, aborted: boolean): void {
+  try {
+    if (!watching() || aborted || config.reworkWindowMinutes <= 0 || files.length === 0 || now === undefined) return
+    if (!isCheaper(a.startTier, baseline)) return
+    reworkRuns.delete(key)
+    reworkRuns.set(key, { category: a.category, tier: a.startTier, label: agentLabel(a), files: new Set(files), endedAt: now, reworked: false })
+    if (reworkRuns.size > MAX_REWORK_RUNS) reworkRuns.delete(reworkRuns.keys().next().value as string)
+  } catch { /* rework tracking is optional */ }
+}
+
+// A successful edit by the main loop: when it touches a file the most recent run of a cheap agent wrote, inside the
+// window, that run is reworked. Each run counts once, however many edits follow. Edits the user makes outside
+// Claude Code never reach this hook. Never throws.
+async function noteLeadEdit($: EngineInterface, input: Record<string, unknown>): Promise<void> {
+  try {
+    if (!watching() || reworkRuns.size === 0) return
+    const raw = editedPath(input.tool, input)
+    if (!raw) return
+    const now = await clockNow($)
+    if (now === undefined) return
+    const windowMs = config.reworkWindowMinutes * 60_000
+    const file = normalizePath(raw)
+    let hitKey: string | undefined
+    for (const [key, run] of [...reworkRuns]) {
+      if (now - run.endedAt > windowMs) { reworkRuns.delete(key); continue }
+      if (run.files.has(file) && (hitKey === undefined || run.endedAt >= reworkRuns.get(hitKey)!.endedAt)) hitKey = key
+    }
+    const run = hitKey === undefined ? undefined : reworkRuns.get(hitKey)
+    if (!run || run.reworked) return
+    run.reworked = true
+    if (run.accepted === undefined) run.pending = true
+    else {
+      const was = run.accepted
+      run.accepted = false
+      await storeQueue(async () => {
+        const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
+        await $.store.set(STATS_KEY, recordRework(stats, run.category, run.tier, { now, halfLifeMs: halfLifeMs(), runAccepted: was, runAt: run.at }))
+      })
+      // A sampled review that lands later must not move the run to not accepted a second time.
+      const rv = reviewRuns.get(hitKey!)
+      if (rv?.accepted === true) rv.accepted = false
+    }
+    try { await $.ui.log(`${run.label}: lead reworked ${raw.split(/[\/]/).pop()}`) } catch { /* the note is best effort */ }
+  } catch { /* the check must never disturb the lead */ }
 }
 
 async function flushReviews(): Promise<void> {
@@ -793,6 +893,9 @@ async function reviewRun($: EngineInterface, a: AgentState, files: readonly stri
         await $.store.set(STATS_KEY, recordReview(stats, a.category, a.startTier, review.score,
           { now, halfLifeMs: halfLifeMs(), runAccepted: e.accepted, runAt: e.at, minScore: config.minReviewScore }))
         reviewRuns.delete(key)
+        // The review already moved the run to not accepted: a later rework only counts.
+        const w = reworkRuns.get(key)
+        if (w && e.accepted && review.score < config.minReviewScore) w.accepted = false
       } else {
         // The run is not recorded yet: its recording reads the score from the entry.
         await $.store.set(STATS_KEY, recordReview(stats, a.category, a.startTier, review.score, { now, halfLifeMs: halfLifeMs() }))

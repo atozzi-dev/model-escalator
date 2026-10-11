@@ -36,6 +36,7 @@ export type Config = {
   explore: number                   // weight (0 to 1) of exploring a tier below the learned one at spawn; 0 = off
   learnByCost: boolean              // pick the start tier by cost per accepted run once there is enough cost data
   minReviewScore: number            // lowest review score (1 to 5) of an accepted run
+  reworkWindowMinutes: number       // minutes after a cheap agent's run during which a lead edit of its files counts as rework; 0 = off
 }
 
 // USD per million tokens, Anthropic API list prices (Oct 2026), checked against /cost.
@@ -89,6 +90,7 @@ export const DEFAULT_CONFIG: Config = {
   explore: 0,
   learnByCost: true,
   minReviewScore: 3,
+  reworkWindowMinutes: 30,
   modelIds: { haiku: 'claude-haiku-5-5', sonnet: 'claude-sonnet-5-5', opus: 'claude-opus-5-5' },
 }
 
@@ -233,6 +235,7 @@ export function parseConfig(raw: Raw | undefined): Config {
     const rate = num(o.reviewRate)
     const explore = num(o.explore)
     const minScore = num(o.minReviewScore)
+    const rework = num(o.reworkWindowMinutes)
     const reviewer = typeof o.reviewModel === 'string' ? o.reviewModel.trim() : ''
     return {
       ...d,
@@ -267,6 +270,7 @@ export function parseConfig(raw: Raw | undefined): Config {
       explore: explore !== undefined && explore >= 0 && explore <= 1 ? explore : d.explore,
       learnByCost: bool(o.learnByCost, d.learnByCost),
       minReviewScore: minScore !== undefined && minScore >= 1 && minScore <= 5 ? minScore : d.minReviewScore,
+      reworkWindowMinutes: rework !== undefined && rework >= 0 ? rework : d.reworkWindowMinutes,
       reviewModel: reviewer.length <= 100 ? reviewer : d.reviewModel,
     }
   } catch {

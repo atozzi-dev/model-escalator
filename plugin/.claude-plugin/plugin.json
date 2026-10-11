@@ -151,6 +151,12 @@
       "description": "From 1 to 5: a run reviewed below this score (reviewRate) counts as not accepted when the mod learns which model to use. 3 is works but needs changes.",
       "default": 3
     },
+    "reworkWindowMinutes": {
+      "type": "number",
+      "title": "Rework window (minutes)",
+      "description": "When the lead edits, within this many minutes, a file a cheaper agent wrote in its run, the run counts as reworked: it is moved to not accepted for learning and shown by /escalator stats. Edits you make outside Claude Code are not visible. 0 is off.",
+      "default": 30
+    },
     "effortStep": {
       "type": "boolean",
       "title": "Raise the effort before a model swap",

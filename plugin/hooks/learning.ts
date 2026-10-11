@@ -9,6 +9,8 @@ import { LADDER, type Tier } from './detector'
 // - review counters, as of `reviewedAt`: `reviews` sampled runs reviewed and `reviewScore` the sum of their scores.
 //   `record` copies them untouched; `recordReview` decays them from `reviewedAt` before adding a review.
 //
+// - `reworked` (run counter, decays with the others): runs whose files the lead edited soon after (see `recordRework`).
+//
 // Counters may be fractional once decayed. `updatedAt` (ms) is set only when a run is recorded with a clock.
 // Every optional field is absent in stats stored before it existed: `notAccepted` then reads as `escalated`, a cell
 // without `cost` has no cost evidence, a cell without `reviews` has no review.
@@ -24,6 +26,7 @@ export type Cell = {
   reviews?: number
   reviewScore?: number
   reviewedAt?: number
+  reworked?: number
 }
 export type Stats = Record<string, Partial<Record<Tier, Cell>>>
 
@@ -66,6 +69,7 @@ function decayed(c: Cell, now: number | undefined, halfLifeMs: number): Cell {
     ...(c.notAccepted !== undefined ? { notAccepted: c.notAccepted * f } : {}),
     ...(c.cost !== undefined ? { cost: c.cost * f } : {}),
     ...(c.costRuns !== undefined ? { costRuns: c.costRuns * f } : {}),
+    ...(c.reworked !== undefined ? { reworked: c.reworked * f } : {}),
   }
 }
 
@@ -161,6 +165,18 @@ export type ReviewOptions = {
   minScore?: number
 }
 
+// Moves one run, counted as accepted, to not accepted in the (already decayed) cell: adds the run's weight today,
+// `0.5 ^ ((now - runAt) / halfLife)` (1 without `runAt`), capped so `notAccepted` never exceeds `runs`.
+function notAcceptedOnce(c: Cell, now: number | undefined, runAt: number | undefined, halfLifeMs: number): Cell {
+  const w = now !== undefined && runAt !== undefined ? fade(now - runAt, halfLifeMs) : 1
+  const before = c.notAccepted ?? c.escalated
+  return {
+    ...c,
+    notAccepted: Math.max(before, Math.min(c.runs, before + w)),
+    ...(now !== undefined && (c.updatedAt === undefined || now > c.updatedAt) ? { updatedAt: now } : {}),
+  }
+}
+
 // Adds one review score (1 to 5) to the cell of `category` and start `tier`, and flips its run to not accepted when
 // `runAccepted` and the score is below `minScore`. A review may land before any run of the cell: the cell then
 // starts with no runs. An invalid score returns `stats` itself. Never mutates `stats`.
@@ -170,16 +186,7 @@ export function recordReview(stats: Stats, category: string, tier: Tier, score: 
   const row = { ...(stats[category] ?? {}) }
   const raw = row[tier] ?? EMPTY
   const flip = runAccepted === true && score < minScore
-  let c: Cell = flip ? decayed(raw, now, halfLifeMs) : { ...raw }
-  if (flip) {
-    const w = now !== undefined && runAt !== undefined ? fade(now - runAt, halfLifeMs) : 1
-    const before = c.notAccepted ?? c.escalated
-    c = {
-      ...c,
-      notAccepted: Math.max(before, Math.min(c.runs, before + w)),
-      ...(now !== undefined && (c.updatedAt === undefined || now > c.updatedAt) ? { updatedAt: now } : {}),
-    }
-  }
+  const c: Cell = flip ? notAcceptedOnce(decayed(raw, now, halfLifeMs), now, runAt, halfLifeMs) : { ...raw }
   const g = now !== undefined && raw.reviewedAt !== undefined ? fade(now - raw.reviewedAt, halfLifeMs) : 1
   row[tier] = {
     ...c,
@@ -188,6 +195,26 @@ export function recordReview(stats: Stats, category: string, tier: Tier, score: 
     ...(now !== undefined && (raw.reviewedAt === undefined || now > raw.reviewedAt) ? { reviewedAt: now } : {}),
   }
   return { ...stats, [category]: row }
+}
+
+// --- Rework ---
+//
+// The lead edited, soon after the run ended, a file a cheap agent had written: the run needed fixing. Same "shift
+// once" semantics as a late review: the caller knows (in memory) whether the run was counted as accepted and when,
+// and calls this once per run. `runAccepted: true` moves the run to not accepted with its decayed weight; any other
+// value only counts the rework. The cell's `reworked` grows by one either way. A cell that does not exist returns
+// `stats` itself. Never mutates `stats`.
+export type ReworkOptions = { now?: number; halfLifeMs?: number; runAccepted?: boolean; runAt?: number }
+
+export function recordRework(stats: Stats, category: string, tier: Tier, opts: ReworkOptions = {}): Stats {
+  const raw = stats[category]?.[tier]
+  if (raw === undefined) return stats
+  const { now, halfLifeMs = HALF_LIFE_MS, runAccepted, runAt } = opts
+  const d = decayed(raw, now, halfLifeMs)
+  // Decayed to `now`, so the clock moves with the counters even when the run was not accepted before.
+  const c = runAccepted === true ? notAcceptedOnce(d, now, runAt, halfLifeMs)
+    : { ...d, ...(now !== undefined && d.updatedAt !== undefined && now > d.updatedAt ? { updatedAt: now } : {}) }
+  return { ...stats, [category]: { ...stats[category], [tier]: { ...c, reworked: (d.reworked ?? 0) + 1 } } }
 }
 
 const failures = (c: Cell): number => c.notAccepted ?? c.escalated
@@ -431,8 +458,9 @@ export function formatStats(stats: Stats, now?: number, halfLifeMs = HALF_LIFE_M
       if (!c) continue
       const failed = c.failedVerify ? `, ${num1(c.failedVerify)} failed verify` : ''
       const na = c.notAccepted !== undefined && c.notAccepted !== c.escalated ? `, ${num1(c.notAccepted)} not accepted` : ''
+      const rw = c.reworked ? `, reworked ${num1(c.reworked)}` : ''
       const age = now !== undefined && c.updatedAt !== undefined ? ` (updated ${ageText(Math.max(0, now - c.updatedAt))})` : ''
-      lines.push(`- ${category} ${tier}: ${num1(c.runs)} runs, ${num1(c.escalated)} escalated${failed}${na}${costText(c, now, halfLifeMs)}${age}`)
+      lines.push(`- ${category} ${tier}: ${num1(c.runs)} runs, ${num1(c.escalated)} escalated${failed}${na}${rw}${costText(c, now, halfLifeMs)}${age}`)
     }
   }
   return lines.length === 0 ? 'No stats yet.' : lines.join('\n')
