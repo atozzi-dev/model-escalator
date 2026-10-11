@@ -10,6 +10,7 @@ import { layoutGraph, type LayoutMemory } from './layout'
 import { renderSvg } from './render-svg'
 import { renderTree } from './render-text'
 import { createQueue } from './queue'
+import { buildStatsView, columnWidths, fitView, type ViewCell } from './stats-view'
 import { buildReviewPrompt, diffArgv, editedPath, formatReviews, isCheaper, parseReview, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun } from './review'
 import { parseSnapshot, type Snapshot, type TrackedAgent } from './state'
 import { addAgent, addConsult, addEscalation, addIntervention, addStep, asUsage, cost as stepCost, emptyLedger, planBlock, report, reportByCategory, savings, statusLine, type Ledger, type Usage } from './savings'
@@ -116,6 +117,14 @@ let mapTimer: { cancel: () => void } | undefined
 const TEXT_RECENT_MS = 3000
 const TEXT_WIDTH = 80
 let terminalOpen = false
+
+// The statistics panel (`/escalator panel`). Its own tick, only while the pane is open: once a second it compares a
+// signature of what the panel shows (ledger, mode, paused agents, learned stats) and asks for a redraw if it changed.
+export const STATS_PANE = 'escalator-stats'
+const STATS_REDRAW_MS = 1000
+let statsTimer: { cancel: () => void } | undefined
+let statsDirty = false     // the pane was just opened: draw once on the first tick
+let statsSig = ''          // what the last tick saw
 let textFrame = 0
 let textSeq = 0
 let textPendingSeq = 0
@@ -177,6 +186,30 @@ function startMapTimer($: EngineInterface): void {
 function stopMapTimer(): void {
   mapTimer?.cancel()
   mapTimer = undefined
+}
+
+// What the statistics panel shows, as one string: a change of it means a redraw.
+async function statsSignature($: EngineInterface): Promise<string> {
+  let learned: unknown
+  try { learned = await $.store.get(STATS_KEY) } catch { learned = undefined }
+  return JSON.stringify([mode, baseline, ledger, [...agents.values()].filter((a) => a.paused).map((a) => a.id), learned])
+}
+
+async function statsTick($: EngineInterface): Promise<void> {
+  try {
+    const sig = await statsSignature($)
+    if (statsDirty || sig !== statsSig) { statsDirty = false; statsSig = sig; $.ui.invalidate('ui.render') }
+  } catch { /* a missed redraw is drawn on the next change */ }
+}
+
+function startStatsTimer($: EngineInterface): void {
+  if (statsTimer) return
+  try { statsTimer = $.clock.every(STATS_REDRAW_MS, () => { void statsTick($) }) } catch { /* the pane still draws on open */ }
+}
+
+function stopStatsTimer(): void {
+  statsTimer?.cancel()
+  statsTimer = undefined
 }
 
 // Hash of the session's working directory, the key of its per-project statistics ('' when unknown). Never the path.
@@ -284,6 +317,9 @@ export function resetState(): void {
   stallTimer?.cancel()
   stallTimer = undefined
   stopMapTimer()
+  stopStatsTimer()
+  statsDirty = false
+  statsSig = ''
   graph = emptyGraph('opus')
   layoutMem = undefined
   drawnSeq = 0
@@ -421,13 +457,16 @@ export const register: Register = (on, options) => {
       drawnSeq = saved.drawnSeq ?? 0
       // A map pane left open across the reload keeps being redrawn.
       try {
-        if ((await $.ui.panes()).some((p) => p.id === MAP_PANE)) { mapDirty = true; startMapTimer($) }
+        const open = await $.ui.panes()
+        if (open.some((p) => p.id === MAP_PANE)) { mapDirty = true; startMapTimer($) }
+        if (open.some((p) => p.id === STATS_PANE)) { statsDirty = true; startStatsTimer($) }
       } catch { /* no pane list: the map redraws when it is opened again */ }
     } else {
       graph = emptyGraph(baseline)
       layoutMem = undefined
       drawnSeq = 0
       stopMapTimer()
+      stopStatsTimer()
       try {
         sessionTag = newTag()
         unavailableToasted = false
@@ -470,7 +509,7 @@ export const register: Register = (on, options) => {
       } catch { /* the tool is optional: the ladder works without it */ }
     }
     try {
-      await $.command.register({ name: 'escalator', description: 'Model escalator: savings report, stats and the live agent network', argumentHint: '[report|stats|config|history [n]|map|reset [history]|resume <id>|all|help]' })
+      await $.command.register({ name: 'escalator', description: 'Model escalator: savings report, stats panel and the live agent network', argumentHint: '[report|stats|config|history [n]|map|panel [close]|reset [history]|resume <id>|all|help]' })
     } catch { /* name taken: the report stays reachable through the status line */ }
     return r
   })
@@ -500,11 +539,12 @@ export const register: Register = (on, options) => {
     }
     if (arg === 'resume' || arg.startsWith('resume ')) return { text: await resumeCommand($, arg.slice(6).trim()) }
     if (arg === 'map') return { text: await openMap($) }
+    if (arg === 'panel') return { text: await openStatsPanel($) }
+    if (arg === 'panel close') return { text: await closeStatsPanel($) }
     if (arg !== '' && arg !== 'report') return { text: `Unknown subcommand "${arg.split(/\s+/)[0]}".\n\n${COMMAND_HELP}` }
     const paused = [...agents.values()].filter((a) => a.paused)
     // On a subscription the engine reports the plan windows; on API billing there are none and the block is left out.
-    let plan = ''
-    try { plan = planBlock((await $.session.usage()).rateLimits, ledger) } catch { /* the report does not need it */ }
+    const plan = await readPlan($)
     const planText = plan ? '\n\n' + plan : ''
     const pausedText = paused.length === 0 ? '' : '\n\nPaused (resume with /escalator resume <id>|all):\n' +
       paused.map((a) => `- ${agentLabel(a)} (${a.category}, ${a.tier})`).join('\n')
@@ -549,10 +589,50 @@ export const register: Register = (on, options) => {
     }
   })
 
-  // Closing the pane stops the redraw ticks.
+  // The statistics panel: the same content on every surface, as Box and Text (terminal, desktop, VS Code and mobile
+  // all have both). The view is built and fitted in stats-view.ts; this only maps it to elements.
+  on('ui.render', { component: 'Pane', requestId: STATS_PANE }, async ($, e, next) => {
+    try {
+      const { Box, Text } = $.ui.resolve(e)
+      const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
+      const view = buildStatsView({
+        mode, baseline, ledger, stats, plan: await readPlan($), now: await clockNow($), halfLifeMs: halfLifeMs(),
+        paused: [...agents.values()].filter((a) => a.paused).map((a) => `${agentLabel(a)} (${a.category}, ${a.tier})`),
+      })
+      const text = (c: ViewCell) => Text({ ...(c.bold ? { bold: true } : {}), ...(c.dim ? { dimColor: true } : {}), wrap: 'truncate-end', children: c.text })
+      const terminal = e.surface === 'terminal'
+      const cols = Number((e.props as { bodyColumns?: unknown } | undefined)?.bodyColumns)
+      const width = Number.isFinite(cols) && cols >= 1 ? Math.floor(cols) : TEXT_WIDTH
+      // The terminal pads the text itself; the other surfaces give each column a width in characters.
+      const shown = terminal ? fitView(view, width) : view
+      const out = Box({
+        flexDirection: 'column', gap: 1,
+        children: shown.sections.map((s) => {
+          const widths = terminal ? [] : columnWidths(s.rows)
+          return Box({
+            flexDirection: 'column',
+            children: [
+              Text({ bold: true, children: s.title }),
+              ...s.rows.map((r) => Box({
+                flexDirection: 'row', gap: 2,
+                children: r.map((c, k) => (terminal || r.length === 1 ? text(c) : Box({ width: widths[k] ?? 0, children: text(c) }))),
+              })),
+            ],
+          })
+        }),
+      })
+      statsSig = await statsSignature($)
+      return out
+    } catch {
+      return next(e)
+    }
+  })
+
+  // Closing a pane stops its redraw ticks.
   on('ui.close', async ($, e, next) => {
     const r = await next(e)
     try { if (e.id === MAP_PANE) { stopMapTimer(); terminalOpen = false } } catch { /* best effort */ }
+    try { if (e.id === STATS_PANE) stopStatsTimer() } catch { /* best effort */ }
     return r
   })
 
@@ -1262,6 +1342,7 @@ const COMMAND_HELP = [
   '/escalator config: the effective configuration and the environment mode',
   '/escalator history [n]: the last n recorded sessions (default 10, at most 50)',
   '/escalator map: open the live network of agents',
+  '/escalator panel [close]: open (or close) a panel with the session, plan usage, savings per category and learned statistics',
   '/escalator resume <id>|all: resume agents paused at the human level',
   '/escalator reset: forget the learned stats (history and category cache are kept)',
   '/escalator reset history: clear the recorded session history',
@@ -1325,6 +1406,38 @@ async function openMap($: EngineInterface): Promise<string> {
   } catch {
     return 'Could not open the agent network pane.'
   }
+}
+
+// `/escalator panel`: opens the statistics pane (a second call only retitles it) and starts its refresh tick.
+async function openStatsPanel($: EngineInterface): Promise<string> {
+  try {
+    await clockNow($)
+    const opened = await $.ui.open({ id: STATS_PANE, title: 'Escalator' })
+    statsDirty = true
+    startStatsTimer($)
+    return opened.isPlaced
+      ? 'Escalator panel opened: the session cost and savings, plan usage, savings per task category and what the mod learned.'
+      : `Escalator panel is waiting: ${opened.reason}`
+  } catch {
+    return 'Could not open the Escalator panel.'
+  }
+}
+
+// `/escalator panel close`: closes the pane and stops its refresh tick. (A close by the person raises `ui.close`,
+// which stops the tick too; a close the mod asks for does not pass through the mod's own hooks.)
+async function closeStatsPanel($: EngineInterface): Promise<string> {
+  stopStatsTimer()
+  try {
+    await $.ui.close({ id: STATS_PANE })
+    return 'Escalator panel closed.'
+  } catch {
+    return 'Could not close the Escalator panel.'
+  }
+}
+
+// The report's "Plan usage" block: '' on API billing or when the engine cannot tell. Never throws.
+async function readPlan($: EngineInterface): Promise<string> {
+  try { return planBlock((await $.session.usage()).rateLimits, ledger) } catch { return '' }
 }
 
 // `/escalator resume <id>|all`: clears the pause and restarts the ladder of the agent on its current tier.
