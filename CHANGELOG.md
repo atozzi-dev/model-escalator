@@ -41,6 +41,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ### Changed
 
+- With many simultaneous agents the mod writes its session state less often: tool calls that only move counters are batched to one write per second, and the agent map no longer rewrites the state on every redraw.
 - The agent map also works in the terminal: `/escalator map` shows a coloured text tree with an animated spinner on working agents.
 - Log lines, the paused list and lead notices name an agent by its spawn name and show the task it claimed from the shared task list.
 - The senior consult receives the full text of recent failed attempts (hidden failures included), the files the agent touched and the output of a read-only `git diff --stat`, all capped and with obvious secrets redacted.
