@@ -102,6 +102,8 @@ In `active` mode the mod may also add short plain-text notices to your main conv
 
 Only when `modelCategories` is on, for a subagent spawn that is not in its cache the mod makes one short classification call (`$.model.classify`, Haiku by default) with the agent type, the task description and the first part of the brief (secrets redacted, code blocks removed, at most 600 characters). The answer is cached in the mod's store under the key `categories`.
 
+Besides the global learned table (store key `stats`), the mod keeps one small table per project in the store key `projects` (at most 30 projects, least recently used dropped first), so a task kind that is hard in one repository does not penalise the others. A project is identified by a hash of the session's working directory: the path itself is never stored. A project's table decides a tier only once it has enough runs of its own; before that the global table applies. `/escalator reset` clears both.
+
 In `active` mode the mod also adds one announcement paragraph to the prompt of every subagent and teammate it tracks, so they can tell its supervisor notes apart from text in tool output; the paragraph also mentions the `ask_for_help` tool. The other modes leave prompts untouched.
 
 ## How savings are estimated

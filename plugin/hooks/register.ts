@@ -4,7 +4,7 @@ import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config
 import { LADDER, afterHelp, agentLabel, canAskForHelp, classifyFailure, clipLabel, consultLimit, countStep, EFFORTS, escalated, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_AGENT_NAME, MAX_LEAD_NOTICES, newAgent, noteProgress, normalizePath, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
 import { buildDossier, inputFromState } from './dossier'
 import { cacheGet, cachePut, cacheKey, classifierInput, combineCategory, LABELS, parseCache } from './classify'
-import { categorize, costPerAccepted, formatStats, isAccepted, mulberry32, recommendWithExploration, record, recordReview, recordRework, type Stats } from './learning'
+import { categorize, costPerAccepted, formatStats, isAccepted, mulberry32, parseProjects, projectKey, recommendScopedWithExploration, recordReviewScoped, recordReworkScoped, recordScoped, scopedStats, type Projects, type Stats } from './learning'
 import { emptyGraph, LEAD_ID, reduce, SENIOR_ID, type GraphInput, type GraphState } from './graph'
 import { layoutGraph, type LayoutMemory } from './layout'
 import { renderSvg } from './render-svg'
@@ -16,6 +16,7 @@ import { addConsult, addIntervention, addStep, asUsage, cost as stepCost, emptyL
 
 export const HELP_TOOL = 'mcp__model-escalator__ask_for_help'
 const STATS_KEY = 'stats'
+const PROJECTS_KEY = 'projects'
 const SESSIONS_KEY = 'sessions'
 const CATEGORIES_KEY = 'categories'
 const CATEGORY_CACHE_MAX = 200
@@ -178,6 +179,9 @@ function stopMapTimer(): void {
   mapTimer = undefined
 }
 
+// Hash of the session's working directory, the key of its per-project statistics ('' when unknown). Never the path.
+let projectId = ''
+
 // Per-session tag that authenticates our notes.
 let sessionTag = newTag()
 
@@ -263,6 +267,7 @@ function noteTask(id: string | undefined, e: Record<string, unknown>, r: unknown
 // Restores the module state to its defaults. Used by tests so each one starts clean.
 export function resetState(): void {
   sessionTag = newTag()
+  projectId = ''
   exploreRandom = undefined
   agents.clear()
   limitNoted.clear()
@@ -445,6 +450,7 @@ export const register: Register = (on, options) => {
       } catch { /* no stall detection, everything else works */ }
     }
     const r = await next(e)
+    try { projectId = projectKey((r as { cwd?: unknown } | undefined)?.cwd) } catch { projectId = '' }
     if (watching()) {
       try {
         await $.tool.register({
@@ -478,7 +484,7 @@ export const register: Register = (on, options) => {
         (reviews ? '\n\nSenior review scores of sampled runs (1-5):\n' + reviews : '') }
     }
     if (arg === 'reset') {
-      await storeQueue(async () => { await $.store.delete(STATS_KEY) })
+      await storeQueue(async () => { await $.store.delete(STATS_KEY); await $.store.delete(PROJECTS_KEY) })
       return { text: 'Learned stats cleared.' }
     }
     if (arg === 'resume' || arg.startsWith('resume ')) return { text: await resumeCommand($, arg.slice(6).trim()) }
@@ -545,9 +551,10 @@ export const register: Register = (on, options) => {
     try {
       const asked = tierOf(e.model ?? e.parentModel)
       const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
+      const projects = parseProjects(await $.store.get(PROJECTS_KEY))
       const choice = mode === 'baseline'
         ? { tier: baseline, reason: 'requested' as const, learned: baseline }
-        : recommendWithExploration(stats, category, asked, {
+        : recommendScopedWithExploration(stats, projects, projectId, category, asked, {
           now: await clockNow($), halfLifeMs: halfLifeMs(), explore: config.explore, byCost: config.learnByCost,
           ...(config.explore > 0 ? { rand: explorationRandom() } : {}),
         })
@@ -559,7 +566,7 @@ export const register: Register = (on, options) => {
         if (mode !== 'observe') ev = { ...e, model: best }
         await $.ui.log(`${label}: ${asked} -> ${best}${mode === 'observe' ? ' (would)' : ''}`)
       }
-      if (choice.basis === 'cost') await $.ui.log(`${label}: chosen by cost per accepted run (${costLine(stats, category, asked, await clockNow($))})`)
+      if (choice.basis === 'cost') await $.ui.log(`${label}: chosen by cost per accepted run (${costLine(scopedStats(stats, projects, projectId, category, await clockNow($), halfLifeMs()), category, asked, await clockNow($))})`)
       if (exploring) {
         await $.ui.log(mode === 'observe'
           ? `${label}: would explore ${choice.tier} for ${category} (learned ${choice.learned})`
@@ -936,15 +943,27 @@ function costLine(stats: Stats, category: string, asked: Tier, now: number | und
   return parts.join(', ')
 }
 
+// The global table and the per-project tables from the store. Call inside storeQueue for a read-modify-write.
+async function readStats($: EngineInterface): Promise<{ stats: Stats; projects: Projects }> {
+  return { stats: ((await $.store.get(STATS_KEY)) ?? {}) as Stats, projects: parseProjects(await $.store.get(PROJECTS_KEY)) }
+}
+
+// Writes both tables in one go (the caller holds the store queue). The project table is only written when it exists
+// or when this write added to it, so a session with no known project leaves the key alone.
+async function writeStats($: EngineInterface, s: { stats: Stats; projects: Projects }): Promise<void> {
+  await $.store.set(STATS_KEY, s.stats)
+  if (Object.keys(s.projects).length > 0) await $.store.set(PROJECTS_KEY, s.projects)
+}
+
 // Records one finished run: its cost (the agent's requests and consults of the run, not the review), and whether it
 // was accepted. A review that already landed counts in the acceptance here; one that has not is told how the run
 // was counted (see reviewRun), so a late low score moves the run to not accepted exactly once.
 async function recordOutcome($: EngineInterface, a: TrackedAgent, wasEscalated: boolean, verifyFailed: boolean, key: string): Promise<void> {
   await storeQueue(async () => {
-    const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
+    const { stats, projects } = await readStats($)
     const now = await clockNow($)
     const e = reviewRuns.get(key)
-    let next = record(stats, a.category, a.startTier, wasEscalated, 0, verifyFailed, now, halfLifeMs(),
+    let next = recordScoped(stats, projects, projectId, a.category, a.startTier, wasEscalated, 0, verifyFailed, now, halfLifeMs(),
       { cost: a.runCost, reviewScore: e?.score, minScore: config.minReviewScore })
     const accepted = isAccepted({ escalated: wasEscalated, verifyFailed, reviewScore: e?.score }, config.minReviewScore)
     // The lead may have reworked the run before its verification landed: it is moved to not accepted now, once.
@@ -955,12 +974,12 @@ async function recordOutcome($: EngineInterface, a: TrackedAgent, wasEscalated: 
       if (now !== undefined) run.at = now
       if (reworkedEarly) {
         run.pending = false
-        next = recordRework(next, a.category, a.startTier, { now, halfLifeMs: halfLifeMs(), runAccepted: accepted, runAt: now })
+        next = recordReworkScoped(next.stats, next.projects, projectId, a.category, a.startTier, { now, halfLifeMs: halfLifeMs(), runAccepted: accepted, runAt: now })
       }
     }
     if (e?.score !== undefined) reviewRuns.delete(key)
     else if (e) reviewRuns.set(key, { accepted: accepted && !reworkedEarly, ...(now !== undefined ? { at: now } : {}) })
-    await $.store.set(STATS_KEY, next)
+    await writeStats($, next)
   })
 }
 
@@ -1022,8 +1041,8 @@ async function noteLeadEdit($: EngineInterface, input: Record<string, unknown>):
       const was = run.accepted
       run.accepted = false
       await storeQueue(async () => {
-        const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
-        await $.store.set(STATS_KEY, recordRework(stats, run.category, run.tier, { now, halfLifeMs: halfLifeMs(), runAccepted: was, runAt: run.at }))
+        const { stats, projects } = await readStats($)
+        await writeStats($, recordReworkScoped(stats, projects, projectId, run.category, run.tier, { now, halfLifeMs: halfLifeMs(), runAccepted: was, runAt: run.at }))
       })
       // A sampled review that lands later must not move the run to not accepted a second time.
       const rv = reviewRuns.get(hitKey!)
@@ -1112,12 +1131,12 @@ async function reviewRun($: EngineInterface, a: AgentState, files: readonly stri
       return
     }
     await storeQueue(async () => {
-      const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
+      const { stats, projects } = await readStats($)
       const now = await clockNow($)
       const e = reviewRuns.get(key)
       if (e?.accepted !== undefined) {
         // The run is recorded: a low score moves it to not accepted, and the entry has done its job.
-        await $.store.set(STATS_KEY, recordReview(stats, a.category, a.startTier, review.score,
+        await writeStats($, recordReviewScoped(stats, projects, projectId, a.category, a.startTier, review.score,
           { now, halfLifeMs: halfLifeMs(), runAccepted: e.accepted, runAt: e.at, minScore: config.minReviewScore }))
         reviewRuns.delete(key)
         // The review already moved the run to not accepted: a later rework only counts.
@@ -1125,7 +1144,7 @@ async function reviewRun($: EngineInterface, a: AgentState, files: readonly stri
         if (w && e.accepted && review.score < config.minReviewScore) w.accepted = false
       } else {
         // The run is not recorded yet: its recording reads the score from the entry.
-        await $.store.set(STATS_KEY, recordReview(stats, a.category, a.startTier, review.score, { now, halfLifeMs: halfLifeMs() }))
+        await writeStats($, recordReviewScoped(stats, projects, projectId, a.category, a.startTier, review.score, { now, halfLifeMs: halfLifeMs() }))
         reviewRuns.set(key, { score: review.score })
       }
     })
