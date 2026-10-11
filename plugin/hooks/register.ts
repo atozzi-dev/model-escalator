@@ -12,7 +12,7 @@ import { renderTree } from './render-text'
 import { createQueue } from './queue'
 import { buildReviewPrompt, diffArgv, editedPath, formatReviews, isCheaper, parseReview, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun } from './review'
 import { parseSnapshot, type Snapshot, type TrackedAgent } from './state'
-import { addConsult, addIntervention, addStep, asUsage, cost as stepCost, emptyLedger, report, savings, statusLine, type Ledger, type Usage } from './savings'
+import { addAgent, addConsult, addEscalation, addIntervention, addStep, asUsage, cost as stepCost, emptyLedger, report, reportByCategory, savings, statusLine, type Ledger, type Usage } from './savings'
 
 export const HELP_TOOL = 'mcp__model-escalator__ask_for_help'
 const STATS_KEY = 'stats'
@@ -483,8 +483,10 @@ export const register: Register = (on, options) => {
     if (arg === 'stats') {
       const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
       const reviews = formatReviews(stats)
+      // This session's savings per category go here, not in the report: the report's request counts stay one table.
+      const byCategory = ledger.byCategory && Object.keys(ledger.byCategory).length > 0 ? '\n\n' + reportByCategory(ledger, baseline) : ''
       return { text: 'Learned stats per category (runs / escalated):\n' + formatStats(stats, await clockNow($), halfLifeMs()) +
-        (reviews ? '\n\nSenior review scores of sampled runs (1-5):\n' + reviews : '') }
+        (reviews ? '\n\nSenior review scores of sampled runs (1-5):\n' + reviews : '') + byCategory }
     }
     if (arg === 'reset') {
       // The category cache is kept: it maps task text to a label, which is a fact about the text, not something learned
@@ -595,6 +597,7 @@ export const register: Register = (on, options) => {
       const name = clipLabel(e.name, MAX_AGENT_NAME)
       const fresh = newAgent(r.agentId, category, r.model, e.prompt)
       agents.set(r.agentId, name === undefined ? fresh : { ...fresh, name })
+      ledger = addAgent(ledger, category)
       if (watching()) mark(r.agentId, await clockNow($))
       feed($, { type: 'spawn', agentId: r.agentId, label: name ?? category, model: String(r.model ?? '') })
       await save($)
@@ -681,6 +684,14 @@ export const register: Register = (on, options) => {
         if (action === 'human' && config.pauseAtHuman) feed($, { type: 'pause', agentId: id })
       }
       const note = await act($, state, action)
+      // The first swap of an agent counts once as an escalation of its category (the flag outlives its runs, like the agent count).
+      if (action === 'swap') {
+        const cur: TrackedAgent = agents.get(id) ?? state
+        if (cur.escCounted !== true) {
+          ledger = addEscalation(ledger, cur.category)
+          agents.set(id, { ...cur, escCounted: true })
+        }
+      }
       if (action === 'swap') notifyLead($, state, { kind: 'swap', tier: state.tier })
       else if (action === 'human') notifyLead($, state, { kind: 'human', paused: config.pauseAtHuman })
       await save($)
@@ -727,7 +738,7 @@ export const register: Register = (on, options) => {
       }
     } catch { /* the stream must go on */ }
     if (mode !== 'off' && r.usage) {
-      ledger = addStep(ledger, r.usage as Usage, tierOf(r.usage.model), baseline, Boolean(e.agentId), config)
+      ledger = addStep(ledger, r.usage as Usage, tierOf(r.usage.model), baseline, Boolean(e.agentId), config, e.agentId ? agents.get(e.agentId)?.category : undefined)
       // The request's own cost, on the model it ran on, for the map (the lead's cache writes live for an hour).
       const u = asUsage(r.usage)
       feed($, {
@@ -1134,7 +1145,7 @@ async function reviewRun($: EngineInterface, a: AgentState, files: readonly stri
         if (reply.reason === 'api-error' && isModelRefusal({ status: reply.status, error: reply.error })) refusedSeniors = refuseTier(refusedSeniors, tierOf(model))
       }
       const usage = typeof reply === 'string' ? undefined : asUsage(reply.usage)
-      ledger = addConsult(ledger, { usage, promptChars: prompt.length + REVIEW_SYSTEM.length, replyChars: text.length }, tierOf(model), config)
+      ledger = addConsult(ledger, { usage, promptChars: prompt.length + REVIEW_SYSTEM.length, replyChars: text.length }, tierOf(model), config, a.category)
       await save($)
     } catch (err) {
       why = String((err as { message?: unknown } | undefined)?.message ?? err).slice(0, 200)
@@ -1243,7 +1254,7 @@ function pausedDeny(id: string | undefined, tool?: unknown): { deny: string } | 
 const COMMAND_HELP = [
   'Subcommands:',
   '/escalator report: session cost, estimated savings and interventions (the default)',
-  '/escalator stats: what the mod has learned per task category',
+  '/escalator stats: what the mod has learned per task category, and this session\'s savings per category',
   '/escalator config: the effective configuration and the environment mode',
   '/escalator history [n]: the last n recorded sessions (default 10, at most 50)',
   '/escalator map: open the live network of agents',
@@ -1439,7 +1450,7 @@ async function askSenior($: EngineInterface, model: string, prompt: string, agen
     }
     const usage = typeof reply === 'string' ? undefined : asUsage(reply.usage)
     const before = ledger.consultCost
-    ledger = addConsult(ledger, { usage, promptChars: prompt.length + SENIOR_SYSTEM.length, replyChars: advice.length }, tierOf(model), config)
+    ledger = addConsult(ledger, { usage, promptChars: prompt.length + SENIOR_SYSTEM.length, replyChars: advice.length }, tierOf(model), config, agents.get(agentId)?.category)
     // The consult is part of the asking agent's run (unlike a review, which only measures it).
     const owner = agents.get(agentId)
     if (owner) agents.set(agentId, { ...owner, runCost: (owner.runCost ?? 0) + (ledger.consultCost - before) })

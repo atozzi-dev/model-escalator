@@ -4,7 +4,7 @@ import type { LayoutMemory } from './layout'
 import type { Ledger } from './savings'
 
 // An agent as the mod tracks it: the detector's state plus the cost of its current run, which the mod meters.
-export type TrackedAgent = AgentState & { runCost?: number }
+export type TrackedAgent = AgentState & { runCost?: number; escCounted?: boolean }
 
 // Pure: the session state that must survive a module reload. The host keeps `$.state` for the session
 // (empty in a new session, intact across a hot reload), so a non-empty read at session start means reload.
@@ -48,6 +48,7 @@ export function parseSnapshot(v: unknown): Snapshot | undefined {
     if (typeof a.paused !== 'boolean') delete live.paused
     if (typeof a.deescalated !== 'boolean') delete live.deescalated
     if (typeof a.effortBoosted !== 'boolean') delete live.effortBoosted
+    if (typeof a.escCounted !== 'boolean') delete live.escCounted
     // The last request's effort: a level of the scale, a finite number, or null (the model takes none).
     const e = a.effortSeen
     if (!(e === null || EFFORTS.includes(e as never) || (typeof e === 'number' && Number.isFinite(e)))) delete live.effortSeen
@@ -71,7 +72,8 @@ export function parseSnapshot(v: unknown): Snapshot | undefined {
   })
   // Snapshots saved before blocked models existed have no such lists; a malformed one counts as empty.
   const tiers = (x: unknown): Tier[] => (Array.isArray(x) ? [...new Set(x.filter((t): t is Tier => TIERS.includes(t as string)))] : [])
-  const { graph: _g, layout: _l, drawnSeq: _d, ...rest } = v
+  const { graph: _g, layout: _l, drawnSeq: _d, ledger: _led, ...restKeys } = v
+  const rest = { ...restKeys, ledger: parseLedger(v.ledger as Record<string, unknown>) }
   const graph = parseGraph(v.graph)
   const layout = parseLayout(v.layout)
   const drawnSeq = typeof v.drawnSeq === 'number' && Number.isInteger(v.drawnSeq) && v.drawnSeq >= 0 ? v.drawnSeq : undefined
@@ -79,6 +81,20 @@ export function parseSnapshot(v: unknown): Snapshot | undefined {
     ...rest, agents, blockedTiers: tiers(v.blockedTiers), refusedSeniors: tiers(v.refusedSeniors),
     ...(graph ? { graph } : {}), ...(layout ? { layout } : {}), ...(drawnSeq !== undefined ? { drawnSeq } : {}),
   } as unknown as Snapshot
+}
+
+// The per-category breakdown is optional and read back row by row: a malformed row is dropped, a malformed map is absent.
+const ROW_KEYS = ['steps', 'actual', 'baselineHigh', 'baselineLow', 'agents', 'escalated'] as const
+function parseLedger(l: Record<string, unknown>): Record<string, unknown> {
+  const { byCategory, ...rest } = l
+  if (!isObj(byCategory)) return rest
+  const rows: Record<string, unknown> = {}
+  for (const [name, row] of Object.entries(byCategory)) {
+    if (isObj(row) && ROW_KEYS.every((k) => typeof row[k] === 'number' && Number.isFinite(row[k]) && (row[k] as number) >= 0)) {
+      rows[name] = Object.fromEntries(ROW_KEYS.map((k) => [k, row[k]]))
+    }
+  }
+  return { ...rest, byCategory: rows }
 }
 
 const NODE_KINDS = ['lead', 'worker', 'senior']

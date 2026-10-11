@@ -26,6 +26,7 @@ declare module 'claude-code' {
           recentErrors?: string[]
           consults?: number
           runCost?: number
+          escCounted?: boolean
           paused?: boolean
           progressSignals?: number
           deescalated?: boolean
@@ -43,6 +44,7 @@ declare module 'claude-code' {
           consults: number
           consultCost: number
           interventions: Record<string, number>
+          byCategory?: Record<string, { steps: number; actual: number; baselineHigh: number; baselineLow: number; agents: number; escalated: number }>
         }
         seenModels: Partial<Record<'haiku' | 'sonnet' | 'opus', string>>
         sessionTag: string
