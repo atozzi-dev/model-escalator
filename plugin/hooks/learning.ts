@@ -1,9 +1,30 @@
 import { LADDER, type Tier } from './detector'
 
-// `notAccepted` counts runs that were escalated or failed the verification gate (a run that did both counts once).
-// `updatedAt` (ms) is set only when a run is recorded with a clock; counters may be fractional once decayed.
-// `failedVerify` and `notAccepted` are absent in stats stored before the gate existed: `notAccepted` then reads as `escalated`.
-export type Cell = { runs: number; escalated: number; tokens: number; failedVerify?: number; notAccepted?: number; updatedAt?: number }
+// One cell per category and start tier. Two groups of counters, each with its own clock:
+//
+// - run counters, as of `updatedAt`: `runs`, `escalated`, `tokens`, `failedVerify`, `notAccepted`, `cost`, `costRuns`.
+//   `notAccepted` counts the runs that were not accepted (see `isAccepted`), each once whatever the reasons.
+//   `cost` is the USD spent by the runs that reported one and `costRuns` how many those were, so `cost / costRuns`
+//   is the mean cost of a run even when older runs were recorded without a cost.
+// - review counters, as of `reviewedAt`: `reviews` sampled runs reviewed and `reviewScore` the sum of their scores.
+//   `record` copies them untouched; `recordReview` decays them from `reviewedAt` before adding a review.
+//
+// Counters may be fractional once decayed. `updatedAt` (ms) is set only when a run is recorded with a clock.
+// Every optional field is absent in stats stored before it existed: `notAccepted` then reads as `escalated`, a cell
+// without `cost` has no cost evidence, a cell without `reviews` has no review.
+export type Cell = {
+  runs: number
+  escalated: number
+  tokens: number
+  failedVerify?: number
+  notAccepted?: number
+  updatedAt?: number
+  cost?: number
+  costRuns?: number
+  reviews?: number
+  reviewScore?: number
+  reviewedAt?: number
+}
 export type Stats = Record<string, Partial<Record<Tier, Cell>>>
 
 const KEYWORDS: [RegExp, string][] = [
@@ -24,11 +45,18 @@ export function categorize(subagentType: string, description: string): string {
 // Old runs fade: every counter of a cell halves after this much time without a new run.
 export const HALF_LIFE_MS = 30 * 24 * 60 * 60 * 1000
 
-// Counters of `c` as seen at `now`. Cells without `updatedAt` (stored before decay existed) or calls without `now`
-// are read as they are; a clock that went backwards never inflates counters. Never mutates `c`.
+// Share of a counter left after `ms` (0.5 per half-life). 1 without a clock, for a clock that went backwards (it never
+// inflates counters) or with decay turned off.
+function fade(ms: number | undefined, halfLifeMs: number): number {
+  return ms !== undefined && ms > 0 && halfLifeMs > 0 ? 0.5 ** (ms / halfLifeMs) : 1
+}
+
+// Run counters of `c` as seen at `now`. Cells without `updatedAt` (stored before decay existed) or calls without `now`
+// are read as they are. Review counters are left as they are: they have their own clock. Never mutates `c`.
 function decayed(c: Cell, now: number | undefined, halfLifeMs: number): Cell {
-  if (now === undefined || c.updatedAt === undefined || now <= c.updatedAt || !(halfLifeMs > 0)) return c
-  const f = 0.5 ** ((now - c.updatedAt) / halfLifeMs)
+  if (now === undefined || c.updatedAt === undefined) return c
+  const f = fade(now - c.updatedAt, halfLifeMs)
+  if (f === 1) return c
   return {
     ...c,
     runs: c.runs * f,
@@ -36,9 +64,46 @@ function decayed(c: Cell, now: number | undefined, halfLifeMs: number): Cell {
     tokens: c.tokens * f,
     ...(c.failedVerify !== undefined ? { failedVerify: c.failedVerify * f } : {}),
     ...(c.notAccepted !== undefined ? { notAccepted: c.notAccepted * f } : {}),
+    ...(c.cost !== undefined ? { cost: c.cost * f } : {}),
+    ...(c.costRuns !== undefined ? { costRuns: c.costRuns * f } : {}),
   }
 }
 
+const EMPTY: Cell = { runs: 0, escalated: 0, tokens: 0 }
+
+// Thresholds of the learning rules.
+// - `minRuns`: decayed runs (and, for the cost rule, decayed priced runs) a tier needs before its evidence counts.
+// - `maxEscalationRate`: highest share of not-accepted runs a tier may have before the rule climbs over it. The name
+//   is historical: the rate is the not-accepted rate (escalated, failed verification or reviewed below the bar).
+// - `minReviewScore`: lowest review score (1 to 5) of an accepted run; 3 is "works but needs changes".
+// - `costMargin`: the cost rule picks another tier than the failure-rate rule only when that tier's expected cost per
+//   accepted run is lower by more than this share, so noise in the estimates does not make the choice flap.
+export const LEARN = { minRuns: 5, maxEscalationRate: 0.4, minReviewScore: 3, costMargin: 0.1 }
+
+const validScore = (s: unknown): s is number => typeof s === 'number' && s >= 1 && s <= 5
+
+// What is known of one run when it is judged. `reviewScore` only when the run was sampled and its review scored.
+export type Outcome = { escalated: boolean; verifyFailed?: boolean; reviewScore?: number }
+
+// A run is accepted when it was not escalated, passed the verification gate when one ran, and, when it was reviewed,
+// scored at least `minScore`. A score outside 1-5 is no review at all.
+export function isAccepted(o: Outcome, minScore = LEARN.minReviewScore): boolean {
+  if (o.escalated || o.verifyFailed === true) return false
+  return !(validScore(o.reviewScore) && o.reviewScore < minScore)
+}
+
+export type RecordOptions = {
+  // USD the run cost, escalation and consults included. Absent (or not a finite number >= 0) when unknown.
+  cost?: number
+  // Score of the run's review when it landed before the run was recorded: it then counts in the acceptance here,
+  // and `recordReview` must not flip the run again (see the note above `recordReview`).
+  reviewScore?: number
+  minScore?: number
+}
+
+// Adds one run to the cell of `category` and start `tier`: decays the run counters to `now` first, then counts the
+// run and, when it is not accepted, one not-accepted run. Review counters and any unknown field are kept as they
+// are. Never mutates `stats`.
 export function record(
   stats: Stats,
   category: string,
@@ -48,21 +113,82 @@ export function record(
   verifyFailed = false,
   now?: number,
   halfLifeMs = HALF_LIFE_MS,
+  opts: RecordOptions = {},
 ): Stats {
   const row = { ...(stats[category] ?? {}) }
-  const c = decayed(row[tier] ?? { runs: 0, escalated: 0, tokens: 0 }, now, halfLifeMs)
+  const c = decayed(row[tier] ?? EMPTY, now, halfLifeMs)
+  const accepted = isAccepted({ escalated, verifyFailed, reviewScore: opts.reviewScore }, opts.minScore)
+  const cost = opts.cost
+  const priced = typeof cost === 'number' && Number.isFinite(cost) && cost >= 0
   row[tier] = {
+    ...c,
     runs: c.runs + 1,
     escalated: c.escalated + (escalated ? 1 : 0),
     tokens: c.tokens + tokens,
     failedVerify: (c.failedVerify ?? 0) + (verifyFailed ? 1 : 0),
-    notAccepted: (c.notAccepted ?? c.escalated) + (escalated || verifyFailed ? 1 : 0),
-    ...(now !== undefined ? { updatedAt: now } : c.updatedAt !== undefined ? { updatedAt: c.updatedAt } : {}),
+    notAccepted: (c.notAccepted ?? c.escalated) + (accepted ? 0 : 1),
+    ...(priced ? { cost: (c.cost ?? 0) + cost, costRuns: (c.costRuns ?? 0) + 1 } : {}),
+    ...(now !== undefined ? { updatedAt: now } : {}),
   }
   return { ...stats, [category]: row }
 }
 
-export const LEARN = { minRuns: 5, maxEscalationRate: 0.4 }
+// --- Reviews (late acceptance) ---
+//
+// A sampled run is reviewed in the background, so its score may land before or after the run is recorded. Each run
+// must count as not accepted at most once, whatever the order. The caller keeps, per sampled run and only in memory,
+// whether the run was recorded yet and, if so, whether it was counted as accepted (`isAccepted` of its outcome
+// without the review) and when; both writes go through the same serialized store queue.
+//
+// - Review first: `recordReview` with `runAccepted` absent adds the score to the review counters only; the score is
+//   then passed to `record` as `reviewScore`, which counts the run as not accepted if the score is below the bar.
+// - Run first: `record` counts the run on its other signals; `recordReview` with `runAccepted: true` (the run was
+//   counted as accepted) moves it to not accepted if the score is below the bar. With `runAccepted: false` (already
+//   not accepted: escalated or failed verification) the score only enters the review counters.
+//
+// The flip adds the run's weight today, `0.5 ^ ((now - runAt) / halfLife)` (1 without `runAt`), to the decayed
+// `notAccepted`: the run already faded in `runs` by that much, so the not-accepted rate moves exactly as if the run
+// had been recorded as not accepted. `notAccepted` never exceeds `runs`, so even a repeated flip of the same run
+// cannot count more failures than runs.
+
+export type ReviewOptions = {
+  now?: number
+  halfLifeMs?: number
+  // true when the reviewed run was already recorded and counted as accepted.
+  runAccepted?: boolean
+  // When that run was recorded (ms).
+  runAt?: number
+  minScore?: number
+}
+
+// Adds one review score (1 to 5) to the cell of `category` and start `tier`, and flips its run to not accepted when
+// `runAccepted` and the score is below `minScore`. A review may land before any run of the cell: the cell then
+// starts with no runs. An invalid score returns `stats` itself. Never mutates `stats`.
+export function recordReview(stats: Stats, category: string, tier: Tier, score: number, opts: ReviewOptions = {}): Stats {
+  if (!validScore(score)) return stats
+  const { now, halfLifeMs = HALF_LIFE_MS, runAccepted, runAt, minScore = LEARN.minReviewScore } = opts
+  const row = { ...(stats[category] ?? {}) }
+  const raw = row[tier] ?? EMPTY
+  const flip = runAccepted === true && score < minScore
+  let c: Cell = flip ? decayed(raw, now, halfLifeMs) : { ...raw }
+  if (flip) {
+    const w = now !== undefined && runAt !== undefined ? fade(now - runAt, halfLifeMs) : 1
+    const before = c.notAccepted ?? c.escalated
+    c = {
+      ...c,
+      notAccepted: Math.max(before, Math.min(c.runs, before + w)),
+      ...(now !== undefined && (c.updatedAt === undefined || now > c.updatedAt) ? { updatedAt: now } : {}),
+    }
+  }
+  const g = now !== undefined && raw.reviewedAt !== undefined ? fade(now - raw.reviewedAt, halfLifeMs) : 1
+  row[tier] = {
+    ...c,
+    reviews: (raw.reviews ?? 0) * g + 1,
+    reviewScore: (raw.reviewScore ?? 0) * g + score,
+    ...(now !== undefined && (raw.reviewedAt === undefined || now > raw.reviewedAt) ? { reviewedAt: now } : {}),
+  }
+  return { ...stats, [category]: row }
+}
 
 const failures = (c: Cell): number => c.notAccepted ?? c.escalated
 
@@ -82,11 +208,72 @@ function climb(stats: Stats, category: string, requested: Tier, now: number | un
   }
 }
 
-// Climbs the ladder while the evidence says the tier fails this category too often.
+// --- Cost per accepted run ---
+//
+// For a tier with enough priced runs (decayed `costRuns` >= `minRuns`, decayed `runs` >= `minRuns`):
+//   mean cost of a run       m = cost / costRuns
+//   acceptance probability   p = (accepted + 1) / (runs + 2), accepted = runs - notAccepted
+//   cost per accepted run    E = m / p
+// `p` is the posterior mean of Beta(accepted + 1, notAccepted + 1), the same uniform prior exploration samples from,
+// so a handful of runs is pulled towards 1/2 instead of reading as 0% or 100%. `m / p` counts the rework: a run that
+// is not accepted has to be done again, on average 1/p runs per accepted one. The cost of a run is what the agent
+// spent in total, so an escalation inside the run (hot swap, senior consults) is already part of `m`.
+
+// Expected USD per accepted run on the tier of `c`, or undefined without enough priced runs. Never throws.
+export function costPerAccepted(c: Cell, now?: number, halfLifeMs = HALF_LIFE_MS): number | undefined {
+  const d = decayed(c, now, halfLifeMs)
+  const runs = d.runs
+  const priced = d.costRuns ?? 0
+  const cost = d.cost
+  if (!(runs >= LEARN.minRuns && priced >= LEARN.minRuns) || typeof cost !== 'number' || !(cost >= 0)) return undefined
+  const accepted = Math.max(0, Math.min(runs, runs - failures(d)))
+  const e = cost / priced / ((accepted + 1) / (runs + 2))
+  return Number.isFinite(e) ? e : undefined
+}
+
+type Passed = { tier: Tier; cell: Cell; beat?: number }
+type Learned = { tier: Tier; passed: Passed[]; basis?: 'cost' }
+
+// The tier learning picks, and the tiers it passed over (cheapest first, decayed cells).
+//
+// The failure-rate rule (`climb`) picks a tier L. The cost rule then looks at the tiers from `requested` upward that
+// all have a cost per accepted run, stopping at the first one without: it decides only when that unbroken run of
+// priced tiers reaches L, i.e. every tier the rule looked at is priced. Otherwise, or with `byCost` false, L stands
+// (the behaviour before costs were recorded). When it decides, it takes the tier with the lowest E (the cheaper one on
+// a tie), but replaces L only when E is lower than E(L) by more than `costMargin`. It never goes below `requested`
+// and may land above L (a cheap tier that accepts often but runs long) or below it (one that fails more than 40% of
+// the time but is still cheaper per accepted run). `beat` on a passed tier is m / E(chosen): the acceptance it would
+// need to cost no more per accepted run than the chosen tier, used by exploration.
+function learn(stats: Stats, category: string, requested: Tier, now: number | undefined, halfLifeMs: number, byCost: boolean): Learned {
+  const rule = climb(stats, category, requested, now, halfLifeMs)
+  if (!byCost) return rule
+  const priced: { tier: Tier; e: number; m: number; cell: Cell }[] = []
+  for (let i = LADDER.indexOf(requested); i >= 0 && i < LADDER.length; i++) {
+    const tier = LADDER[i]!
+    const raw = stats[category]?.[tier]
+    const e = raw === undefined ? undefined : costPerAccepted(raw, now, halfLifeMs)
+    if (raw === undefined || e === undefined) break
+    const cell = decayed(raw, now, halfLifeMs)
+    priced.push({ tier, e, m: (cell.cost ?? 0) / (cell.costRuns ?? 1), cell })
+  }
+  const atRule = priced.find((p) => p.tier === rule.tier)
+  if (atRule === undefined) return rule
+  let best = atRule
+  for (const p of priced) if (p.e < best.e || (p.e === best.e && LADDER.indexOf(p.tier) < LADDER.indexOf(best.tier))) best = p
+  if (best !== atRule && !(best.e < atRule.e * (1 - LEARN.costMargin))) best = atRule
+  const passed = priced
+    .filter((p) => LADDER.indexOf(p.tier) < LADDER.indexOf(best.tier))
+    .map((p) => ({ tier: p.tier, cell: p.cell, beat: best.e > 0 ? p.m / best.e : Infinity }))
+  return { tier: best.tier, passed, basis: 'cost' }
+}
+
+// The tier to start on for `category` when `requested` was asked. With `byCost` (the default) and enough priced runs
+// on every tier involved, the tier with the lowest expected cost per accepted run; otherwise the failure-rate rule,
+// which climbs the ladder while a tier's not-accepted rate is above `maxEscalationRate` over at least `minRuns` runs.
 // With `now`, old evidence is decayed first: the rate is unchanged (all counters fade together) but a category left
-// alone long enough drops below `minRuns` and falls back to the requested tier.
-export function recommend(stats: Stats, category: string, requested: Tier, now?: number, halfLifeMs = HALF_LIFE_MS): Tier {
-  return climb(stats, category, requested, now, halfLifeMs).tier
+// alone long enough drops below `minRuns` and falls back to the requested tier. Never throws.
+export function recommend(stats: Stats, category: string, requested: Tier, now?: number, halfLifeMs = HALF_LIFE_MS, byCost = true): Tier {
+  return learn(stats, category, requested, now, halfLifeMs, byCost).tier
 }
 
 // --- Exploration ---
@@ -103,10 +290,16 @@ export function recommend(stats: Stats, category: string, requested: Tier, now?:
 //
 // Exploration only undoes what learning raised: it never goes below the requested tier, so a model asked for at spawn
 // is never replaced by a cheaper one.
+//
+// When the cost rule decided, "good enough" means "no more expensive per accepted run than the chosen tier": a passed
+// tier with mean cost m beats E(chosen) when its acceptance exceeds m / E(chosen), i.e. when its failure rate is below
+// 1 - m / E(chosen). The chance is the same Beta posterior CDF at that threshold instead of at `maxEscalationRate`
+// (0 when even a perfect acceptance could not beat the chosen tier).
 
 export type Reason = 'requested' | 'raised' | 'explore'
-// `tier` is the tier to start on; `learned` is what the plain rule (`recommend`) would pick.
-export type Choice = { tier: Tier; reason: Reason; learned: Tier }
+// `tier` is the tier to start on; `learned` is what `recommend` would pick; `basis` is 'cost' when the cost per
+// accepted run decided, absent when the failure-rate rule did.
+export type Choice = { tier: Tier; reason: Reason; learned: Tier; basis?: 'cost' }
 export type ExploreOptions = {
   now?: number
   halfLifeMs?: number
@@ -114,6 +307,8 @@ export type ExploreOptions = {
   rand?: () => number
   // Weight in [0, 1] applied to every exploration chance: 1 is plain Thompson sampling, 0 turns exploration off.
   explore?: number
+  // false: only the failure-rate rule, as before costs were recorded. Default true.
+  byCost?: boolean
 }
 
 // Lanczos approximation of ln(Gamma(x)) for x > 0.
@@ -174,15 +369,27 @@ export function goodEnoughChance(c: Cell, now?: number, halfLifeMs = HALF_LIFE_M
 // cheapest first, one uniform draw each; the random source is not consumed when nothing was raised.
 export function recommendWithExploration(stats: Stats, category: string, requested: Tier, opts: ExploreOptions = {}): Choice {
   const { now, halfLifeMs = HALF_LIFE_MS, rand } = opts
-  const { tier: learned, passed } = climb(stats, category, requested, now, halfLifeMs)
-  if (passed.length === 0) return { tier: learned, reason: 'requested', learned }
+  const { tier: learned, passed, basis } = learn(stats, category, requested, now, halfLifeMs, opts.byCost !== false)
+  const tag = basis !== undefined ? { basis } : {}
+  if (passed.length === 0) return { tier: learned, reason: 'requested', learned, ...tag }
   const w = opts.explore ?? 1
   const weight = w >= 0 ? Math.min(1, w) : 0
   if (rand !== undefined && weight > 0) {
     // cells in `passed` are already decayed
-    for (const { tier, cell } of passed) if (rand() < weight * goodEnoughChance(cell)) return { tier, reason: 'explore', learned }
+    for (const { tier, cell, beat } of passed) {
+      const chance = beat === undefined ? goodEnoughChance(cell) : beatChance(cell, beat)
+      if (rand() < weight * chance) return { tier, reason: 'explore', learned, ...tag }
+    }
   }
-  return { tier: learned, reason: 'raised', learned }
+  return { tier: learned, reason: 'raised', learned, ...tag }
+}
+
+// Posterior probability that the (already decayed) cell's acceptance is above `need`.
+function beatChance(c: Cell, need: number): number {
+  if (!(need < 1)) return 0
+  const bad = Math.max(0, failures(c))
+  const good = Math.max(0, c.runs - bad)
+  return betaCdf(1 - need, bad + 1, good + 1)
 }
 
 // Small seeded PRNG (mulberry32): uniform numbers in [0, 1), the same sequence for the same seed.
