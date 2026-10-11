@@ -1,13 +1,13 @@
 import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config'
-import { afterHelp, agentLabel, canAskForHelp, classifyFailure, clipLabel, consultLimit, countStep, EFFORTS, escalated, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_AGENT_NAME, MAX_LEAD_NOTICES, newAgent, noteProgress, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
+import { LADDER, afterHelp, agentLabel, canAskForHelp, classifyFailure, clipLabel, consultLimit, countStep, EFFORTS, escalated, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_AGENT_NAME, MAX_LEAD_NOTICES, newAgent, noteProgress, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
 import { buildDossier, inputFromState } from './dossier'
-import { categorize, formatStats, mulberry32, recommendWithExploration, record, type Stats } from './learning'
+import { categorize, costPerAccepted, formatStats, isAccepted, mulberry32, recommendWithExploration, record, recordReview, type Stats } from './learning'
 import { createQueue } from './queue'
-import { addReview, buildReviewPrompt, carryReview, diffArgv, editedPath, formatReviews, isCheaper, parseReview, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun } from './review'
-import { parseSnapshot, type Snapshot } from './state'
-import { addConsult, addIntervention, addStep, asUsage, emptyLedger, report, statusLine, type Ledger, type Usage } from './savings'
+import { buildReviewPrompt, diffArgv, editedPath, formatReviews, isCheaper, parseReview, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun } from './review'
+import { parseSnapshot, type Snapshot, type TrackedAgent } from './state'
+import { addConsult, addIntervention, addStep, asUsage, cost as stepCost, emptyLedger, report, statusLine, type Ledger, type Usage } from './savings'
 
 export const HELP_TOOL = 'mcp__model-escalator__ask_for_help'
 const STATS_KEY = 'stats'
@@ -42,11 +42,20 @@ const pendingReviews = new Set<Promise<void>>()
 // Module state only: after a reload the review falls back to the whole working tree diff.
 const editedFiles = new Map<string, string[]>()
 
+// What is known, in memory only, of each sampled run (key `agentId:turnId`) between its recording and its review,
+// which land in either order: the score when the review came first, whether the run was counted as accepted (and
+// when) when the run came first. An entry is dropped once both sides are in; after a module reload the map is
+// empty, which loses at most one flip and never counts a run twice. Capped, oldest dropped first.
+type ReviewedRun = { accepted?: boolean; at?: number; score?: number }
+const reviewRuns = new Map<string, ReviewedRun>()
+const MAX_REVIEWED_RUNS = 200
+const runKey = (id: string, turnId: unknown): string => `${id}:${typeof turnId === 'string' ? turnId : ''}`
+
 // Messages to the lead sent this session (capped by MAX_LEAD_NOTICES) and the sends still in flight.
 let leadNotices = 0
 const pendingNotices = new Set<Promise<void>>()
 
-const agents = new Map<string, AgentState>()
+const agents = new Map<string, TrackedAgent>()
 // Agents for which a consult limit was already logged (one line per agent).
 const limitNoted = new Set<string>()
 // Subjects of the shared task list, by task id, as its answers showed them (most recent kept): what an
@@ -165,6 +174,7 @@ export function resetState(): void {
   reviewQueue = createQueue()
   pendingReviews.clear()
   editedFiles.clear()
+  reviewRuns.clear()
 }
 
 function snapshot(): Snapshot {
@@ -290,7 +300,7 @@ export const register: Register = (on, options) => {
     if (arg === 'stats') {
       const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
       const reviews = formatReviews(stats)
-      return { text: 'Learned stats per category (runs / escalated):\n' + formatStats(stats, await clockNow($)) +
+      return { text: 'Learned stats per category (runs / escalated):\n' + formatStats(stats, await clockNow($), halfLifeMs()) +
         (reviews ? '\n\nSenior review scores of sampled runs (1-5):\n' + reviews : '') }
     }
     if (arg === 'reset') {
@@ -317,7 +327,7 @@ export const register: Register = (on, options) => {
       const choice = mode === 'baseline'
         ? { tier: baseline, reason: 'requested' as const, learned: baseline }
         : recommendWithExploration(stats, category, asked, {
-          now: await clockNow($), halfLifeMs: halfLifeMs(), explore: config.explore,
+          now: await clockNow($), halfLifeMs: halfLifeMs(), explore: config.explore, byCost: config.learnByCost,
           ...(config.explore > 0 ? { rand: explorationRandom() } : {}),
         })
       // In observe mode the model stays as asked: exploring is only logged, the learned tier is what "would" happen.
@@ -328,6 +338,7 @@ export const register: Register = (on, options) => {
         if (mode !== 'observe') ev = { ...e, model: best }
         await $.ui.log(`${label}: ${asked} -> ${best}${mode === 'observe' ? ' (would)' : ''}`)
       }
+      if (choice.basis === 'cost') await $.ui.log(`${label}: chosen by cost per accepted run (${costLine(stats, category, asked, await clockNow($))})`)
       if (exploring) {
         await $.ui.log(mode === 'observe'
           ? `${label}: would explore ${choice.tier} for ${category} (learned ${choice.learned})`
@@ -447,6 +458,12 @@ export const register: Register = (on, options) => {
     try {
       const counted = e.agentId ? agents.get(e.agentId) : undefined
       if (e.agentId && counted && !counted.paused && (mode === 'active' || mode === 'observe')) agents.set(e.agentId, countStep(counted, config))
+      // The request's cost goes to the agent's run, on whatever model it ran (an escalation is part of the run's cost).
+      const u = asUsage(r.usage)
+      const owner = e.agentId ? agents.get(e.agentId) : undefined
+      if (e.agentId && owner && u && watching()) {
+        agents.set(e.agentId, { ...owner, runCost: (owner.runCost ?? 0) + stepCost(u, config.prices[tierOf(r.usage?.model)], '5m') })
+      }
     } catch { /* the stream must go on */ }
     if (mode !== 'off' && r.usage) {
       ledger = addStep(ledger, r.usage as Usage, tierOf(r.usage.model), baseline, Boolean(e.agentId), config)
@@ -464,20 +481,24 @@ export const register: Register = (on, options) => {
         if (mode !== 'baseline') {
           const wasEscalated = escalated(a, config.levels)
           const argv = splitCommand(config.verifyCommand)
+          // Read loosely: older published types may not declare these fields.
+          const turn = e as { turnId?: unknown; isAborted?: unknown }
+          const key = runKey(id, turn.turnId)
+          // Before the outcome is recorded, so the run is known as sampled when it is.
+          startReview($, a, turn.turnId, turn.isAborted === true)
           if (argv.length === 0) {
-            await recordOutcome($, a, wasEscalated, false)
+            await recordOutcome($, a, wasEscalated, false, key)
           } else {
             // The agent's run is over and the lead is waiting for its result: verify in the background,
             // one command at a time, and record the outcome (once) when it is known.
-            const p: Promise<void> = verifyQueue(() => verifyAndRecord($, a, wasEscalated, argv))
+            const p: Promise<void> = verifyQueue(() => verifyAndRecord($, a, wasEscalated, argv, key))
               .catch(() => undefined).finally(() => { pendingVerifications.delete(p) })
             pendingVerifications.add(p)
           }
-          // Read loosely: older published types may not declare these fields.
-          const turn = e as { turnId?: unknown; isAborted?: unknown }
-          startReview($, a, turn.turnId, turn.isAborted === true)
         }
-        agents.set(id, { ...(agents.get(id) ?? a), level: 0, score: 0, stepsSinceAction: 0, deescalated: false, progressSignals: 0, running: false, inFlight: 0, stalled: false })
+        // The run is over: its cost was taken above, the next run starts from none.
+        const { runCost: _spent, ...rest } = agents.get(id) ?? a
+        agents.set(id, { ...rest, level: 0, score: 0, stepsSinceAction: 0, deescalated: false, progressSignals: 0, running: false, inFlight: 0, stalled: false })
         await save($)
         await $.ui.status(statusLine(ledger))
       } catch { /* best effort */ }
@@ -647,11 +668,31 @@ async function checkStalls($: EngineInterface): Promise<void> {
   } catch { /* a failing check must never disturb the session */ }
 }
 
-async function recordOutcome($: EngineInterface, a: AgentState, wasEscalated: boolean, verifyFailed: boolean): Promise<void> {
+// The cost per accepted run of each tier from `asked` upward that has one, for the spawn log: "haiku $0.10, sonnet $0.33".
+function costLine(stats: Stats, category: string, asked: Tier, now: number | undefined): string {
+  const parts: string[] = []
+  for (let i = LADDER.indexOf(asked); i >= 0 && i < LADDER.length; i++) {
+    const t = LADDER[i]!
+    const cell = stats[category]?.[t]
+    const e = cell === undefined ? undefined : costPerAccepted(cell, now, halfLifeMs())
+    if (e !== undefined) parts.push(`${t} $${e < 0.01 ? e.toFixed(4) : e.toFixed(2)}`)
+  }
+  return parts.join(', ')
+}
+
+// Records one finished run: its cost (the agent's requests and consults of the run, not the review), and whether it
+// was accepted. A review that already landed counts in the acceptance here; one that has not is told how the run
+// was counted (see reviewRun), so a late low score moves the run to not accepted exactly once.
+async function recordOutcome($: EngineInterface, a: TrackedAgent, wasEscalated: boolean, verifyFailed: boolean, key: string): Promise<void> {
   await storeQueue(async () => {
     const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
-    const next = record(stats, a.category, a.startTier, wasEscalated, 0, verifyFailed, await clockNow($), halfLifeMs())
-    await $.store.set(STATS_KEY, carryReview(stats, next, a.category, a.startTier))
+    const now = await clockNow($)
+    const e = reviewRuns.get(key)
+    const next = record(stats, a.category, a.startTier, wasEscalated, 0, verifyFailed, now, halfLifeMs(),
+      { cost: a.runCost, reviewScore: e?.score, minScore: config.minReviewScore })
+    if (e?.score !== undefined) reviewRuns.delete(key)
+    else if (e) reviewRuns.set(key, { accepted: isAccepted({ escalated: wasEscalated, verifyFailed }, config.minReviewScore), ...(now !== undefined ? { at: now } : {}) })
+    await $.store.set(STATS_KEY, next)
   })
 }
 
@@ -677,9 +718,14 @@ function startReview($: EngineInterface, a: AgentState, turnId: unknown, aborted
     const files = editedFiles.get(a.id) ?? []
     editedFiles.delete(a.id)
     if (!watching() || aborted || config.reviewRate <= 0 || !isCheaper(a.startTier, baseline)) return
-    if (!sampleRun(config.reviewRate, sessionTag, `${a.id}:${typeof turnId === 'string' ? turnId : ''}`)) return
-    const p: Promise<void> = reviewQueue(() => reviewRun($, a, files))
-      .catch(() => undefined).finally(() => { pendingReviews.delete(p) })
+    const key = runKey(a.id, turnId)
+    if (!sampleRun(config.reviewRate, sessionTag, key)) return
+    reviewRuns.set(key, {})
+    if (reviewRuns.size > MAX_REVIEWED_RUNS) reviewRuns.delete(reviewRuns.keys().next().value as string)
+    const p: Promise<void> = reviewQueue(() => reviewRun($, a, files, key))
+      .catch(() => undefined)
+      // Without a score there is nothing to wait for: the entry goes (with a score it stays until the run is recorded).
+      .finally(() => { if (reviewRuns.get(key)?.score === undefined) reviewRuns.delete(key); pendingReviews.delete(p) })
     pendingReviews.add(p)
   } catch { /* the review is optional */ }
 }
@@ -702,7 +748,7 @@ async function reviewDiff($: EngineInterface, files: readonly string[]): Promise
 // One sampled review: the agent's diff and task to the review model with the rubric, its score recorded in the
 // stats of the run's category and start tier, its cost in the ledger like a consult. A refused or unscored reply
 // records nothing. Never throws.
-async function reviewRun($: EngineInterface, a: AgentState, files: readonly string[]): Promise<void> {
+async function reviewRun($: EngineInterface, a: AgentState, files: readonly string[], key: string): Promise<void> {
   try {
     const model = config.reviewModel || config.senior
     if (refusedSeniors.includes(tierOf(model))) return
@@ -740,7 +786,18 @@ async function reviewRun($: EngineInterface, a: AgentState, files: readonly stri
     }
     await storeQueue(async () => {
       const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
-      await $.store.set(STATS_KEY, addReview(stats, a.category, a.startTier, review.score, await clockNow($), halfLifeMs()))
+      const now = await clockNow($)
+      const e = reviewRuns.get(key)
+      if (e?.accepted !== undefined) {
+        // The run is recorded: a low score moves it to not accepted, and the entry has done its job.
+        await $.store.set(STATS_KEY, recordReview(stats, a.category, a.startTier, review.score,
+          { now, halfLifeMs: halfLifeMs(), runAccepted: e.accepted, runAt: e.at, minScore: config.minReviewScore }))
+        reviewRuns.delete(key)
+      } else {
+        // The run is not recorded yet: its recording reads the score from the entry.
+        await $.store.set(STATS_KEY, recordReview(stats, a.category, a.startTier, review.score, { now, halfLifeMs: halfLifeMs() }))
+        reviewRuns.set(key, { score: review.score })
+      }
     })
     try {
       const reasons = review.reasons.length > 0 ? `: ${review.reasons.join('; ')}` : ''
@@ -759,7 +816,7 @@ function outputTail(r: { stdout?: unknown; stderr?: unknown }): string {
 
 // Runs the user's verification command (argv from the user's own option, never from agent output)
 // in the session's working directory and records the run as accepted or not. Never throws.
-async function verifyAndRecord($: EngineInterface, a: AgentState, wasEscalated: boolean, argv: string[]): Promise<void> {
+async function verifyAndRecord($: EngineInterface, a: TrackedAgent, wasEscalated: boolean, argv: string[], key: string): Promise<void> {
   // Only a command that ran and exited non-zero is a failed verification. One that could not start or
   // outlived the timeout (the call rejects) says nothing about the agent: the run is recorded as if no
   // verification were configured, and the user is told once per session to check the option.
@@ -786,7 +843,7 @@ async function verifyAndRecord($: EngineInterface, a: AgentState, wasEscalated: 
       if (failed) await $.ui.toast(`${shortName(a)}: verification failed`)
     }
   } catch { /* the note is best effort */ }
-  try { await recordOutcome($, a, wasEscalated, failed) } catch { /* best effort */ }
+  try { await recordOutcome($, a, wasEscalated, failed, key) } catch { /* best effort */ }
 }
 
 type ModelReply = string | { isAnswered: true; text: string; usage?: { output_tokens?: number } } | { isAnswered: false; reason?: string; status?: number | null; error?: string; usage?: { output_tokens?: number } }
@@ -891,12 +948,12 @@ async function consult($: EngineInterface, s: AgentState, extra = ''): Promise<s
   const diffStat = await gitDiffStat($)
   // A senior the account refused (not allowed, unknown) is skipped for the rest of the session.
   const first = pickSenior(config.senior, refusedSeniors)
-  let advice = first ? await askSenior($, first, buildDossier(inputFromState(s, { diffStat, extra }))) : ''
+  let advice = first ? await askSenior($, first, buildDossier(inputFromState(s, { diffStat, extra })), s.id) : ''
   const second = first ? otherSenior(first) : undefined
   if (!advice && second && !refusedSeniors.includes(tierOf(second))) {
     // A refusal (often the safety classifier) is intermittent and model dependent: one retry on the other
     // senior model, with a tighter dossier (same diff stat, git is not run again).
-    advice = await askSenior($, second, buildDossier(inputFromState(s, { diffStat, extra }), RETRY_DOSSIER_LIMITS))
+    advice = await askSenior($, second, buildDossier(inputFromState(s, { diffStat, extra }), RETRY_DOSSIER_LIMITS), s.id)
   }
   if (!advice) {
     try {
@@ -913,7 +970,7 @@ ${advice}`)
 }
 
 // One senior call, recorded in the ledger. Returns the advice, or '' when the model gave none. Never throws.
-async function askSenior($: EngineInterface, model: string, prompt: string): Promise<string> {
+async function askSenior($: EngineInterface, model: string, prompt: string, agentId: string): Promise<string> {
   try {
     // The engine answers { isAnswered, text, usage }; the published 2.1.277 types (used by CI)
     // still say string, hence the wider local type.
@@ -932,7 +989,11 @@ async function askSenior($: EngineInterface, model: string, prompt: string): Pro
       }
     }
     const usage = typeof reply === 'string' ? undefined : asUsage(reply.usage)
+    const before = ledger.consultCost
     ledger = addConsult(ledger, { usage, promptChars: prompt.length + SENIOR_SYSTEM.length, replyChars: advice.length }, tierOf(model), config)
+    // The consult is part of the asking agent's run (unlike a review, which only measures it).
+    const owner = agents.get(agentId)
+    if (owner) agents.set(agentId, { ...owner, runCost: (owner.runCost ?? 0) + (ledger.consultCost - before) })
     return advice
   } catch {
     return ''

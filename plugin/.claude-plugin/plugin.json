@@ -139,6 +139,18 @@
       "description": "From 0 to 1: how often a task starts on the cheaper model that learning had ruled out, to check whether it became good enough. It only lowers a tier that learning raised, never below the model you asked for, and is rarer the stronger the evidence (Thompson sampling). Some tasks deliberately run on a weaker model. 0 is off.",
       "default": 0
     },
+    "learnByCost": {
+      "type": "boolean",
+      "title": "Choose the model by cost per accepted run",
+      "description": "Once the mod has enough priced runs of a task category on the models involved, a task starts on the model with the lowest cost per accepted run (the mean cost of a run divided by the share of runs that were accepted). Off keeps the rule that only looks at how often a model failed.",
+      "default": true
+    },
+    "minReviewScore": {
+      "type": "number",
+      "title": "Lowest review score of an accepted run",
+      "description": "From 1 to 5: a run reviewed below this score (reviewRate) counts as not accepted when the mod learns which model to use. 3 is works but needs changes.",
+      "default": 3
+    },
     "effortStep": {
       "type": "boolean",
       "title": "Raise the effort before a model swap",

@@ -1,8 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
 import { resetState } from '../hooks/register'
 import { parseConfig } from '../hooks/config'
-import { record, type Stats } from '../hooks/learning'
-import { addReview, buildReviewPrompt, carryReview, diffArgv, editedPath, formatReviews, isCheaper, parseReview, REVIEW_SYSTEM, sampleRun, type ReviewCell } from '../hooks/review'
+import { record, recordReview, type Stats } from '../hooks/learning'
+import { buildReviewPrompt, diffArgv, editedPath, formatReviews, isCheaper, parseReview, REVIEW_SYSTEM, sampleRun } from '../hooks/review'
 
 // ---------- pure helpers ----------
 
@@ -93,42 +93,11 @@ test('parseReview: score line anywhere, at most three reasons, invalid scores re
   expect(parseReview('SCORE: 3\n' + 'x'.repeat(1000))!.reasons[0]!.length <= 200).toBe(true)
 })
 
-test('addReview: count and score sum per category and tier, old reviews fade, other counters kept', () => {
-  let s: Stats = record({}, 'gp:tests', 'haiku', false, 0)
-  s = addReview(s, 'gp:tests', 'haiku', 4, 1000)
-  s = addReview(s, 'gp:tests', 'haiku', 2, 1000)
-  const c = s['gp:tests']!.haiku as ReviewCell
-  expect(c.runs).toBe(1)
-  expect(c.reviews).toBe(2)
-  expect(c.reviewScore).toBe(6)
-  expect(c.reviewedAt).toBe(1000)
-  const day = 86_400_000
-  const later = addReview(s, 'gp:tests', 'haiku', 5, 1000 + 30 * day, 30 * day)['gp:tests']!.haiku as ReviewCell
-  expect(Math.abs(later.reviews! - 2) < 1e-9).toBe(true)
-  expect(Math.abs(later.reviewScore! - 8) < 1e-9).toBe(true)
-  // A review can land before the run itself is recorded: the cell starts empty.
-  const fresh = addReview({}, 'gp:docs', 'sonnet', 3)['gp:docs']!.sonnet as ReviewCell
-  expect(fresh.runs).toBe(0)
-  expect(fresh.reviews).toBe(1)
-})
-
-test('carryReview: a run recorded after a review keeps the review counters', () => {
-  const before = addReview(record({}, 'gp:tests', 'haiku', false, 0), 'gp:tests', 'haiku', 4, 1000)
-  const after = record(before, 'gp:tests', 'haiku', true, 0, false, 2000)
-  const kept = carryReview(before, after, 'gp:tests', 'haiku')['gp:tests']!.haiku as ReviewCell
-  expect(kept.runs).toBe(2)
-  expect(kept.escalated).toBe(1)
-  expect(kept.reviews).toBe(1)
-  expect(kept.reviewScore).toBe(4)
-  const none = record({}, 'x', 'haiku', false, 0)
-  expect(carryReview({}, none, 'x', 'haiku')).toEqual(none)
-})
-
 test('formatReviews: average per category and tier, empty without reviews', () => {
   expect(formatReviews({})).toBe('')
   expect(formatReviews(record({}, 'gp:tests', 'haiku', false, 0))).toBe('')
-  let s = addReview({}, 'gp:tests', 'haiku', 4)
-  s = addReview(s, 'gp:tests', 'haiku', 3)
+  let s = recordReview({}, 'gp:tests', 'haiku', 4)
+  s = recordReview(s, 'gp:tests', 'haiku', 3)
   expect(formatReviews(s)).toBe('- gp:tests haiku: average 3.5/5 over 2 reviews')
 })
 

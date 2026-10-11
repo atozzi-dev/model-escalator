@@ -1,10 +1,13 @@
 import { clipLabel, EFFORTS, MAX_AGENT_NAME, MAX_ERROR_TEXT, MAX_RECENT_ERRORS, MAX_TASK_TITLE, type AgentState, type ObservedModels, type Tier } from './detector'
 import type { Ledger } from './savings'
 
+// An agent as the mod tracks it: the detector's state plus the cost of its current run, which the mod meters.
+export type TrackedAgent = AgentState & { runCost?: number }
+
 // Pure: the session state that must survive a module reload. The host keeps `$.state` for the session
 // (empty in a new session, intact across a hot reload), so a non-empty read at session start means reload.
 export type Snapshot = {
-  agents: AgentState[]
+  agents: TrackedAgent[]
   ledger: Ledger
   seenModels: ObservedModels
   sessionTag: string
@@ -46,6 +49,8 @@ export function parseSnapshot(v: unknown): Snapshot | undefined {
     if (typeof a.progressSignals !== 'number' || !Number.isInteger(a.progressSignals) || a.progressSignals < 0) delete live.progressSignals
     // Senior consults of the agent: a whole, non-negative count; anything else is dropped (counts as none).
     if (typeof a.consults !== 'number' || !Number.isInteger(a.consults) || a.consults < 0) delete live.consults
+    // The cost of the agent's current run (USD): a finite, non-negative number; anything else counts as unknown.
+    if (typeof a.runCost !== 'number' || !Number.isFinite(a.runCost) || a.runCost < 0) delete live.runCost
     // The name and the task title are labels: kept as capped text, dropped when absent or blank.
     const name = clipLabel(a.name, MAX_AGENT_NAME)
     if (name === undefined) delete live.name

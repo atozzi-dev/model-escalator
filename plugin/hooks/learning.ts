@@ -413,8 +413,18 @@ function ageText(ms: number): string {
   return `${Math.floor(ms / 86_400_000)} d ago`
 }
 
+const usd = (x: number): string => '$' + (x < 0.01 ? x.toFixed(4) : x.toFixed(2))
+
+// "mean cost per run" and, with enough data, "cost per accepted run" of a cell; '' when the cell has no priced run.
+function costText(c: Cell, now: number | undefined, halfLifeMs: number): string {
+  if (!(typeof c.cost === 'number' && typeof c.costRuns === 'number' && c.costRuns > 0)) return ''
+  const e = costPerAccepted(c, now, halfLifeMs)
+  return `, ${usd(c.cost / c.costRuns)}/run` + (e !== undefined ? `, ${usd(e)} per accepted` : '')
+}
+
 // One line per category and tier; counters may be fractional once decayed. With `now`, shows how old each cell is.
-export function formatStats(stats: Stats, now?: number): string {
+// Cells with priced runs also show the mean cost of a run and the cost per accepted run.
+export function formatStats(stats: Stats, now?: number, halfLifeMs = HALF_LIFE_MS): string {
   const lines: string[] = []
   for (const [category, row] of Object.entries(stats)) {
     for (const [tier, c] of Object.entries(row)) {
@@ -422,7 +432,7 @@ export function formatStats(stats: Stats, now?: number): string {
       const failed = c.failedVerify ? `, ${num1(c.failedVerify)} failed verify` : ''
       const na = c.notAccepted !== undefined && c.notAccepted !== c.escalated ? `, ${num1(c.notAccepted)} not accepted` : ''
       const age = now !== undefined && c.updatedAt !== undefined ? ` (updated ${ageText(Math.max(0, now - c.updatedAt))})` : ''
-      lines.push(`- ${category} ${tier}: ${num1(c.runs)} runs, ${num1(c.escalated)} escalated${failed}${na}${age}`)
+      lines.push(`- ${category} ${tier}: ${num1(c.runs)} runs, ${num1(c.escalated)} escalated${failed}${na}${costText(c, now, halfLifeMs)}${age}`)
     }
   }
   return lines.length === 0 ? 'No stats yet.' : lines.join('\n')

@@ -1,6 +1,6 @@
 // Pure: sampled senior review of the runs finished by cheap models. Which runs are sampled, the git command
 // that reads the agent's diff, the rubric and the prompt sent to the review model, the parser of its verdict,
-// and the review counters kept in the learned stats. Nothing here calls the host. Never throws.
+// and the formatting of the review counters kept in the learned stats. Nothing here calls the host. Never throws.
 import { tierRank, type Tier } from './detector'
 import { redactSecrets, truncateMiddle } from './dossier'
 import type { Cell, Stats } from './learning'
@@ -102,44 +102,6 @@ export function parseReview(text: string): Review | undefined {
   }
 }
 
-// A learned cell with its review counters: `reviews` sampled runs reviewed, `reviewScore` the sum of their scores,
-// `reviewedAt` (ms) the last review. Both counters fade together with the learning half-life, so the average stays
-// a time-weighted mean.
-export type ReviewCell = Cell & { reviews?: number; reviewScore?: number; reviewedAt?: number }
-
-// Adds one review score to the cell of `category` and start `tier`. A review may land before its run is recorded:
-// the cell then starts with no runs. Never mutates `stats`.
-export function addReview(stats: Stats, category: string, tier: Tier, score: number, now?: number, halfLifeMs = 0): Stats {
-  const row = { ...(stats[category] ?? {}) }
-  const c: ReviewCell = { ...(row[tier] ?? { runs: 0, escalated: 0, tokens: 0 }) }
-  const f = now !== undefined && c.reviewedAt !== undefined && now > c.reviewedAt && halfLifeMs > 0
-    ? 0.5 ** ((now - c.reviewedAt) / halfLifeMs)
-    : 1
-  const next: ReviewCell = {
-    ...c,
-    reviews: (c.reviews ?? 0) * f + 1,
-    reviewScore: (c.reviewScore ?? 0) * f + score,
-    ...(now !== undefined ? { reviewedAt: now } : {}),
-  }
-  row[tier] = next
-  return { ...stats, [category]: row }
-}
-
-// `record` rebuilds the cell it updates from its known counters only: this copies the review counters of that cell
-// from `before` into `after`, so recording a run never drops the reviews already stored.
-export function carryReview(before: Stats, after: Stats, category: string, tier: Tier): Stats {
-  const old = before[category]?.[tier] as ReviewCell | undefined
-  const cur = after[category]?.[tier] as ReviewCell | undefined
-  if (!old || !cur || old.reviews === undefined || cur.reviews !== undefined) return after
-  const kept: ReviewCell = {
-    ...cur,
-    reviews: old.reviews,
-    reviewScore: old.reviewScore ?? 0,
-    ...(old.reviewedAt !== undefined ? { reviewedAt: old.reviewedAt } : {}),
-  }
-  return { ...after, [category]: { ...after[category], [tier]: kept } }
-}
-
 const num1 = (n: number): string => (Number.isInteger(n) ? String(n) : n.toFixed(1))
 
 // One line per category and tier with reviews: the average score and how many reviews it comes from. '' when none.
@@ -147,7 +109,7 @@ export function formatReviews(stats: Stats): string {
   const lines: string[] = []
   for (const [category, row] of Object.entries(stats ?? {})) {
     for (const [tier, cell] of Object.entries(row ?? {})) {
-      const c = cell as ReviewCell | undefined
+      const c = cell as Cell | undefined
       if (!c || !(typeof c.reviews === 'number' && c.reviews > 0) || typeof c.reviewScore !== 'number') continue
       const n = Math.round(c.reviews * 10) / 10
       lines.push(`- ${category} ${tier}: average ${(c.reviewScore / c.reviews).toFixed(1)}/5 over ${num1(n)} review${n === 1 ? '' : 's'}`)

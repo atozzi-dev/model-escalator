@@ -34,6 +34,8 @@ export type Config = {
   reviewRate: number                // share (0 to 1) of the runs of cheap models reviewed by a senior model; 0 = off
   reviewModel: string               // model that reviews a sampled run; empty = the senior model
   explore: number                   // weight (0 to 1) of exploring a tier below the learned one at spawn; 0 = off
+  learnByCost: boolean              // pick the start tier by cost per accepted run once there is enough cost data
+  minReviewScore: number            // lowest review score (1 to 5) of an accepted run
 }
 
 // USD per million tokens, Anthropic API list prices (Oct 2026), checked against /cost.
@@ -85,6 +87,8 @@ export const DEFAULT_CONFIG: Config = {
   reviewModel: '',
   // Off by default: exploring deliberately runs some tasks on a model learning had ruled out.
   explore: 0,
+  learnByCost: true,
+  minReviewScore: 3,
   modelIds: { haiku: 'claude-haiku-5-5', sonnet: 'claude-sonnet-5-5', opus: 'claude-opus-5-5' },
 }
 
@@ -228,6 +232,7 @@ export function parseConfig(raw: Raw | undefined): Config {
     const effortStep = bool(o.effortStep, d.effortStep)
     const rate = num(o.reviewRate)
     const explore = num(o.explore)
+    const minScore = num(o.minReviewScore)
     const reviewer = typeof o.reviewModel === 'string' ? o.reviewModel.trim() : ''
     return {
       ...d,
@@ -260,6 +265,8 @@ export function parseConfig(raw: Raw | undefined): Config {
       learningHalfLifeDays: halfLife !== undefined && halfLife >= 0 ? halfLife : d.learningHalfLifeDays,
       reviewRate: rate !== undefined && rate >= 0 && rate <= 1 ? rate : d.reviewRate,
       explore: explore !== undefined && explore >= 0 && explore <= 1 ? explore : d.explore,
+      learnByCost: bool(o.learnByCost, d.learnByCost),
+      minReviewScore: minScore !== undefined && minScore >= 1 && minScore <= 5 ? minScore : d.minReviewScore,
       reviewModel: reviewer.length <= 100 ? reviewer : d.reviewModel,
     }
   } catch {

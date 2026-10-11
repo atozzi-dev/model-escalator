@@ -25,6 +25,7 @@ declare module 'claude-code' {
           stalled?: boolean
           recentErrors?: string[]
           consults?: number
+          runCost?: number
           paused?: boolean
           progressSignals?: number
           deescalated?: boolean
