@@ -352,6 +352,9 @@ export function resetState(): void {
   writtenFiles.clear()
   reworkRuns.clear()
   lastNow = undefined
+  lastSaveAt = undefined
+  trailing?.cancel()
+  trailing = undefined
 }
 
 function snapshot(): Snapshot {
@@ -371,6 +374,7 @@ let dirty = false
 
 function save($: EngineInterface): Promise<void> {
   dirty = true
+  lastSaveAt = lastNow
   if (inflight) return inflight
   inflight = (async () => {
     try {
@@ -384,6 +388,32 @@ function save($: EngineInterface): Promise<void> {
     }
   })()
   return inflight
+}
+
+// Saves for the busiest path (a tool call that changes only counters) are spaced: the first one writes at once, the
+// ones within SAVE_GAP_MS of a write wait for one trailing write of the latest state. Everything else saves at once.
+const SAVE_GAP_MS = 1000
+let lastSaveAt: number | undefined
+let trailing: { cancel: () => void } | undefined
+
+function saveSoon($: EngineInterface): Promise<void> {
+  const now = lastNow
+  if (now === undefined || lastSaveAt === undefined || now - lastSaveAt >= SAVE_GAP_MS) {
+    lastSaveAt = now
+    return save($)
+  }
+  if (trailing) return Promise.resolve()
+  try {
+    trailing = $.clock.after(Math.max(1, SAVE_GAP_MS - (now - lastSaveAt)), () => {
+      trailing = undefined
+      lastSaveAt = lastNow
+      void save($)
+    })
+    return Promise.resolve()
+  } catch {
+    trailing = undefined
+    return save($)
+  }
 }
 
 function summarize(e: Record<string, unknown>): string {
@@ -572,7 +602,9 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: MAP_PANE }, async ($, e, next) => {
     try {
       const now = (await clockNow($)) ?? lastNow ?? 0
+      const layoutBefore = JSON.stringify(layoutMem)
       const g = graph
+      const seqBefore = drawnSeq
       const layout = layoutGraph(g, layoutMem)
       layoutMem = { slots: layout.slots, retired: layout.retired }
       const workers = g.nodes.filter((n) => n.kind === 'worker').length
@@ -602,7 +634,7 @@ export const register: Register = (on, options) => {
         const panel = nodePanel($, { Box, Text, Button } as UiKit, false)
         out = panel ? Box({ flexDirection: 'column', gap: 1, children: [svg, panel] }) : svg
       }
-      void save($)
+      if (drawnSeq !== seqBefore || JSON.stringify(layoutMem) !== layoutBefore) void save($)
       return out
     } catch {
       return next(e)
@@ -770,7 +802,7 @@ export const register: Register = (on, options) => {
           await $.ui.log(`${agentLabel(state)} (${state.category}): ${mode === 'observe' ? 'would de-escalate' : `de-escalate to ${back.state.tier}`}`)
         }
         if (back.decided && mode === 'active') feed($, { type: 'ladder', agentId: id, action: 'swap', toModel: back.state.tier, level: back.state.level, score: back.state.score })
-        await save($)
+        await (back.decided ? save($) : saveSoon($))
         if (back.decided && mode === 'active') {
           return { ...r, context: [...(r.context ?? []), tag(`Progress noted: from your next step you run on ${back.state.tier} again.`)] } as typeof r
         }
