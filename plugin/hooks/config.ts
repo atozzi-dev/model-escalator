@@ -218,6 +218,43 @@ export function splitCommand(line: string): string[] {
   return out
 }
 
+// The options as the user names them (the `userConfig` keys), with the value in force, read back from a parsed config.
+function optionValues(c: Config): [string, unknown][] {
+  return [
+    ['thresholdHaiku', c.threshold.haiku], ['thresholdSonnet', c.threshold.sonnet], ['thresholdOpus', c.threshold.opus],
+    ['graceSteps', c.grace], ['seniorModel', c.senior],
+    ['levels', c.levels.filter((l) => l !== 'effort').join(',')], ['maxTier', c.maxTier],
+    ['effortStep', c.levels.includes('effort')], ['effortBoost', c.effortBoost],
+    ['prudentTokenRatio', c.prudentTokenRatio], ['oscillationEdits', c.oscillationEdits],
+    ['idleSteps', c.idleSteps], ['idleWeight', c.idleWeight], ['stallMinutes', c.stallMinutes],
+    ['verifyCommand', c.verifyCommand], ['verifyTimeoutSeconds', c.verifyTimeoutSeconds],
+    ['maxConsultsPerAgent', c.maxConsultsPerAgent], ['maxConsultsPerSession', c.maxConsultsPerSession],
+    ['consultBudgetUsd', c.consultBudgetUsd], ['pauseAtHuman', c.pauseAtHuman], ['notifyLead', c.notifyLead],
+    ['deescalateAfter', c.deescalateAfter], ['learningHalfLifeDays', c.learningHalfLifeDays],
+    ['reviewRate', c.reviewRate], ['reviewModel', c.reviewModel], ['explore', c.explore],
+    ['respectExplicitModel', c.respectExplicitModel], ['learnByCost', c.learnByCost], ['modelCategories', c.modelCategories],
+    ['minReviewScore', c.minReviewScore], ['reworkWindowMinutes', c.reworkWindowMinutes],
+    ['prices', c.prices], ['modelIds', c.modelOverrides],
+  ]
+}
+
+function shown(v: unknown): string {
+  if (typeof v === 'string') return v === '' ? '(empty)' : v
+  return typeof v === 'object' ? JSON.stringify(v) : String(v)
+}
+
+// One line per option: `name: value`, plus `(changed, default X)` when it differs from the default.
+export function describeConfig(c: Config): string[] {
+  const defaults = new Map(optionValues(DEFAULT_CONFIG))
+  return optionValues(c).map(([name, v]) => {
+    const d = defaults.get(name)
+    if (JSON.stringify(v) === JSON.stringify(d)) return `${name}: ${shown(v)}`
+    // Long values (prices, model ids, commands) are cut, and their default is not repeated.
+    const now = shown(v)
+    return now.length > 60 ? `${name}: ${now.slice(0, 57)}... (changed)` : `${name}: ${now} (changed${shown(d).length > 60 ? '' : `, default ${shown(d)}`})`
+  })
+}
+
 export function parseConfig(raw: Raw | undefined): Config {
   const d = DEFAULT_CONFIG
   const o: Raw = raw ?? {}

@@ -35,10 +35,14 @@ The mod works on its own once installed.
 
 | Control | Effect |
 |---|---|
-| `/escalator` | Session cost, estimated savings, interventions |
+| `/escalator` / `/escalator report` | Session cost, estimated savings, interventions |
+| `/escalator help` | List every subcommand (an unknown one shows the same list) |
 | `/escalator stats` | What the mod has learned per task category, with the average review score where runs were reviewed (`reviewRate`) |
 | `/escalator map` | Open a panel with the live network of agents: the lead, every worker and the senior, each with its model, what it is doing, its difficulty level and cost, and the escalations and consults between them. Animated SVG on the desktop app, VS Code and mobile; a coloured text tree with a spinner on working agents in the terminal |
-| `/escalator reset` | Forget what it has learned |
+| `/escalator config` | The effective configuration: every option with its value, marked when it differs from the default, plus the mode and baseline and the variable they came from |
+| `/escalator history [n]` | The last `n` recorded sessions (default 10, at most 50): date, mode, baseline, cost, estimated savings and interventions |
+| `/escalator reset` | Forget what it has learned (per-category and per-project statistics). The session history and the task category cache are kept |
+| `/escalator reset history` | Clear the recorded session history |
 | `/escalator resume <id>` / `resume all` | Resume an agent paused at the human level (the report lists paused agents). Its ladder restarts on its current model |
 | `MODEL_ESCALATOR_MODE=observe` | Measure and log what it *would* do, without intervening. Recommended for the first days |
 | `MODEL_ESCALATOR_MODE=baseline` | Run every agent on the reference model, no interventions (control arm for A/B evals) |

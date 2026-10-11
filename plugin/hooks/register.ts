@@ -1,6 +1,6 @@
 import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
-import { DEFAULT_CONFIG, parseConfig, splitCommand, type Config } from './config'
+import { DEFAULT_CONFIG, describeConfig, parseConfig, splitCommand, type Config } from './config'
 import { LADDER, afterHelp, agentLabel, canAskForHelp, classifyFailure, clipLabel, consultLimit, countStep, EFFORTS, escalated, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_AGENT_NAME, MAX_LEAD_NOTICES, newAgent, noteProgress, normalizePath, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
 import { buildDossier, inputFromState } from './dossier'
 import { cacheGet, cachePut, cacheKey, classifierInput, combineCategory, LABELS, parseCache } from './classify'
@@ -12,7 +12,7 @@ import { renderTree } from './render-text'
 import { createQueue } from './queue'
 import { buildReviewPrompt, diffArgv, editedPath, formatReviews, isCheaper, parseReview, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun } from './review'
 import { parseSnapshot, type Snapshot, type TrackedAgent } from './state'
-import { addConsult, addIntervention, addStep, asUsage, cost as stepCost, emptyLedger, report, statusLine, type Ledger, type Usage } from './savings'
+import { addConsult, addIntervention, addStep, asUsage, cost as stepCost, emptyLedger, report, savings, statusLine, type Ledger, type Usage } from './savings'
 
 export const HELP_TOOL = 'mcp__model-escalator__ask_for_help'
 const STATS_KEY = 'stats'
@@ -470,13 +470,16 @@ export const register: Register = (on, options) => {
       } catch { /* the tool is optional: the ladder works without it */ }
     }
     try {
-      await $.command.register({ name: 'escalator', description: 'Model escalator: savings report, stats and the live agent network', argumentHint: '[report|stats|map|reset|resume <id>|resume all]' })
+      await $.command.register({ name: 'escalator', description: 'Model escalator: savings report, stats and the live agent network', argumentHint: '[report|stats|config|history [n]|map|reset [history]|resume <id>|all|help]' })
     } catch { /* name taken: the report stays reachable through the status line */ }
     return r
   })
 
   on('command.run', { command: 'escalator' }, async ($, e) => {
     const arg = e.args.trim()
+    if (arg === 'help') return { text: COMMAND_HELP }
+    if (arg === 'config') return { text: await configCommand($) }
+    if (arg === 'history' || arg.startsWith('history ')) return { text: await historyCommand($, arg.slice(7).trim()) }
     if (arg === 'stats') {
       const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
       const reviews = formatReviews(stats)
@@ -484,16 +487,23 @@ export const register: Register = (on, options) => {
         (reviews ? '\n\nSenior review scores of sampled runs (1-5):\n' + reviews : '') }
     }
     if (arg === 'reset') {
+      // The category cache is kept: it maps task text to a label, which is a fact about the text, not something learned
+      // from outcomes, and clearing it would only cost new classification calls.
       await storeQueue(async () => { await $.store.delete(STATS_KEY); await $.store.delete(PROJECTS_KEY) })
-      return { text: 'Learned stats cleared.' }
+      return { text: 'Learned stats cleared (per-category and per-project statistics). The session history and the task category cache are kept.' }
+    }
+    if (arg === 'reset history') {
+      await storeQueue(async () => { await $.store.delete(SESSIONS_KEY) })
+      return { text: 'Session history cleared. Learned stats are kept.' }
     }
     if (arg === 'resume' || arg.startsWith('resume ')) return { text: await resumeCommand($, arg.slice(6).trim()) }
     if (arg === 'map') return { text: await openMap($) }
+    if (arg !== '' && arg !== 'report') return { text: `Unknown subcommand "${arg.split(/\s+/)[0]}".\n\n${COMMAND_HELP}` }
     const paused = [...agents.values()].filter((a) => a.paused)
     const pausedText = paused.length === 0 ? '' : '\n\nPaused (resume with /escalator resume <id>|all):\n' +
       paused.map((a) => `- ${agentLabel(a)} (${a.category}, ${a.tier})`).join('\n')
     return { text: `Mode: ${mode}\n` + report(ledger, baseline) + pausedText +
-      '\n\nMore: /escalator stats, /escalator map (live agent network), /escalator reset, /escalator resume <id>|all' }
+      '\n\nMore: /escalator stats, /escalator map (live agent network), /escalator history, /escalator config, /escalator help' }
   })
 
   // The map pane. Desktop, VS Code and mobile draw an interactive Svg; the terminal a short text for now.
@@ -1228,6 +1238,63 @@ function pausedDeny(id: string | undefined, tool?: unknown): { deny: string } | 
   } catch {
     return undefined
   }
+}
+
+const COMMAND_HELP = [
+  'Subcommands:',
+  '/escalator report: session cost, estimated savings and interventions (the default)',
+  '/escalator stats: what the mod has learned per task category',
+  '/escalator config: the effective configuration and the environment mode',
+  '/escalator history [n]: the last n recorded sessions (default 10, at most 50)',
+  '/escalator map: open the live network of agents',
+  '/escalator resume <id>|all: resume agents paused at the human level',
+  '/escalator reset: forget the learned stats (history and category cache are kept)',
+  '/escalator reset history: clear the recorded session history',
+  '/escalator help: this list',
+].join('\n')
+
+// `/escalator config`: the options in force and where the mode comes from. ($.env.get needs literal names.)
+async function configCommand($: any): Promise<string> {
+  let modeSrc = 'default'
+  let baseSrc = 'session start'
+  try {
+    modeSrc = (await $.env.get('MODEL_ESCALATOR_MODE')) ? 'MODEL_ESCALATOR_MODE' : (await $.env.get('EVAL_MODEL_ESCALATOR_MODE')) ? 'EVAL_MODEL_ESCALATOR_MODE' : 'default'
+    baseSrc = (await $.env.get('MODEL_ESCALATOR_BASELINE')) ? 'MODEL_ESCALATOR_BASELINE' : (await $.env.get('EVAL_MODEL_ESCALATOR_BASELINE')) ? 'EVAL_MODEL_ESCALATOR_BASELINE' : "the lead's model"
+  } catch { /* sources unknown: the values below are still right */ }
+  return [
+    `Mode: ${mode} (from ${modeSrc})`,
+    `Baseline: ${baseline} (from ${baseSrc})`,
+    'Options:',
+    ...describeConfig(config).map((l) => '  ' + l),
+    'Change them from /config, or in settings under pluginConfigs with the key model-escalator (or model-escalator@inline).',
+    'The mode comes from the MODEL_ESCALATOR_MODE and MODEL_ESCALATOR_BASELINE environment variables.',
+  ].join('\n')
+}
+
+const HISTORY_DEFAULT = 10
+const HISTORY_MAX = 50
+
+// `/escalator history [n]`: the stored session summaries, newest first. Malformed entries are skipped.
+async function historyCommand($: any, arg: string): Promise<string> {
+  const asked = Number(arg)
+  const n = arg !== '' && Number.isInteger(asked) && asked >= 1 ? Math.min(asked, HISTORY_MAX) : HISTORY_DEFAULT
+  let past: unknown[] = []
+  try { const v = await $.store.get(SESSIONS_KEY); past = Array.isArray(v) ? v : [] } catch { /* no history */ }
+  const rows: string[] = []
+  for (const s of past) {
+    const o = (typeof s === 'object' && s !== null ? s : {}) as { at?: unknown; mode?: unknown; baseline?: unknown; ledger?: unknown }
+    const l = o.ledger as Ledger | undefined
+    if (typeof o.at !== 'number' || !Number.isFinite(o.at) || typeof l !== 'object' || l === null || typeof l.actual !== 'number') continue
+    const sv = savings(l)
+    const money = (x: number) => (x < 0 ? '-' : '') + '$' + Math.abs(x).toFixed(2)
+    const iv = Object.values(l.interventions ?? {}).reduce((a, b) => a + (typeof b === 'number' ? b : 0), 0)
+    rows.push(`- ${new Date(o.at).toISOString().slice(0, 16).replace('T', ' ')} ${String(o.mode)}, baseline ${String(o.baseline)}: ` +
+      `spent ${money(l.actual)}, saved ~${money(sv.low)} to ${money(sv.high)} (${sv.lowPct}-${sv.highPct}%), interventions ${iv}`)
+  }
+  if (rows.length === 0) return 'No sessions recorded yet. A session is recorded when it ends, if agents ran in it.'
+  const shownRows = rows.slice(-n).reverse()
+  return `Last ${shownRows.length} of ${rows.length} recorded sessions (newest first, times in UTC):\n` + shownRows.join('\n') +
+    '\n\nClear with /escalator reset history.'
 }
 
 // `/escalator map`: opens the pane (a second call only retitles it) and starts the redraw ticks.
