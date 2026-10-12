@@ -267,8 +267,10 @@ export function describeConfig(c: Config): string[] {
   })
 }
 
-export function parseConfig(raw: Raw | undefined): Config {
-  const d = DEFAULT_CONFIG
+// `fallback` gives the value of every option that is absent or invalid (the defaults unless a caller layers options,
+// as the replay does over the options in force).
+export function parseConfig(raw: Raw | undefined, fallback: Config = DEFAULT_CONFIG): Config {
+  const d = fallback
   const o: Raw = raw ?? {}
   try {
     const ratio = num(o.prudentTokenRatio)
@@ -302,14 +304,14 @@ export function parseConfig(raw: Raw | undefined): Config {
       idleSteps: idle !== undefined && idle >= 1 ? Math.floor(idle) : d.idleSteps,
       idleWeight: idleW !== undefined && idleW >= 0 ? idleW : d.idleWeight,
       stallMinutes: positive(o.stallMinutes, d.stallMinutes),
-      verifyCommand: vc.length <= 1000 ? vc : d.verifyCommand,
+      verifyCommand: typeof o.verifyCommand === 'string' && vc.length <= 1000 ? vc : d.verifyCommand,
       verifyTimeoutSeconds: vt !== undefined && vt > 0 ? Math.min(vt, 600) : d.verifyTimeoutSeconds,
       grace: grace !== undefined && grace >= 0 ? Math.floor(grace) : d.grace,
       senior: senior !== '' && senior.length <= 100 ? senior : d.senior,
-      levels: withEffort(parseLevels(o.levels, d.levels), effortStep),
+      levels: withEffort(parseLevels(o.levels, d.levels.filter((l) => l !== 'effort')), effortStep),
       maxTier: parseMaxTier(o.maxTier, d.maxTier),
       prices: parsePrices(o.prices, d.prices),
-      modelOverrides: parseModelIds(o.modelIds),
+      modelOverrides: o.modelIds === undefined ? d.modelOverrides : parseModelIds(o.modelIds),
       prudentTokenRatio: ratio !== undefined && ratio > 0 && ratio <= 1 ? ratio : d.prudentTokenRatio,
       maxConsultsPerAgent: perAgent !== undefined && perAgent >= 0 ? Math.floor(perAgent) : d.maxConsultsPerAgent,
       maxConsultsPerSession: perSession !== undefined && perSession >= 0 ? Math.floor(perSession) : d.maxConsultsPerSession,
@@ -328,7 +330,7 @@ export function parseConfig(raw: Raw | undefined): Config {
       minReviewScore: minScore !== undefined && minScore >= 1 && minScore <= 5 ? minScore : d.minReviewScore,
       reworkWindowMinutes: rework !== undefined && rework >= 0 ? rework : d.reworkWindowMinutes,
       recordSessions: record !== undefined && record >= 0 ? Math.min(Math.floor(record), MAX_RECORD_SESSIONS) : d.recordSessions,
-      reviewModel: reviewer.length <= 100 ? reviewer : d.reviewModel,
+      reviewModel: typeof o.reviewModel === 'string' && reviewer.length <= 100 ? reviewer : d.reviewModel,
     }
   } catch {
     return d

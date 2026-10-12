@@ -98,6 +98,7 @@ These are the subcommands listed by `/escalator help`:
 | `/escalator consult <id>` | Ask the senior model about an agent now; the advice reaches it on its next tool call. Active mode only |
 | `/escalator swap <id>` | Move an agent one tier up, from its next request (the map's detail buttons do the same). Active mode only |
 | `/escalator resume <id>\|all` | Resume agents paused at the human level |
+| `/escalator replay [option=value ...]` | Replay the recorded sessions (`recordSessions`) with other options and compare with what happened, without any model call. See [Replaying sessions](#replaying-sessions) |
 | `/escalator reset` | Forget the learned statistics (the session history and the task category cache are kept) |
 | `/escalator reset history` | Clear the recorded session history |
 | `/escalator reset recordings` | Clear the session recordings kept for replay (`recordSessions`) |
@@ -150,7 +151,7 @@ Options are set from `/config` or under `pluginConfigs` in your settings (key `m
 | `respectExplicitModel` | false | When on and the Agent call names a model, learning and exploration do not change the starting model. The ladder still applies |
 | `modelCategories` | false | Labels each new subagent task with one short call to a small model (Haiku) instead of keywords only. Cached; a failed call falls back to the keywords |
 | `reworkWindowMinutes` | 30 | Minutes after a cheaper run during which an edit by the lead to a file that run wrote counts as rework: the run is moved to not accepted once. `0` turns it off. Only edits made through Claude Code are seen |
-| `recordSessions` | 0 (off) | Records what the mod observed in each session and keeps the last N sessions (at most 50), so they can be replayed later with other options. Works in every mode except `off`, `observe` included. See [Session recordings](#session-recordings) |
+| `recordSessions` | 0 (off) | Records what the mod observed in each session and keeps the last N sessions (at most 50), so `/escalator replay` can try other options on them. Works in every mode except `off`, `observe` included. See [Session recordings](#session-recordings) |
 
 `verifyCommand` runs without a shell, so on Windows give the real executable: `npm.cmd test`, or `node node_modules/jest/bin/jest.js`. On Windows `bash` usually resolves to the WSL launcher (`C:\Windows\System32\bash.exe`); use the full path of Git Bash instead. A command that cannot start or hits `verifyTimeoutSeconds` is not counted as a failed run. Check the command once by hand first: a command that starts but fails for an unrelated reason counts as a failed run.
 
@@ -161,6 +162,14 @@ With `recordSessions` above 0 the mod records, for each agent it follows, the st
 Privacy: the only text kept is the agent's name (redacted, at most 40 characters) or its task category, and the text of up to 300 error signatures per session (the normalised first 160 characters of the error, with numbers and file paths replaced, then redacted with the same patterns as the senior dossier). Commands, tool output, prompts, advice and file paths are never kept; files and error signatures are compared through a hash. Redaction is pattern based, so treat the recordings like the rest of the plugin's store.
 
 Size: one session is capped at 256 KiB of JSON text; a longer session drops its oldest events first, counts them, and marks the agents that lost events. All recordings together are capped at 1.25 MiB (the store holds 4 MiB in all); the oldest sessions go first. Fifty agents with eight events each take about 35 KiB. Recording appends in memory only: the store is written at the end of an agent's run (at most once every 5 seconds), every 30 seconds while agents run, and when the session ends. A reload of the mod keeps the recording but loses the events since its last write. `/escalator reset recordings` clears them.
+
+### Replaying sessions
+
+`/escalator replay` runs the recorded sessions through the same detector and ladder code with the options in force, changed by the `option=value` pairs you give, for example `/escalator replay thresholdHaiku=4 graceSteps=6 levels=nudge,swap,human`. It accepts `thresholdHaiku`, `thresholdSonnet`, `thresholdOpus`, `graceSteps`, `levels`, `effortStep`, `effortBoost`, `maxTier`, `oscillationEdits`, `idleSteps`, `idleWeight`, `stallMinutes`, `maxConsultsPerAgent`, `maxConsultsPerSession`, `consultBudgetUsd`, `deescalateAfter` and `pauseAtHuman`, with the same validation as the options; an invalid value or another option is refused with the list. It makes no model call and changes nothing.
+
+The output compares the recorded interventions with the candidate's, per level and per task category, counts escalated runs, lists possible false positives (agents that finished well with no intervention but that the candidate would hit) and the agents that differ most, with the tool result at which each action fires. A self-check replays each session with the options it was recorded with and reports how many recorded interventions it reproduces; `/escalator replay` with no option shows the options in force against the recording.
+
+Limits: the replay does not simulate the models. After an intervention each agent does what it did in the recording, so a note, consult or swap that comes earlier or later would have changed what followed; read the results as where the ladder would fire on the same work, not as outcomes. The start tier chosen by learning, verifications and reviews are not run again; consult answers are reused in order. Sessions recorded in `observe` or `baseline` mode replay as `observe`. Agents whose recording is incomplete (trimmed, cleared or interrupted by a reload) are skipped.
 
 ## How savings are estimated
 

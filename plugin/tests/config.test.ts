@@ -66,6 +66,19 @@ test('learningHalfLifeDays defaults to 30, 0 disables, invalid falls back', asyn
   expect(parseConfig({ learningHalfLifeDays: 'x' }).learningHalfLifeDays).toBe(30)
 })
 
+test('a fallback configuration fills the options that are absent or invalid', async () => {
+  const base = parseConfig({ graceSteps: 7, verifyCommand: 'npm test', reviewModel: 'sonnet', modelIds: '{"opus":"x-opus"}', effortStep: true })
+  const c = parseConfig({ thresholdHaiku: 5, graceSteps: 'nope', effortStep: false }, base)
+  expect(c.threshold.haiku).toBe(5)
+  expect(c.grace).toBe(7)
+  expect(c.verifyCommand).toBe('npm test')
+  expect(c.reviewModel).toBe('sonnet')
+  expect(c.modelOverrides).toEqual({ opus: 'x-opus' })
+  // effortStep off removes the effort level the base had.
+  expect(c.levels).toEqual(['nudge', 'consult', 'swap', 'human'])
+  expect(parseConfig({}, base)).toEqual(base)
+})
+
 test('recordSessions is off by default, a whole count of sessions, at most 50', async () => {
   expect(DEFAULT_CONFIG.recordSessions).toBe(0)
   expect(parseConfig({ recordSessions: 10 }).recordSessions).toBe(10)

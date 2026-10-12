@@ -2,6 +2,7 @@ import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepInpu
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, describeConfig, parseConfig, splitCommand, type Config } from './config'
 import { LADDER, afterHelp, agentHead, agentLabel, allowedMax, nextTier, canAskForHelp, classifyFailure, clipLabel, consultLimit, countStep, EFFORTS, endRun, escalated, features, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_AGENT_NAME, MAX_LEAD_NOTICES, newAgent, noteProgress, normalizePath, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type Features, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
+import { parseReplayArgs, replayReport } from './replay'
 import { addAgent as addRecAgent, indexOf as recIndexOf, mergeRecordings, parseRecordings, push as recPush, recordedOptions, relTime, resumeRecording, startRecording, stepEvent, toolEvent, type Live, type RecEvent, type RecordedMode, type Recording } from './recorder'
 import { buildDossier, inputFromState } from './dossier'
 import { cacheGet, cachePut, cacheKey, classifierInput, combineCategory, LABELS, parseCache } from './classify'
@@ -672,7 +673,7 @@ export const register: Register = (on, options) => {
       } catch { /* the tool is optional: the ladder works without it */ }
     }
     try {
-      await $.command.register({ name: 'escalator', description: 'Model escalator: savings report, stats panel and the live agent network', argumentHint: '[report|stats|config|history [n]|map|panel [close]|consult <id>|swap <id>|reset [history|recordings]|resume <id>|all|help]' })
+      await $.command.register({ name: 'escalator', description: 'Model escalator: savings report, stats panel and the live agent network', argumentHint: '[report|stats|config|history [n]|map|panel [close]|consult <id>|swap <id>|reset [history|recordings]|replay [option=value ...]|resume <id>|all|help]' })
     } catch { /* name taken: the report stays reachable through the status line */ }
     return r
   })
@@ -712,6 +713,7 @@ export const register: Register = (on, options) => {
       }
       return { text: 'Recorded sessions cleared. Learned stats and the session history are kept.' }
     }
+    if (arg === 'replay' || arg.startsWith('replay ')) return { text: await replayCommand($, arg.slice(6).trim()) }
     if (arg === 'resume' || arg.startsWith('resume ')) return { text: await resumeCommand($, arg.slice(6).trim()) }
     if (arg === 'consult' || arg.startsWith('consult ')) return { text: await consultNow($, arg.slice(7)) }
     if (arg === 'swap' || arg.startsWith('swap ')) return { text: await swapNow($, arg.slice(4)) }
@@ -1575,6 +1577,7 @@ const COMMAND_HELP = [
   '/escalator consult <id>: ask the senior model about an agent now; the advice reaches it on its next tool call',
   '/escalator swap <id>: move an agent one tier up, from its next request (the map\'s detail buttons do the same)',
   '/escalator resume <id>|all: resume agents paused at the human level',
+  '/escalator replay [option=value ...]: replay the recorded sessions with other options (thresholds, graceSteps, levels, ...) and compare, without any model call',
   '/escalator reset: forget the learned stats (history and category cache are kept)',
   '/escalator reset history: clear the recorded session history',
   '/escalator reset recordings: clear the sessions recorded for replay (option recordSessions)',
@@ -1597,6 +1600,24 @@ async function configCommand($: any): Promise<string> {
     'Change them from /config, or in settings under pluginConfigs with the key model-escalator (or model-escalator@inline).',
     'The mode comes from the MODEL_ESCALATOR_MODE and MODEL_ESCALATOR_BASELINE environment variables.',
   ].join('\n')
+}
+
+// `/escalator replay [option=value ...]`: the recorded sessions (and this session's events not yet written) replayed
+// with the options in force changed as asked, against what the ladder did. Read only. Never throws.
+async function replayCommand($: EngineInterface, args: string): Promise<string> {
+  try {
+    const candidate = parseReplayArgs(args, config)
+    if ('error' in candidate) return candidate.error
+    let recs: Recording[] = []
+    try { recs = parseRecordings(await $.store.get(RECORDINGS_KEY)) } catch { /* nothing stored */ }
+    if (recording && recording.rec.events.some((ev) => ev.k !== 'boot')) {
+      const live = JSON.parse(JSON.stringify(recording.rec)) as Recording
+      recs = [...recs.filter((r) => r.id !== live.id), live]
+    }
+    return replayReport(recs, config, candidate)
+  } catch {
+    return 'Could not replay the recorded sessions.'
+  }
 }
 
 const HISTORY_DEFAULT = 10

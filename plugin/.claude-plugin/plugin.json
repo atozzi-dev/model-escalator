@@ -196,7 +196,7 @@
     "recordSessions": {
       "type": "number",
       "title": "Recorded sessions",
-      "description": "Keep a recording of what the mod observed in the last N sessions (at most 50), so it can be replayed later with other options without spending. Stored in the plugin's store, capped in size; error signatures are redacted, commands, outputs, prompts and file paths are not kept. Works in every mode except off. 0 is off.",
+      "description": "Keep a recording of what the mod observed in the last N sessions (at most 50), so /escalator replay can try other thresholds and levels on them without spending. Stored in the plugin's store, capped in size; error signatures are redacted, commands, outputs, prompts and file paths are not kept. Works in every mode except off. 0 is off.",
       "default": 0
     }
   }
