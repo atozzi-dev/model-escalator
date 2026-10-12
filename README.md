@@ -212,7 +212,7 @@ These points come from the engine's documentation of hooks and from this mod's c
 
 ## Evaluations
 
-The repository includes seven A/B eval cases, comparing the escalation ladder with an all-strong-model baseline on tasks from easy to hard, with hidden acceptance tests. See [plugin/evals/README.md](plugin/evals/README.md) for how to run them. `scripts/ab-compare.mjs` compares the baseline and active results per case (score, spread, cost, verdict) and can write the table as Markdown: `node scripts/ab-compare.mjs baseline.json active.json`.
+The repository includes seven A/B eval cases, comparing the escalation ladder with an all-strong-model baseline on tasks from easy to hard, with hidden acceptance tests. See [plugin/evals/README.md](plugin/evals/README.md) for how to run them; on Windows, where `claude plugin eval` cannot grant Bash, use `scripts/ab-run.mjs` (same results format, see the "Windows" section there). `scripts/ab-compare.mjs` compares the baseline and active results per case (score, spread, cost, verdict) and can write the table as Markdown: `node scripts/ab-compare.mjs baseline.json active.json`.
 
 ## Limitations
 

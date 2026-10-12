@@ -43,6 +43,22 @@ Why each flag:
 
 The first run in this folder asks you to confirm that you trust the plugin. A run with `--json` (or in CI) cannot ask and stops with "not a trusted plugin directory": add `--trust-plugin`, or run once without `--json` to trust the folder. For a quick smoke test, filter cases: `--case paginate-off-by-one`, `--tag easy` or `--tag hard`, and `--runs 1`. The judge of the LLM grader defaults to Haiku; `--judge-model` changes it.
 
+## Windows: run the A/B with scripts/ab-run.mjs
+
+On Windows, `claude plugin eval` cannot grant Bash (Claude Code 2.1.295: "the Windows sandbox is not active"), and there is no flag to run without the sandbox, while every case needs a shell (`node --test`, `node .eval/check.mjs`). `scripts/ab-run.mjs` replaces the runner: it scaffolds each case in a fresh temp folder, starts `claude -p` there, grades the result with the same graders (`regex`, `file_exists`, `tool_used`, `llm`) and writes the same JSON as `claude plugin eval --json`, so `ab-compare.mjs` reads it unchanged. It needs only Node built-ins and a Git Bash (`CLAUDE_CODE_GIT_BASH_PATH`, or the default Git for Windows folder; never the WSL launcher). From the repository root, in PowerShell:
+
+```powershell
+node scripts/ab-run.mjs --arm baseline --model opus --runs 3 --max-cost-usd 60 --json plugin/evals/results/baseline.json
+node scripts/ab-run.mjs --arm active   --model opus --runs 3 --max-cost-usd 60 --json plugin/evals/results/active.json
+node scripts/ab-compare.mjs plugin/evals/results/baseline.json plugin/evals/results/active.json --tolerance 5
+```
+
+Filters work as above (`--case paginate-off-by-one`, `--tag easy`, `--runs 1`); `--judge-model` picks the judge (default Haiku); `--baseline <model>` sets `MODEL_ESCALATOR_BASELINE`. Each run gets a fresh copy of `plugin/` (so the mod starts with an empty store, as in the official runs), `MODEL_ESCALATOR_MODE` set to the arm, `CLAUDE_CODE_PLUGIN_DIRS` removed and `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`. Your login and config folder are used as they are. The stream-json trace of every run is kept in `plugin/evals/results/<timestamp>-ab-run/`. `--dry-run` scaffolds one case, prints the exact command and environment and grades the untouched workspace without calling `claude`. `--max-cost-usd` stops starting new runs once the arm's agent and judge cost reaches it, and marks the file `partial`.
+
+**Warning: the agents' shell is not confined.** Without the sandbox they run with your user rights, like in a normal Claude Code session; only the working folder is a fresh temp folder. Run it on a machine and account where that is acceptable.
+
+Differences from the official runner: the lead gets the case's `allowed_tools` plus `Bash Edit Write Read Glob Grep Agent mcp__model-escalator__ask_for_help`; `max_turns` is enforced by counting the lead's assistant messages on the stream and killing the process (the CLI has no flag for it), `timeout_seconds` by killing the process tree; the cost is `total_cost_usd` of the final `result` event (a run killed before it has no `costUsd`); a `file_exists` grader counts only files created after the scaffold.
+
 ## The cases
 
 | Case | Difficulty | What it exercises | Lead turns |
