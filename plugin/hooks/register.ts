@@ -1646,6 +1646,21 @@ async function historyCommand($: any, arg: string): Promise<string> {
     '\n\nClear with /escalator reset history.'
 }
 
+// The surfaces that draw the session's panels; undefined when the question fails (the caller then keeps its plain message).
+async function surfacesOf($: EngineInterface): Promise<readonly string[] | undefined> {
+  try {
+    return await $.session.surfaces()
+  } catch {
+    return undefined
+  }
+}
+
+const NO_SURFACE_TAIL = 'Claude Code in a terminal or in the desktop app; /escalator and /escalator stats work everywhere.'
+const NO_SURFACE_MAP = 'No surface in this session draws panels (for example the VS Code extension, or claude -p). ' +
+  'Run /escalator map in ' + NO_SURFACE_TAIL
+const NO_SURFACE_PANEL = 'No surface in this session draws panels (for example the VS Code extension, or claude -p). ' +
+  'Run /escalator panel in ' + NO_SURFACE_TAIL
+
 // `/escalator map`: opens the pane (a second call only retitles it) and starts the redraw ticks.
 async function openMap($: EngineInterface): Promise<string> {
   try {
@@ -1653,9 +1668,16 @@ async function openMap($: EngineInterface): Promise<string> {
     const opened = await $.ui.open({ id: MAP_PANE, title: 'Agent network' })
     mapDirty = true
     startMapTimer($)
-    return opened.isPlaced
-      ? 'Agent network opened. It shows every agent with its model, what it is doing and its cost; the animated map needs desktop or VS Code.'
-      : `Agent network pane is waiting: ${opened.reason}`
+    if (!opened.isPlaced) return `Agent network pane is waiting: ${opened.reason}`
+    const surfaces = await surfacesOf($)
+    if (surfaces === undefined) {
+      return 'Agent network opened. It shows every agent with its model, what it is doing and its cost; the animated map needs desktop or VS Code.'
+    }
+    if (surfaces.length === 0) return NO_SURFACE_MAP
+    if (surfaces.every((s) => s === 'terminal')) {
+      return 'Agent network opened, drawn as a text tree in this terminal. It shows every agent with its model, what it is doing and its cost.'
+    }
+    return 'Agent network opened. It shows every agent with its model, what it is doing and its cost.'
   } catch {
     return 'Could not open the agent network pane.'
   }
@@ -1827,9 +1849,9 @@ async function openStatsPanel($: EngineInterface): Promise<string> {
     const opened = await $.ui.open({ id: STATS_PANE, title: 'Escalator' })
     statsDirty = true
     startStatsTimer($)
-    return opened.isPlaced
-      ? 'Escalator panel opened: the session cost and savings, plan usage, savings per task category and what the mod learned.'
-      : `Escalator panel is waiting: ${opened.reason}`
+    if (!opened.isPlaced) return `Escalator panel is waiting: ${opened.reason}`
+    if ((await surfacesOf($))?.length === 0) return NO_SURFACE_PANEL
+    return 'Escalator panel opened: the session cost and savings, plan usage, savings per task category and what the mod learned.'
   } catch {
     return 'Could not open the Escalator panel.'
   }

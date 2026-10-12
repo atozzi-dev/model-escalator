@@ -108,7 +108,7 @@ These are the subcommands listed by `/escalator help`:
 
 ### The agent map and the stats panel
 
-`/escalator map` draws the lead, every worker and the senior model, each with its model, what it is doing, its difficulty level and its cost, and the escalations and consults between them. On the desktop app, VS Code and mobile it is an animated SVG; in the terminal it is a coloured text tree with a spinner on working agents. Selecting an agent with the buttons under the drawing shows its detail (category, tiers, state, difficulty, cost, interventions, last failed attempts), with Consult now and Swap now buttons in active mode.
+`/escalator map` draws the lead, every worker and the senior model, each with its model, what it is doing, its difficulty level and its cost, and the escalations and consults between them. Where the client draws mod panes as SVG (the desktop app; VS Code and mobile where their Claude Code client draws them) it is an animated SVG; in the terminal it is a coloured text tree with a spinner on working agents. The command says which surface it used, or that the session has none. Selecting an agent with the buttons under the drawing shows its detail (category, tiers, state, difficulty, cost, interventions, last failed attempts), with Consult now and Swap now buttons in active mode.
 
 ![Example agent map: the lead on Opus, three workers on Haiku, Sonnet and Opus, a consult to the senior model and a swap from Haiku to Sonnet](docs/agent-map.svg)
 
@@ -188,7 +188,7 @@ This section lists what `claude plugin validate plugin` reports for the mod. Not
 - **Hooks:** `session.start`, `session.end`, `agent.spawn`, `tool.call` (all tool calls, to follow the agents, and the `ask_for_help` call), `turn.step` (usage metering, and the model rewrite on a swap), `turn.complete`, `command.run` (`/escalator`), `ui.render` (the map and stats panes), `ui.close`. Hooks that can block an agent catch their own errors and let the call through.
 - **Command:** `/escalator`.
 - **Tool:** `ask_for_help`, registered in active and observe mode. Every agent of the session sees it, the lead included; only tracked agents get an answer, and other callers get "Help is not available for this agent."
-- **Panels:** the map and the stats panel (`$.ui.open`, `$.ui.invalidate`, `$.ui.close`, `$.ui.panes`, `$.ui.resolve`).
+- **Panels:** the map and the stats panel (`$.ui.open`, `$.ui.invalidate`, `$.ui.close`, `$.ui.panes`, `$.ui.resolve`, `$.session.surfaces` to tell whether the session draws panels at all).
 - **UI output:** log lines, status line, toasts (`$.ui.log`, `$.ui.status`, `$.ui.toast`), and in active mode short notices in the main conversation (`$.session.append`, `notifyLead`).
 - **Environment variables (read only):** `MODEL_ESCALATOR_MODE`, `MODEL_ESCALATOR_BASELINE`, `EVAL_MODEL_ESCALATOR_MODE`, `EVAL_MODEL_ESCALATOR_BASELINE`.
 - **Session state:** key `model-escalator.session` (`$.state.get`, `$.state.set`): the per-agent snapshot, including recent tool summaries (file paths and command lines) and error text. It is redacted only when it is sent to the senior model.
@@ -225,6 +225,7 @@ The repository includes seven A/B eval cases, comparing the escalation ladder wi
 - **Models your organisation does not allow.** A refused swap target is not tried again in the session, the agent moves to the human level and you get a notice. A refused senior model is skipped for consults.
 - **Bedrock, Vertex and gateways.** The mod learns each tier's id from the requests it sees and prefers the shape of the lead's id; for a tier it never saw it uses the first-party id. If swaps report a model as not available, set `modelIds`.
 - **Supervisor notes are tagged, not hidden.** A note carries a per-session tag (`[supervisor:xxxxxx]`) so an agent can tell it from text in tool output. Text that claims to be a note without that tag is not one.
+- **VS Code extension.** As of Claude Code 2.1.296 the VS Code extension runs sessions without a surface for mod panes: `/escalator map` and `/escalator panel` say so instead of opening a pane nobody sees. Use Claude Code in a terminal (the VS Code integrated terminal works) or the desktop app. `/escalator`, `/escalator stats` and the other text commands work everywhere.
 - **Savings are estimates.** They come from list prices and the token counts the requests report; they are not a bill.
 
 ## Contributing and security
