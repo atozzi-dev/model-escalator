@@ -60,7 +60,7 @@ The mode is read from the `MODEL_ESCALATOR_MODE` environment variable when the s
 
 ## How the ladder works
 
-Each tracked agent has a difficulty score. It grows when the agent repeats the same failing command or error, when it keeps failing tests without progress, when it edits the same file again and again without progress (`oscillationEdits`), and when it makes many model requests without progress. Progress (for example failing tests dropping) resets it.
+Each tracked agent has a difficulty score. It grows when the agent repeats the same failing command or error, when it keeps failing tests without progress, when it edits the same file again and again between failed attempts (`oscillationEdits`), and when it makes many model requests without progress. Progress (for example failing tests dropping) resets it. Test summaries of jest, vitest, pytest, go test, cargo test and bun test are read. Some results never count: a call that Claude Code refused before it ran (a permission rule or prompt, the auto mode classifier, a hook, a stale or unread file, a blocked `sleep`), the same failure repeated by the parallel calls of one assistant message, and new failing tests added while writing tests first (a failing count that goes up).
 
 When the score reaches the threshold of the agent's starting tier (`thresholdHaiku`, `thresholdSonnet`, `thresholdOpus`) and `graceSteps` steps have passed since the last intervention, the next enabled level fires:
 
@@ -121,10 +121,10 @@ Options are set from `/config` or under `pluginConfigs` in your settings (key `m
 | Option | Default | Meaning |
 |---|---|---|
 | `thresholdHaiku` | 3 | Difficulty score at which an agent that started on Haiku gets its next intervention |
-| `thresholdSonnet` | 4 | The same, for an agent that started on Sonnet |
-| `thresholdOpus` | 6 | The same, for an agent that started on Opus |
+| `thresholdSonnet` | 5 | The same, for an agent that started on Sonnet |
+| `thresholdOpus` | 7 | The same, for an agent that started on Opus |
 | `graceSteps` | 4 | Steps to wait after an intervention before the next one |
-| `oscillationEdits` | 3 | Edits of the same file without progress tolerated before each further edit raises the score |
+| `oscillationEdits` | 5 | Edits of the same file made after a failed attempt, without progress, tolerated before each further such edit raises the score. Edits with no failure in between never count |
 | `stallMinutes` | 10 | Minutes without any event after which a running agent is reported as stalled (log, status line, toast in active mode); its next tool call gets the next ladder note. A tool call still running counts as activity for three times this long |
 | `verifyCommand` | empty (off) | Check run at the end of each tracked agent's run, for example `npm test`. Split on spaces, quotes group, no shell: no pipes or redirects. A non-zero exit counts as a failed run for learning. See the note below |
 | `verifyTimeoutSeconds` | 120 | How long the check may run before it is abandoned and ignored (at most 600) |

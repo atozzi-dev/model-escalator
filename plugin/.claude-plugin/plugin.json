@@ -17,13 +17,13 @@
       "type": "number",
       "title": "Sonnet difficulty threshold",
       "description": "Difficulty score at which an agent that started on Sonnet gets the next intervention.",
-      "default": 4
+      "default": 5
     },
     "thresholdOpus": {
       "type": "number",
       "title": "Opus difficulty threshold",
       "description": "Difficulty score at which an agent that started on Opus gets the next intervention.",
-      "default": 6
+      "default": 7
     },
     "graceSteps": {
       "type": "number",
@@ -34,8 +34,8 @@
     "oscillationEdits": {
       "type": "number",
       "title": "Edits before oscillation",
-      "description": "Edits of the same file without progress tolerated before each further edit raises the difficulty score.",
-      "default": 3
+      "description": "Edits of the same file made after a failed attempt (since the previous edit of that file), without progress, tolerated before each further such edit raises the difficulty score. Edits with no failure in between never count.",
+      "default": 5
     },
     "stallMinutes": {
       "type": "number",

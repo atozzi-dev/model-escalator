@@ -4,8 +4,12 @@ import { DEFAULT_CONFIG, parseConfig, splitCommand } from '../hooks/config'
 test('no options gives the defaults', async () => {
   expect(parseConfig(undefined)).toEqual(DEFAULT_CONFIG)
   expect(parseConfig({})).toEqual(DEFAULT_CONFIG)
-  expect(DEFAULT_CONFIG.threshold).toEqual({ haiku: 3, sonnet: 4, opus: 6 })
+  // Calibrated on the observation week (see the regression corpus test).
+  expect(DEFAULT_CONFIG.threshold).toEqual({ haiku: 3, sonnet: 5, opus: 7 })
   expect(DEFAULT_CONFIG.grace).toBe(4)
+  expect(DEFAULT_CONFIG.oscillationEdits).toBe(5)
+  expect(DEFAULT_CONFIG.idleSteps).toBe(60)
+  expect(DEFAULT_CONFIG.idleWeight).toBe(0.1)
   expect(DEFAULT_CONFIG.senior).toBe('opus')
   expect(DEFAULT_CONFIG.prudentTokenRatio).toBe(0.65)
   expect(DEFAULT_CONFIG.levels).toEqual(['nudge', 'consult', 'swap', 'human'])

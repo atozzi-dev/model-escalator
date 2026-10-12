@@ -18,7 +18,7 @@ export type Config = {
   modelOverrides: Partial<Record<Tier, string>>  // explicit ids from the modelIds option; beat observed ids and defaults
   verifyCommand: string           // optional check run at the end of each tracked agent's run; empty = off
   verifyTimeoutSeconds: number      // how long the check may run before it counts as failed (at most 600)
-  oscillationEdits: number          // edits of one file tolerated since the last progress; each further edit adds to the score
+  oscillationEdits: number          // edits of one file made after a failed attempt tolerated since the last progress; each further one adds to the score
   idleSteps: number                 // model requests tolerated without progress
   idleWeight: number                // score added by each model request past idleSteps
   stallMinutes: number              // minutes without any event after which a running agent is flagged as stalled
@@ -63,7 +63,8 @@ const LEVEL_ORDER: readonly Action[] = ['nudge', 'consult', 'effort', 'swap', 'h
 const EFFORT_NAMES: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 
 export const DEFAULT_CONFIG: Config = {
-  threshold: { haiku: 3, sonnet: 4, opus: 6 },
+  // Thresholds, oscillation and idle allowance calibrated on a week of observed runs (tests/corpus.test.ts).
+  threshold: { haiku: 3, sonnet: 5, opus: 7 },
   grace: 4,
   logSize: 12,
   senior: 'opus',
@@ -71,11 +72,11 @@ export const DEFAULT_CONFIG: Config = {
   maxTier: 'opus',
   prices: DEFAULT_PRICES,
   prudentTokenRatio: 0.65,
-  oscillationEdits: 3,
-  // Provisional: the only progress signal today is failing tests dropping, so long tasks without tests
-  // need headroom. Recalibrate on the observe-week data before relying on these values.
-  idleSteps: 40,
-  idleWeight: 0.25,
+  oscillationEdits: 5,
+  // The only progress signal is failing tests dropping, so long tasks without tests need headroom: observed runs
+  // made 24 requests (median), 49 (p90), 100 at most.
+  idleSteps: 60,
+  idleWeight: 0.1,
   stallMinutes: 10,
   maxConsultsPerAgent: 3,
   maxConsultsPerSession: 20,
