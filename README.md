@@ -125,7 +125,7 @@ Options are set from `/config` or under `pluginConfigs` in your settings (key `m
 | `thresholdOpus` | 7 | The same, for an agent that started on Opus |
 | `graceSteps` | 4 | Steps to wait after an intervention before the next one |
 | `oscillationEdits` | 5 | Edits of the same file made after a failed attempt, without progress, tolerated before each further such edit raises the score. Edits with no failure in between never count |
-| `stallMinutes` | 10 | Minutes without any event after which a running agent is reported as stalled (log, status line, toast in active mode); its next tool call gets the next ladder note. A tool call still running counts as activity for three times this long |
+| `stallMinutes` | 10 | Minutes without any event after which a running agent is reported as stalled (log, status line, toast in active mode); its next tool call gets the next ladder note. A tool call still running counts as activity for three times this long. Nothing is reported while the session is closed or the account is at its usage limit |
 | `verifyCommand` | empty (off) | Check run at the end of each tracked agent's run, for example `npm test`. Split on spaces, quotes group, no shell: no pipes or redirects. A non-zero exit counts as a failed run for learning. See the note below |
 | `verifyTimeoutSeconds` | 120 | How long the check may run before it is abandoned and ignored (at most 600) |
 | `reviewRate` | 0 (off) | Share of the finished runs of cheaper models that a senior model reviews, from 0 to 1 (`0.1` is about one run in ten). Each review is one senior call |

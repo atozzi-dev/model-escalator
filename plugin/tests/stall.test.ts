@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import { DEFAULT_CONFIG, parseConfig } from '../hooks/config'
-import { isSilent, markStall, newAgent, toolEnd, toolStart, touch } from '../hooks/detector'
+import { isSilent, limitReached, markStall, newAgent, restartSilence, sessionClosed, toolEnd, toolStart, touch } from '../hooks/detector'
+import { emptyLedger } from '../hooks/savings'
 import { resetState } from '../hooks/register'
 import { parseSnapshot } from '../hooks/state'
 
@@ -207,6 +208,77 @@ test('the next tool call after a stall gets the nudge note', async ($, on) => {
   const r = await $.tool.call({ tool: 'Read', file_path: '/src/a.ts', agentId: w.agentId } as never) as { context?: readonly string[] }
   expect(r.context?.length).toBe(1)
   expect(r.context?.[0]).toContain('not making progress')
+})
+
+test('limitReached: a rate-limit window at or past 100 percent', async () => {
+  expect(limitReached([{ kind: 'five_hour', percentUsed: 100 }])).toBe(true)
+  expect(limitReached([{ kind: 'seven_day', percentUsed: 40 }, { kind: 'spend_limit', percentUsed: 104.5 }])).toBe(true)
+  expect(limitReached([{ kind: 'five_hour', percentUsed: 99.9 }])).toBe(false)
+  expect(limitReached([])).toBe(false)
+  expect(limitReached(undefined)).toBe(false)
+  expect(limitReached([{ kind: 'five_hour', percentUsed: '100' }, null])).toBe(false)
+})
+
+test('restartSilence restarts the window of a running agent only; sessionClosed ends its run', async () => {
+  const s = touch(newAgent('a', 'x', 'haiku', 't'), 0)
+  expect(restartSilence(s, 50 * MIN).lastEventAt).toBe(50 * MIN)
+  expect(restartSilence({ ...s, running: false }, 50 * MIN).lastEventAt).toBe(0)
+  const closed = sessionClosed(toolStart(s, 0))
+  expect(closed).toMatchObject({ running: false, inFlight: 0, stalled: false })
+  expect(isSilent(closed, 999 * MIN, DEFAULT_CONFIG)).toBeUndefined()
+})
+
+test('no stall note while the account is at its usage limit; the window restarts when it lifts', async ($, on) => {
+  const limits = { rateLimits: [{ kind: 'five_hour', percentUsed: 100 }] }
+  on('session.usage', () => ({ value: { startedAt: 0, context: {}, ...limits } }) as never)
+  const w = await wire(on, $, undefined)
+  await w.clock.advance(30 * MIN)
+  expect(w.stalls().length).toBe(0)
+  // The limit lifts: the check that sees it lifted gives the agent a whole window from then on.
+  limits.rateLimits = [{ kind: 'five_hour', percentUsed: 3 }]
+  await w.clock.advance(11 * MIN)
+  expect(w.stalls().length).toBe(0)
+  await w.clock.advance(12 * MIN)
+  expect(w.stalls().length).toBe(1)
+})
+
+test('when the usage cannot be read the stall check goes on as before', async ($, on) => {
+  on('session.usage', () => { throw new Error('boom') })
+  const w = await wire(on, $, undefined)
+  await w.clock.advance(11 * MIN)
+  expect(w.stalls().length).toBe(1)
+})
+
+test('the end of the session ends the runs: no stall note while it is closed', async ($, on) => {
+  on('session.end', () => ({ sessionId: 's' }) as never)
+  const w = await wire(on, $, undefined)
+  await w.clock.advance(5 * MIN)
+  await $.session.end({ reason: 'exit' } as never)
+  await w.clock.advance(60 * MIN)
+  expect(w.stalls().length).toBe(0)
+})
+
+test('a session that starts again with a running agent restarts its window instead of counting the gap', async ($, on) => {
+  resetState()
+  const clock = mock.clock(on, { now: 1_000_000_000 })
+  mock.env(on, {})
+  mock.store(on)
+  const logs: string[] = []
+  const agent = touch(newAgent('a1', 'general-purpose:other', 'haiku', 't'), 1_000_000_000 - 60 * MIN)
+  const snap = { agents: [agent], ledger: emptyLedger(), seenModels: {}, sessionTag: 'abc123', mode: 'active', baseline: 'opus', baselinePinned: false }
+  on('state.get', () => ({ value: { value: snap, version: 1 } }) as never)
+  on('state.set', () => ({ value: { version: 2 } }) as never)
+  on('session.start', () => ({ cwd: '/work' }) as never)
+  on('command.register', () => ({ value: undefined }) as never)
+  on('ui.panes', () => ({ value: [] }) as never)
+  on('ui.log', (_$: unknown, e: any) => { logs.push(String(e.message ?? e.text ?? JSON.stringify(e))); return { value: undefined } as never })
+  for (const k of ['ui.toast', 'ui.status'] as const) on(k, () => ({ value: undefined }) as never)
+  await $.session.start({ cwd: '/work' } as never)
+  const stalls = () => logs.filter((l) => l.includes('no activity'))
+  await clock.advance(9 * MIN)
+  expect(stalls().length).toBe(0)
+  await clock.advance(2 * MIN)
+  expect(stalls().length).toBe(1)
 })
 
 test('in observe mode the next tool call logs the nudge it would send and sends nothing', async ($, on) => {

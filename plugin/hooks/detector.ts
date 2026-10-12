@@ -446,6 +446,24 @@ export function isSilent(s: AgentState, now: number, cfg: Config = DEFAULT_CONFI
   return silent > window ? silent : undefined
 }
 
+// The silence window of a running agent starts again now: a gap that says nothing about the agent (the account at
+// its usage limit, the session closed or reloaded) is never counted as its silence.
+export function restartSilence<T extends AgentState>(s: T, now: number): T {
+  return s.running ? { ...s, lastEventAt: now } : s
+}
+
+// The session ended: whatever ran is over (its next event, after a resume, starts a new run for the stall check).
+export function sessionClosed<T extends AgentState>(s: T): T {
+  return { ...s, running: false, inFlight: 0, stalled: false }
+}
+
+// True when a rate-limit window of the account (`$.session.usage().rateLimits`) is used up: agents then wait for the
+// limit, they are not stuck.
+export function limitReached(rateLimits: unknown): boolean {
+  return Array.isArray(rateLimits) && rateLimits.some((w) =>
+    typeof w === 'object' && w !== null && typeof (w as { percentUsed?: unknown }).percentUsed === 'number' && (w as { percentUsed: number }).percentUsed >= 100)
+}
+
 // Flags the agent. A silent agent with no tool call running also gets its score raised to its threshold, so its
 // next tool call earns the next ladder note. With a tool call in flight the command may simply be slow: only
 // flag it (the lead is notified); if the command fails, the usual error signals take over.

@@ -1,7 +1,7 @@
 import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, describeConfig, parseConfig, splitCommand, type Config } from './config'
-import { LADDER, afterHelp, agentHead, beginRequest, endRequest, startCall, agentLabel, allowedMax, nextTier, canAskForHelp, classifyFailure, clipLabel, consultLimit, countStep, EFFORTS, endRun, escalated, features, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_AGENT_NAME, MAX_LEAD_NOTICES, newAgent, noteProgress, normalizePath, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type Features, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
+import { LADDER, afterHelp, agentHead, beginRequest, endRequest, limitReached, restartSilence, sessionClosed, startCall, agentLabel, allowedMax, nextTier, canAskForHelp, classifyFailure, clipLabel, consultLimit, countStep, EFFORTS, endRun, escalated, features, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_AGENT_NAME, MAX_LEAD_NOTICES, newAgent, noteProgress, normalizePath, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type Features, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
 import { parseReplayArgs, replayReport } from './replay'
 import { addAgent as addRecAgent, indexOf as recIndexOf, mergeRecordings, parseRecordings, push as recPush, recordedOptions, relTime, resumeRecording, startRecording, stepEvent, toolEvent, type Live, type RecEvent, type RecordedMode, type Recording } from './recorder'
 import { buildDossier, inputFromState } from './dossier'
@@ -329,6 +329,7 @@ export function resetState(): void {
   mode = 'active'
   stallTimer?.cancel()
   stallTimer = undefined
+  wasLimited = false
   stopMapTimer()
   stopStatsTimer()
   statsDirty = false
@@ -605,8 +606,10 @@ export const register: Register = (on, options) => {
     try { saved = parseSnapshot((await $.state.get(SESSION)).value) } catch { saved = undefined }
     if (saved) {
       agents.clear()
-      // A tool call in flight at the reload never reports its end to the new module: start from zero.
-      for (const a of saved.agents) agents.set(a.id, { ...a, inFlight: 0 })
+      // A tool call in flight at the reload never reports its end to the new module: start from zero. The time the
+      // module was away (a reload, or a session resumed later) is no silence of the agents: their windows start now.
+      const now = await clockNow($)
+      for (const a of saved.agents) agents.set(a.id, now === undefined ? { ...a, inFlight: 0 } : restartSilence({ ...a, inFlight: 0 }, now))
       ledger = saved.ledger
       seenModels = saved.seenModels
       sessionTag = saved.sessionTag
@@ -1114,6 +1117,11 @@ export const register: Register = (on, options) => {
       }
       if (pendingNotices.size > 0) await Promise.race([Promise.allSettled([...pendingNotices]), $.clock.sleep(1000)])
     } catch { /* best effort */ }
+    // Whatever ran is over: no stall is counted while the session is closed (a resumed agent starts a new run).
+    try {
+      for (const [id, a] of [...agents]) agents.set(id, sessionClosed(a))
+      await save($)
+    } catch { /* best effort */ }
     // The recording's last write, with the outcomes that landed meanwhile.
     recTrailing?.cancel()
     recTrailing = undefined
@@ -1245,6 +1253,14 @@ async function* guardedSwap(
   return yield* next({ ...e, model: fallback })
 }
 
+// The last stall check that read the usage found the account at its limit.
+let wasLimited = false
+
+// True when the account's usage limit is reached; false when it is not or cannot be read. Never throws.
+async function usageLimitReached($: EngineInterface): Promise<boolean> {
+  try { return limitReached((await $.session.usage()).rateLimits) } catch { return false }
+}
+
 // One tick of the stall check: flags running agents silent past the window (once until they act again).
 // The lead is told through the log, the status line and, in active mode, a toast; the agent itself is only
 // reached by the next ladder note on its next tool call, because a note travels with a tool result.
@@ -1256,6 +1272,16 @@ async function checkStalls($: EngineInterface): Promise<void> {
     // A long run without an end still reaches the store now and then (a reload loses only what came after).
     if (recDirty && (recFlushAt === undefined || now - recFlushAt >= REC_PERIODIC_MS)) { recFlushAt = now; void flushRecording($) }
     const found: { a: AgentState; silent: number }[] = []
+    // At the account's usage limit every agent waits: no stall, and each window starts again once the limit is seen
+    // lifted, so the agents get a whole window from then on.
+    if ([...agents.values()].some((a) => isSilent(a, now, config) !== undefined)) {
+      const limited = await usageLimitReached($)
+      if (limited || wasLimited) {
+        wasLimited = limited
+        for (const [id, a] of [...agents]) agents.set(id, restartSilence(a, now))
+        return
+      }
+    }
     for (const [id, a] of [...agents]) {
       if (a.running && a.lastEventAt === undefined) { agents.set(id, { ...a, lastEventAt: now }); continue }
       const silent = isSilent(a, now, config)
