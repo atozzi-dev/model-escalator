@@ -72,6 +72,11 @@ export function clipLabel(v: unknown, max: number): string | undefined {
   return flat.length > max ? `${flat.slice(0, max - 3)}...` : flat
 }
 
+// The label of a spawned agent: its explicit name, else the short description of its task, both capped.
+export function spawnName(e: { name?: unknown; description?: unknown }): string | undefined {
+  return clipLabel(e.name, MAX_AGENT_NAME) ?? clipLabel(e.description, MAX_AGENT_NAME)
+}
+
 // The agent as the lead reads it: `name (id)` when it has a name, else the id.
 export function agentHead(s: { id: string; name?: string }): string {
   return s.name ? `${s.name} (${s.id})` : s.id
