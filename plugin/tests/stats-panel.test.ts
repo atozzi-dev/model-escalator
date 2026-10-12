@@ -16,13 +16,15 @@ type Harness = {
   data: Record<string, unknown>
   placed: boolean
   usageFails: boolean
+  surfaces: string[]
+  surfacesFail: boolean
 }
 
 // Fake core under the plugin: spawn, a failing tool, a senior model, metered steps, panes.
 function wire(on: any, now = 1_000_000): Harness {
   resetState()
   mock.env(on, {})
-  const h: Harness = { opened: [], closed: [], invalidations: 0, registered: [], lastState: undefined, clock: mock.clock(on, { now }), rateLimits: [], data: {}, placed: true, usageFails: false }
+  const h: Harness = { opened: [], closed: [], invalidations: 0, registered: [], lastState: undefined, clock: mock.clock(on, { now }), rateLimits: [], data: {}, placed: true, usageFails: false, surfaces: ['desktop'], surfacesFail: false }
   on('store.get', (_$: unknown, e: any) => ({ value: h.data[e.key] }) as never)
   on('store.set', (_$: unknown, e: any) => { h.data[e.key] = e.value; return { value: undefined } as never })
   on('store.delete', (_$: unknown, e: any) => { delete h.data[e.key]; return { value: undefined } as never })
@@ -42,6 +44,7 @@ function wire(on: any, now = 1_000_000): Harness {
   on('ui.open', (_$: unknown, e: any) => { h.opened.push(e); return { value: h.placed ? { isPlaced: true } : { isPlaced: false, reason: 'too narrow' } } as never })
   on('ui.close', (_$: unknown, e: any) => { h.closed.push(e.id); return { value: undefined } as never })
   on('ui.panes', () => ({ value: [] }) as never)
+  on('session.surfaces', () => { if (h.surfacesFail) throw new Error('boom'); return { value: h.surfaces } as never })
   on('ui.invalidate', () => { h.invalidations++; return { value: undefined } as never })
   on('state.set', async (_$: unknown, e: any, next: any) => { h.lastState = e.value; return next(e) })
   for (const k of ['ui.log', 'ui.toast', 'ui.status'] as const) on(k, () => ({ value: undefined }) as never)
@@ -109,6 +112,24 @@ test('/escalator panel opens the pane and the help lists it', async ($, on) => {
   expect(text).toContain('Escalator')
   expect(JSON.stringify(h.registered)).toContain('panel')
   expect(await runCommand($, 'help')).toContain('/escalator panel')
+})
+
+test('/escalator panel says that no surface in the session draws panels', async ($, on) => {
+  const h = wire(on)
+  h.surfaces = []
+  await $.session.start({ cwd: '/work' } as never)
+  const text = await runCommand($, 'panel')
+  expect(h.opened.length).toBe(1)
+  expect(text).toContain('No surface in this session draws panels')
+  expect(text).toContain('/escalator panel')
+  expect(text).not.toContain('opened')
+})
+
+test('/escalator panel falls back to the plain opened message when surfaces fails', async ($, on) => {
+  const h = wire(on)
+  h.surfacesFail = true
+  await $.session.start({ cwd: '/work' } as never)
+  expect(await runCommand($, 'panel')).toContain('Escalator panel opened')
 })
 
 test('a pane that cannot open says so', async ($, on) => {

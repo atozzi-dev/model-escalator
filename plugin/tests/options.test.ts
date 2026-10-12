@@ -6,7 +6,9 @@ const drain = async (st: Drainable) => { for await (const _ of st) { /* chunks *
 
 type Harness = { consultModels: string[]; stepModels: string[] }
 
-function wire(on: any, toolResult: Record<string, unknown> = { isError: true, result: 'Error: boom', text: 'Error: boom' }): Harness {
+type ToolResult = Record<string, unknown> | ((e: any) => Record<string, unknown>)
+
+function wire(on: any, toolResult: ToolResult = { isError: true, result: 'Error: boom', text: 'Error: boom' }): Harness {
   resetState()
   mock.env(on, {})
   mock.store(on)
@@ -14,7 +16,7 @@ function wire(on: any, toolResult: Record<string, unknown> = { isError: true, re
   on('command.register', () => ({ value: undefined }) as never)
   const h: Harness = { consultModels: [], stepModels: [] }
   on('agent.spawn', (_$: unknown, e: any) => ({ model: e.model ?? 'haiku', agentId: 'a1' }))
-  on('tool.call', () => toolResult as never)
+  on('tool.call', (_$: unknown, e: any) => (typeof toolResult === 'function' ? toolResult(e) : toolResult) as never)
   on('model.complete', (_$: unknown, e: any) => { h.consultModels.push(e.model); return { value: { isAnswered: true, text: 'advice' } } as never })
   on('turn.complete', () => ({ text: 'done' }) as never)
   on('turn.step', async function* (_$: unknown, e: any) {
@@ -70,24 +72,33 @@ test('with the default threshold two failures do not intervene yet', async ($, o
   expect((await run($, 2)).length).toBe(0)
 })
 
+// Edits succeed; every test run fails, each time with another error (0.25 each), so only the oscillation can add more.
+let runs = 0
+const editsAndFailures = (e: any) => e.tool === 'Edit'
+  ? { isError: false, result: 'ok', text: 'edited' }
+  : { isError: true, result: 'x', text: `Error: case ${'x'.repeat(++runs)} broke` }
+
+// `count` rounds of: an edit of `file`, then a failed test run.
 async function editSame($: any, count: number, file: string): Promise<string[]> {
   await $.session.start({ cwd: '/work' } as never)
   const r = await $.agent.spawn({ prompt: 'p', description: 'fix db test', subagentType: 'general-purpose', model: 'haiku' } as never) as { agentId: string }
   const notes: string[] = []
   for (let i = 0; i < count; i++) {
-    const t = await $.tool.call({ tool: 'Edit', file_path: file, agentId: r.agentId } as never) as { context?: readonly string[] }
-    for (const c of t.context ?? []) notes.push(c)
+    for (const call of [{ tool: 'Edit', file_path: file }, { tool: 'Bash', command: 'npm test' }]) {
+      const t = await $.tool.call({ ...call, agentId: r.agentId } as never) as { context?: readonly string[] }
+      for (const c of t.context ?? []) notes.push(c)
+    }
   }
   return notes
 }
 
 test('a lower oscillation edit count makes repeated edits of one file escalate earlier', { options: { oscillationEdits: 1 } }, async ($, on) => {
-  wire(on, { isError: false, result: 'ok', text: 'edited' })
+  wire(on, editsAndFailures)
   expect((await editSame($, 4, '/src/a.ts')).length).toBeGreaterThan(0)
 })
 
 test('with the default oscillation edit count four edits of one file do not escalate yet', async ($, on) => {
-  wire(on, { isError: false, result: 'ok', text: 'edited' })
+  wire(on, editsAndFailures)
   expect((await editSame($, 4, '/src/a.ts')).length).toBe(0)
 })
 

@@ -6,8 +6,8 @@
 import { DEFAULT_CONFIG, optionValue, parseConfig, type Config } from './config'
 import {
   afterHelp, allowedMax, canAskForHelp, consultLimit, countStep, decide, endRun, escalated, isSilent, markStall, newAgent, nextTier,
-  noteProgress, pauseAgent, refuseTier, resumeAgent, revertSwap, skipGrace, tierRank, toolEnd, toolStart, touch, usableTier,
-  type Action, type AgentState, type Tier,
+  noteProgress, pauseAgent, refuseTier, restartSilence, resumeAgent, revertSwap, skipGrace, tierRank, toolEnd, toolStart, touch, usableTier,
+  type Action, type AgentState, type Features, type Tier,
 } from './detector'
 import { RECORDED_OPTIONS, type RecEvent, type Recording } from './recorder'
 
@@ -160,9 +160,10 @@ export function replaySession(rec: Recording, cfg: Config, followRecorded = fals
     tick(e.at)
     if (e.k === 'boot') {
       if (followRecorded && e.o) c = parseConfig(e.o, c)
-      // A reload restarts the stall timer and forgets the calls in flight.
+      // A reload (or a resumed session) restarts the stall timer and the agents' silence windows, and forgets the
+      // calls in flight.
       nextTick = e.at + period()
-      for (const x of sims.values()) x.s = { ...x.s, inFlight: 0 }
+      for (const x of sims.values()) x.s = restartSilence({ ...x.s, inFlight: 0 }, e.at)
       continue
     }
     if (e.k === 'refused') {
@@ -185,7 +186,9 @@ export function replaySession(rec: Recording, cfg: Config, followRecorded = fals
         calls++
         if (x.s.paused) { x.ignored++; break }
         x.s = toolEnd(x.s, e.at)
-        const f = { attempts: num(e.n), sig: typeof e.s === 'string' ? e.s : '', counts: Array.isArray(e.f) ? e.f.filter((n) => Number.isFinite(n)) : [], ...(typeof e.e === 'string' ? { edit: e.e } : {}) }
+        const f: Features = { attempts: num(e.n), sig: typeof e.s === 'string' ? e.s : '', counts: Array.isArray(e.f) ? e.f.filter((n) => Number.isFinite(n)) : [],
+          ...(typeof e.e === 'string' ? { edit: e.e } : {}), ...(e.env === 1 ? { env: true as const } : {}),
+          ...(Number.isInteger(e.g) ? { group: e.g } : {}) }
         const limit = consultLimit(x.s, sessionConsults(), consultCost, c)
         const prev = x.s
         const out = decide(prev, f, c, limit === undefined, blocked)

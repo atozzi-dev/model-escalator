@@ -40,7 +40,8 @@ export type RecAgent = { id: string; label: string; cat: string; tier: Tier; cut
 export type RecEvent =
   | { k: 'boot'; at: number; o?: Record<string, unknown> }                            // session start or module reload; o: options changed
   | { k: 'spawn'; a: number; at: number; asked: Tier; tier: Tier; x?: 1 }              // x: an explicit model kept
-  | { k: 'tool'; a: number; at: number; d: number; t: string; n?: number; s?: string; f?: number[]; e?: string }
+  // env: refused by the environment before it ran (no n, s, f or e then); g: the agent's assistant message it belongs to
+  | { k: 'tool'; a: number; at: number; d: number; t: string; n?: number; s?: string; f?: number[]; e?: string; env?: 1; g?: number }
   | { k: 'step'; a: number; at: number; d: number; m: Tier; ef?: Effort | number; u?: [number, number, number, number] }
   | { k: 'act'; a: number; at: number; act: Action; lvl: number; tier: Tier; w?: 1 }   // a ladder action taken
   | { k: 'deesc'; a: number; at: number; tier: Tier; w?: 1 }
@@ -170,6 +171,7 @@ export function sigText(sig: string): string {
 // One tool result of an agent, as features. The error signature's text is kept once per session, redacted.
 export function toolEvent(live: Live, a: number, end: number | undefined, start: number | undefined, tool: string, f: Features): RecEvent {
   const ev: Extract<RecEvent, { k: 'tool' }> = { k: 'tool', a, at: relTime(live, end), d: span(start, end), t: String(tool).slice(0, MAX_TOOL_NAME) }
+  if (f.env) ev.env = 1
   if (f.attempts > 0) {
     ev.n = f.attempts
     const s = hashKey(f.sig)
@@ -182,6 +184,7 @@ export function toolEvent(live: Live, a: number, end: number | undefined, start:
   }
   if (f.counts.length > 0) ev.f = f.counts.slice(0, 50)
   if (f.edit !== undefined) ev.e = hashKey(f.edit)
+  if (f.group !== undefined) ev.g = f.group
   return ev
 }
 

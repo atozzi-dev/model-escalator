@@ -53,10 +53,10 @@ test('a named agent is labelled by its name in log lines and toasts', async ($, 
   expect(h.sent.some((t) => t.includes(`fixer (${id})`))).toBe(true)
 })
 
-test('an unnamed subagent is labelled by its id only', async ($, on) => {
+test('an unnamed subagent without a description is labelled by its id only', async ($, on) => {
   const h = wire(on)
   await $.session.start({ cwd: '/work' } as never)
-  const id = await spawn($, 'Fix the failing database test in src/db.ts')
+  const id = ((await $.agent.spawn({ prompt: 'Fix the failing database test in src/db.ts', description: ' ', subagentType: 'general-purpose', model: 'haiku' } as never)) as { agentId: string }).agentId
   await stuck($, id)
   expect(h.logs.some((l) => l.startsWith(`${id} (`))).toBe(true)
   expect(h.logs.every((l) => !l.includes(' · task: '))).toBe(true)

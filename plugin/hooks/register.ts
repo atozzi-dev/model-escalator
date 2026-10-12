@@ -1,7 +1,7 @@
 import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, describeConfig, parseConfig, splitCommand, type Config } from './config'
-import { LADDER, afterHelp, agentHead, agentLabel, allowedMax, nextTier, canAskForHelp, classifyFailure, clipLabel, consultLimit, countStep, EFFORTS, endRun, escalated, features, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_AGENT_NAME, MAX_LEAD_NOTICES, newAgent, noteProgress, normalizePath, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type Features, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
+import { LADDER, afterHelp, agentHead, beginRequest, endRequest, limitReached, restartSilence, sessionClosed, startCall, agentLabel, allowedMax, nextTier, canAskForHelp, classifyFailure, consultLimit, countStep, EFFORTS, endRun, escalated, features, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_LEAD_NOTICES, newAgent, noteProgress, normalizePath, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, spawnName, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type Features, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
 import { parseReplayArgs, replayReport } from './replay'
 import { addAgent as addRecAgent, indexOf as recIndexOf, mergeRecordings, parseRecordings, push as recPush, recordedOptions, relTime, resumeRecording, startRecording, stepEvent, toolEvent, type Live, type RecEvent, type RecordedMode, type Recording } from './recorder'
 import { buildDossier, inputFromState } from './dossier'
@@ -329,6 +329,7 @@ export function resetState(): void {
   mode = 'active'
   stallTimer?.cancel()
   stallTimer = undefined
+  wasLimited = false
   stopMapTimer()
   stopStatsTimer()
   statsDirty = false
@@ -605,8 +606,10 @@ export const register: Register = (on, options) => {
     try { saved = parseSnapshot((await $.state.get(SESSION)).value) } catch { saved = undefined }
     if (saved) {
       agents.clear()
-      // A tool call in flight at the reload never reports its end to the new module: start from zero.
-      for (const a of saved.agents) agents.set(a.id, { ...a, inFlight: 0 })
+      // A tool call in flight at the reload never reports its end to the new module: start from zero. The time the
+      // module was away (a reload, or a session resumed later) is no silence of the agents: their windows start now.
+      const now = await clockNow($)
+      for (const a of saved.agents) agents.set(a.id, now === undefined ? { ...a, inFlight: 0 } : restartSilence({ ...a, inFlight: 0 }, now))
       ledger = saved.ledger
       seenModels = saved.seenModels
       sessionTag = saved.sessionTag
@@ -845,7 +848,7 @@ export const register: Register = (on, options) => {
       // In observe mode the model stays as asked: exploring is only logged, the learned tier is what "would" happen.
       const exploring = !explicit && choice.reason === 'explore'
       const best = explicit ? asked : exploring && mode === 'observe' ? choice.learned : choice.tier
-      const label = clipLabel(e.name, MAX_AGENT_NAME) ?? category
+      const label = spawnName(e) ?? category
       if (best !== asked) {
         if (mode !== 'observe') ev = { ...e, model: best }
         await $.ui.log(`${label}: ${asked} -> ${best}${mode === 'observe' ? ' (would)' : ''}`)
@@ -863,7 +866,7 @@ export const register: Register = (on, options) => {
     } catch { /* keep the original prompt */ }
     const r = await next(ev)
     if (r.agentId) {
-      const name = clipLabel(e.name, MAX_AGENT_NAME)
+      const name = spawnName(e)
       const fresh = newAgent(r.agentId, category, r.model, e.prompt)
       agents.set(r.agentId, name === undefined ? fresh : { ...fresh, name })
       ledger = addAgent(ledger, category)
@@ -904,6 +907,12 @@ export const register: Register = (on, options) => {
     const recorded = recordingOn() && id !== undefined && agents.has(id)
     const startedAt = tracked || recorded ? await clockNow($) : undefined
     if (tracked) mark(id, startedAt, toolStart)
+    // The assistant message the call belongs to, when it can be told (see startCall).
+    let group: number | undefined
+    try {
+      const known = id !== undefined && mode !== 'off' ? agents.get(id) : undefined
+      if (known) { const c = startCall(known); agents.set(known.id, c.state); group = c.group }
+    } catch { group = undefined }
     const who = id ? { agentId: id } : {}
     feed($, { type: 'tool-start', ...who, tool: String(e.tool), summary: summarize(e as unknown as Record<string, unknown>) })
     let r: Awaited<ReturnType<typeof next>>
@@ -932,7 +941,7 @@ export const register: Register = (on, options) => {
     let feats: Features | undefined
     if (recorded && r.deny === undefined) {
       try {
-        const f = features({ tool: e.tool, ok: r.isError !== true, text: textOf(r), summary: summarize(e as unknown as Record<string, unknown>) })
+        const f = features({ tool: e.tool, ok: r.isError !== true, text: textOf(r), summary: summarize(e as unknown as Record<string, unknown>), group })
         feats = f
         recFor(id, (a) => toolEvent(recording!, a, endedAt, startedAt, String(e.tool), f))
       } catch { /* observe reads the result itself */ }
@@ -942,7 +951,7 @@ export const register: Register = (on, options) => {
     if (!id || !a || r.deny !== undefined) return r
     try {
       const limit = limitFor(a)
-      const ob = { tool: e.tool, ok: r.isError !== true, text: textOf(r), summary: summarize(e as unknown as Record<string, unknown>) }
+      const ob = { tool: e.tool, ok: r.isError !== true, text: textOf(r), summary: summarize(e as unknown as Record<string, unknown>), group }
       const { state, action, consultSkipped, progress } = observe(a, ob, config, limit === undefined, blockedTiers, feats ?? features(ob))
       if (consultSkipped && limit) await noteLimit($, state, limit)
       if (!action) {
@@ -999,6 +1008,11 @@ export const register: Register = (on, options) => {
   // 3. Swap the model of escalated agents, and meter every request's cost.
   on('turn.step', async function* ($, e, next) {
     if (!e.agentId && !baselinePinned) baseline = tierOf(e.model)
+    // A new request: the tool calls it asks for belong to a new assistant message of the agent.
+    try {
+      const known = e.agentId && mode !== 'off' ? agents.get(e.agentId) : undefined
+      if (known) agents.set(known.id, beginRequest(known))
+    } catch { /* the request goes on unchanged */ }
     let a = e.agentId ? agents.get(e.agentId) : undefined
     seenModels = rememberModel(seenModels, e.model, !e.agentId)
     const recorded = recordingOn() && e.agentId !== undefined && agents.has(e.agentId)
@@ -1021,6 +1035,10 @@ export const register: Register = (on, options) => {
     const boost = mode === 'active' && a?.effortBoosted === true ? raiseEffort(ownEffort, config.effortBoost) : undefined
     const sent = boost ? ({ ...e, effort: boost } as TurnStepInput) : e
     const r = swap ? yield* guardedSwap($, sent, next, a!) : yield* next(sent)
+    try {
+      const asked = e.agentId && Array.isArray(r.toolUses) ? agents.get(e.agentId) : undefined
+      if (asked) agents.set(asked.id, endRequest(asked, r.toolUses.length))
+    } catch { /* the calls then count one by one */ }
     seenModels = rememberModel(seenModels, r.usage?.model, !e.agentId)
     const endedAt = recorded || (e.agentId && watching() && agents.has(e.agentId)) ? await clockNow($) : undefined
     if (e.agentId && watching() && agents.has(e.agentId)) mark(e.agentId, endedAt)
@@ -1098,6 +1116,11 @@ export const register: Register = (on, options) => {
         await Promise.race([Promise.all([flushVerifications(), flushReviews()]), $.clock.sleep(1000)])
       }
       if (pendingNotices.size > 0) await Promise.race([Promise.allSettled([...pendingNotices]), $.clock.sleep(1000)])
+    } catch { /* best effort */ }
+    // Whatever ran is over: no stall is counted while the session is closed (a resumed agent starts a new run).
+    try {
+      for (const [id, a] of [...agents]) agents.set(id, sessionClosed(a))
+      await save($)
     } catch { /* best effort */ }
     // The recording's last write, with the outcomes that landed meanwhile.
     recTrailing?.cancel()
@@ -1230,6 +1253,14 @@ async function* guardedSwap(
   return yield* next({ ...e, model: fallback })
 }
 
+// The last stall check that read the usage found the account at its limit.
+let wasLimited = false
+
+// True when the account's usage limit is reached; false when it is not or cannot be read. Never throws.
+async function usageLimitReached($: EngineInterface): Promise<boolean> {
+  try { return limitReached((await $.session.usage()).rateLimits) } catch { return false }
+}
+
 // One tick of the stall check: flags running agents silent past the window (once until they act again).
 // The lead is told through the log, the status line and, in active mode, a toast; the agent itself is only
 // reached by the next ladder note on its next tool call, because a note travels with a tool result.
@@ -1241,6 +1272,16 @@ async function checkStalls($: EngineInterface): Promise<void> {
     // A long run without an end still reaches the store now and then (a reload loses only what came after).
     if (recDirty && (recFlushAt === undefined || now - recFlushAt >= REC_PERIODIC_MS)) { recFlushAt = now; void flushRecording($) }
     const found: { a: AgentState; silent: number }[] = []
+    // At the account's usage limit every agent waits: no stall, and each window starts again once the limit is seen
+    // lifted, so the agents get a whole window from then on.
+    if ([...agents.values()].some((a) => isSilent(a, now, config) !== undefined)) {
+      const limited = await usageLimitReached($)
+      if (limited || wasLimited) {
+        wasLimited = limited
+        for (const [id, a] of [...agents]) agents.set(id, restartSilence(a, now))
+        return
+      }
+    }
     for (const [id, a] of [...agents]) {
       if (a.running && a.lastEventAt === undefined) { agents.set(id, { ...a, lastEventAt: now }); continue }
       const silent = isSilent(a, now, config)
@@ -1646,6 +1687,21 @@ async function historyCommand($: any, arg: string): Promise<string> {
     '\n\nClear with /escalator reset history.'
 }
 
+// The surfaces that draw the session's panels; undefined when the question fails (the caller then keeps its plain message).
+async function surfacesOf($: EngineInterface): Promise<readonly string[] | undefined> {
+  try {
+    return await $.session.surfaces()
+  } catch {
+    return undefined
+  }
+}
+
+const NO_SURFACE_TAIL = 'Claude Code in a terminal or in the desktop app; /escalator and /escalator stats work everywhere.'
+const NO_SURFACE_MAP = 'No surface in this session draws panels (for example the VS Code extension, or claude -p). ' +
+  'Run /escalator map in ' + NO_SURFACE_TAIL
+const NO_SURFACE_PANEL = 'No surface in this session draws panels (for example the VS Code extension, or claude -p). ' +
+  'Run /escalator panel in ' + NO_SURFACE_TAIL
+
 // `/escalator map`: opens the pane (a second call only retitles it) and starts the redraw ticks.
 async function openMap($: EngineInterface): Promise<string> {
   try {
@@ -1653,9 +1709,16 @@ async function openMap($: EngineInterface): Promise<string> {
     const opened = await $.ui.open({ id: MAP_PANE, title: 'Agent network' })
     mapDirty = true
     startMapTimer($)
-    return opened.isPlaced
-      ? 'Agent network opened. It shows every agent with its model, what it is doing and its cost; the animated map needs desktop or VS Code.'
-      : `Agent network pane is waiting: ${opened.reason}`
+    if (!opened.isPlaced) return `Agent network pane is waiting: ${opened.reason}`
+    const surfaces = await surfacesOf($)
+    if (surfaces === undefined) {
+      return 'Agent network opened. It shows every agent with its model, what it is doing and its cost; the animated map needs desktop or VS Code.'
+    }
+    if (surfaces.length === 0) return NO_SURFACE_MAP
+    if (surfaces.every((s) => s === 'terminal')) {
+      return 'Agent network opened, drawn as a text tree in this terminal. It shows every agent with its model, what it is doing and its cost.'
+    }
+    return 'Agent network opened. It shows every agent with its model, what it is doing and its cost.'
   } catch {
     return 'Could not open the agent network pane.'
   }
@@ -1827,9 +1890,9 @@ async function openStatsPanel($: EngineInterface): Promise<string> {
     const opened = await $.ui.open({ id: STATS_PANE, title: 'Escalator' })
     statsDirty = true
     startStatsTimer($)
-    return opened.isPlaced
-      ? 'Escalator panel opened: the session cost and savings, plan usage, savings per task category and what the mod learned.'
-      : `Escalator panel is waiting: ${opened.reason}`
+    if (!opened.isPlaced) return `Escalator panel is waiting: ${opened.reason}`
+    if ((await surfacesOf($))?.length === 0) return NO_SURFACE_PANEL
+    return 'Escalator panel opened: the session cost and savings, plan usage, savings per task category and what the mod learned.'
   } catch {
     return 'Could not open the Escalator panel.'
   }

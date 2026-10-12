@@ -17,6 +17,8 @@ type Harness = {
   lastState: unknown
   stateOverride: unknown
   clock: ReturnType<typeof mock.clock>
+  surfaces: string[]
+  surfacesFail: boolean
 }
 
 // Fake core under the plugin: spawn, a failing tool, a senior model, metered steps, panes.
@@ -24,7 +26,7 @@ function wire(on: any, now = 1_000_000): Harness {
   resetState()
   mock.env(on, {})
   mock.store(on)
-  const h: Harness = { opened: [], invalidations: 0, registered: [], gate: undefined, lastState: undefined, stateOverride: undefined, clock: mock.clock(on, { now }) }
+  const h: Harness = { opened: [], invalidations: 0, registered: [], gate: undefined, lastState: undefined, stateOverride: undefined, clock: mock.clock(on, { now }), surfaces: ['desktop'], surfacesFail: false }
   on('session.start', () => ({ cwd: '/work' }) as never)
   on('command.register', (_$: unknown, e: any) => { h.registered.push(e); return { value: undefined } as never })
   on('tool.register', (_$: unknown, e: any) => ({ value: { tool: `mcp__model-escalator__${e.name}` } }) as never)
@@ -43,6 +45,7 @@ function wire(on: any, now = 1_000_000): Harness {
   })
   on('ui.open', (_$: unknown, e: any) => { h.opened.push(e); return { value: { isPlaced: true } } as never })
   on('ui.panes', () => ({ value: [] }) as never)
+  on('session.surfaces', () => { if (h.surfacesFail) throw new Error('boom'); return { value: h.surfaces } as never })
   on('ui.invalidate', () => { h.invalidations++; return { value: undefined } as never })
   on('state.get', (_$: unknown, e: any, next: any) => (h.stateOverride === undefined ? next(e) : ({ value: { value: h.stateOverride, version: 1 } }) as never))
   on('state.set', async (_$: unknown, e: any, next: any) => { h.lastState = e.value; return next(e) })
@@ -393,4 +396,43 @@ test('parseSnapshot keeps a sound graph and drops a malformed one', () => {
   expect(mixed.graph?.edges.length).toBe(1)
   expect(mixed.layout).toBeUndefined()
   expect(mixed.drawnSeq).toBeUndefined()
+})
+
+test('/escalator map says that no surface in the session draws panels', async ($, on) => {
+  const h = wire(on)
+  h.surfaces = []
+  await $.session.start({ cwd: '/work' } as never)
+  const text = await runCommand($, 'map')
+  expect(h.opened.length).toBe(1)
+  expect(text).toContain('No surface in this session draws panels')
+  expect(text).toContain('/escalator map')
+  expect(text).not.toContain('opened')
+})
+
+test('/escalator map says the map is a text tree when only the terminal draws', async ($, on) => {
+  const h = wire(on)
+  h.surfaces = ['terminal']
+  await $.session.start({ cwd: '/work' } as never)
+  const text = await runCommand($, 'map')
+  expect(text).toContain('Agent network opened')
+  expect(text).toContain('text tree')
+  expect(text).not.toContain('needs desktop or VS Code')
+})
+
+test('/escalator map keeps the short message when an app surface draws panels', async ($, on) => {
+  const h = wire(on)
+  h.surfaces = ['terminal', 'vscode']
+  await $.session.start({ cwd: '/work' } as never)
+  const text = await runCommand($, 'map')
+  expect(text).toContain('Agent network opened')
+  expect(text).not.toContain('text tree')
+})
+
+test('/escalator map falls back to the plain opened message when surfaces fails', async ($, on) => {
+  const h = wire(on)
+  h.surfacesFail = true
+  await $.session.start({ cwd: '/work' } as never)
+  const text = await runCommand($, 'map')
+  expect(h.opened.length).toBe(1)
+  expect(text).toContain('Agent network opened')
 })

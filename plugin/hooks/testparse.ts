@@ -2,7 +2,7 @@
 // It works from the text alone (it never sees isError), so it also copes with commands
 // that end in `; echo "exit=$?"` and with loops that run the tests several times.
 
-export type Framework = 'jest' | 'vitest' | 'pytest' | 'go' | 'cargo' | 'generic'
+export type Framework = 'jest' | 'vitest' | 'pytest' | 'go' | 'cargo' | 'bun' | 'generic'
 
 // `failed` counts failed tests (pytest: failed + errors). `passed` is omitted when the
 // runner does not print it (go test) or when the summary only reports errors.
@@ -70,6 +70,12 @@ const LINE_PARSERS = [jest, vitest, pytest, cargo, generic]
 const GO_OK = /^ok\s+\S+\s+(?:[\d.]+s|\(cached\))/
 const GO_FAIL = /^FAIL\s+\S+\s+(?:[\d.]+s|\[.*\])/
 
+// bun test (and `claude plugin test`) summary lines: " 699 pass", " 1 skip", " 0 fail", "Ran 700 tests across 58 files."
+const BUN_PASS = /^\s*(\d+) pass\s*$/
+const BUN_FAIL = /^\s*(\d+) fail\s*$/
+const BUN_OTHER = /^\s*\d+ (?:skip|todo)\s*$/
+const BUN_RAN = /^Ran \d+ tests? across \d+ files?\b/
+
 export function parseTestRuns(text: string): TestRun[] {
   try {
     if (typeof text !== 'string') return []
@@ -78,6 +84,8 @@ export function parseTestRuns(text: string): TestRun[] {
     let goFails = 0
     let goBare: TestRun | undefined
     const flushBare = () => { if (goBare) runs.push(goBare); goBare = undefined }
+    // bun: the pass count waits for its fail line (or the "Ran N tests" line when the fail line is missing).
+    let bunPassed: number | undefined
     for (const line of text.replace(ANSI, '').split(/\r?\n/)) {
       if (/^--- FAIL:/.test(line)) { goFails++; continue }
       if (GO_OK.test(line) || GO_FAIL.test(line)) {
@@ -87,6 +95,20 @@ export function parseTestRuns(text: string): TestRun[] {
         runs.push({ framework: 'go', failed })
         goFails = 0
         continue
+      }
+      // bun prints its counts one per line: " 3 pass", then " 1 skip" / " 1 todo" maybe, then " 2 fail".
+      const bunPass = line.match(BUN_PASS)
+      if (bunPass) { bunPassed = Number(bunPass[1]); continue }
+      const bunFail = line.match(BUN_FAIL)
+      if (bunFail) {
+        runs.push(run('bun', Number(bunFail[1]), bunPassed)!)
+        bunPassed = undefined
+        continue
+      }
+      if (bunPassed !== undefined) {
+        if (BUN_OTHER.test(line)) continue
+        if (BUN_RAN.test(line)) runs.push(run('bun', 0, bunPassed)!)
+        bunPassed = undefined
       }
       if (/^(?:PASS|FAIL)\s*$/.test(line)) {
         flushBare()

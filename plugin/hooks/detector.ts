@@ -33,7 +33,14 @@ export type AgentState = {
   stepsSinceProgress: number            // model requests since the last progress; past the idle allowance each adds to the score
   errorCounts: Record<string, number>
   editCounts: Record<string, number>   // edits per normalised file path since the last progress
+  retryEdits?: Record<string, number>   // of those, the edits made after a failed attempt (since the file's previous edit)
+  editMarks?: Record<string, number>    // failed attempts since the last progress at the last edit of each file
   lastFailing?: number
+  requests?: number                     // model requests the agent started: the assistant message its next tool calls belong to
+  messageCalls?: number                 // tool calls started since the latest request began
+  messageTools?: number                 // tool calls the latest request asked for, once it ended
+  message?: number                      // the assistant message of the agent's last tool call that had one
+  messageSigs?: string[]                // error signatures already counted in that message
   log: string[]
   tokens: number
   // Liveness, for stall detection. All optional: snapshots saved before they existed lack them.
@@ -63,6 +70,11 @@ export function clipLabel(v: unknown, max: number): string | undefined {
   const flat = v.replace(/\s+/g, ' ').trim()
   if (flat === '') return undefined
   return flat.length > max ? `${flat.slice(0, max - 3)}...` : flat
+}
+
+// The label of a spawned agent: its explicit name, else the short description of its task, both capped.
+export function spawnName(e: { name?: unknown; description?: unknown }): string | undefined {
+  return clipLabel(e.name, MAX_AGENT_NAME) ?? clipLabel(e.description, MAX_AGENT_NAME)
 }
 
 // The agent as the lead reads it: `name (id)` when it has a name, else the id.
@@ -218,14 +230,46 @@ function cutError(text: string): string {
   return text.slice(0, head) + mark + text.slice(text.length - (room - head))
 }
 
-export type Observation = { tool: string; ok: boolean; text: string; summary: string }
+// `group`: the assistant message the call belongs to (the agent's model requests started before the call), when known.
+export type Observation = { tool: string; ok: boolean; text: string; summary: string; group?: number }
 
 // What the score reads from one tool result, without its text: the failed attempts in it, the signature of its
-// error (empty when nothing failed), the failing count of each test run in it, and the edited file (normalised;
-// only for an edit tool). The recorder keeps these, so a replay scores exactly what the live detector scored.
-export type Features = { attempts: number; sig: string; counts: number[]; edit?: string }
+// error (empty when nothing failed), the failing count of each test run in it, the edited file (normalised; only
+// for an edit tool) and the assistant message it belongs to. `env` marks a call the environment refused before it
+// did anything. The recorder keeps these, so a replay scores exactly what the live detector scored.
+export type Features = { attempts: number; sig: string; counts: number[]; edit?: string; env?: true; group?: number }
+
+// Refusals by Claude Code itself (a permission rule or prompt, the auto mode classifier, a safety check, the worktree
+// guard, a hook, a stale or unread file, a standalone sleep, the mod's own pause): the tool never ran, so the result
+// says nothing about the agent's work. Each pattern is anchored at the start of the result, where the engine puts its
+// refusal; a failure of the tool itself starts otherwise ("Exit code 1", the program's own output).
+const ENVIRONMENT_ERRORS: readonly RegExp[] = [
+  /^This agent is isolated in the worktree\b[\s\S]*\bRefusing to run it\b/,
+  /^Refusing to use \S+ as an isolation worktree\b/,
+  /^Permission for this (?:action|command) (?:was|has been) denied\b/,
+  /^Permission to use \S+(?: with command [\s\S]*?)? has been denied\./,
+  /^[^\n]{1,400} was blocked by a deny rule\b/,
+  /^The server-side auto mode classifier gave no verdict\b/,
+  /^The user doesn't want to proceed with this tool use\b/,
+  /^This \S+ command contains multiple operations\. The following parts? requires? approval\b/,
+  /^(?:PreToolUse|PermissionRequest)(?::\S+)? hook (?:error|blocking error|did not respond)\b/,
+  /^Operation stopped by hook\b/,
+  /^(?:<tool_use_error>)?(?:Error: )?File has been modified since read\b/,
+  /^(?:<tool_use_error>)?(?:Error: )?File has not been read yet\b/,
+  /^(?:<tool_use_error>)?Blocked: (?:standalone )?sleep \d/,
+  /^(?:<tool_use_error>)?\[supervisor:[0-9a-f]{6}\] You are paused\b/,
+]
+
+// True when a failed tool result is a refusal of the environment rather than a failure of the agent's work. Pure.
+export function environmentError(text: string): boolean {
+  if (typeof text !== 'string') return false
+  const t = text.trimStart()
+  return t !== '' && ENVIRONMENT_ERRORS.some((p) => p.test(t))
+}
 
 export function features(ob: Observation): Features {
+  // A refused call did nothing: no attempt, no error, no test run, no edit.
+  if (!ob.ok && environmentError(ob.text)) return { attempts: 0, sig: '', counts: [], env: true }
   // Failing counts per test run in the output; plain text without a recognised summary falls back
   // to the first "N failed" it mentions.
   const runs = parseTestRuns(ob.text)
@@ -239,8 +283,38 @@ export function features(ob: Observation): Features {
   const attempts = Math.max(ob.ok ? 0 : 1, failedRuns, badExits)
   const f: Features = { attempts, sig: attempts > 0 ? normalizeError(ob.text) : '', counts }
   if (EDIT_TOOLS.includes(ob.tool) && ob.summary) f.edit = normalizePath(ob.summary)
+  if (typeof ob.group === 'number' && Number.isFinite(ob.group)) f.group = ob.group
   return f
 }
+
+// Which assistant message a tool call belongs to. There is no message id on tool.call, but an agent's calls all start
+// after the model request that asked for them began and before its next request begins, and the request's result
+// lists the calls it asked for. So a call belongs to the agent's latest request while that request has calls left;
+// past them, or before any request was seen, it belongs to no known message (and every call counts on its own).
+
+// One model request of an agent starts: the tool calls it asks for belong to this request's message.
+export function beginRequest<T extends AgentState>(s: T): T {
+  const { messageTools: _known, ...rest } = s
+  return { ...rest, requests: (s.requests ?? 0) + 1, messageCalls: 0 } as T
+}
+
+// The request ended asking for `toolUses` tool calls.
+export function endRequest<T extends AgentState>(s: T, toolUses: number): T {
+  return { ...s, messageTools: toolUses }
+}
+
+// A tool call of the agent starts: its message, when it can belong to the latest request.
+export function startCall<T extends AgentState>(s: T): { state: T; group?: number } {
+  const calls = (s.messageCalls ?? 0) + 1
+  const state = { ...s, messageCalls: calls }
+  if (s.requests === undefined || (s.messageTools !== undefined && calls > s.messageTools)) return { state }
+  return { state, group: s.requests }
+}
+
+const failedSoFar = (s: AgentState): number => Object.values(s.errorCounts).reduce((n, c) => n + c, 0)
+
+// What progress (or a fresh ladder) forgets of the agent's edits.
+const noEdits = (): Pick<AgentState, 'editCounts' | 'editMarks' | 'retryEdits'> => ({ editCounts: {}, editMarks: {}, retryEdits: {} })
 
 type Decision = { state: AgentState; action?: Action; consultSkipped?: boolean; progress?: boolean }
 
@@ -250,7 +324,7 @@ type Decision = { state: AgentState; action?: Action; consultSkipped?: boolean; 
 // `f` is the call's features when the caller already read them (the recorder does).
 export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT_CONFIG, consultOpen = true, blocked: readonly Tier[] = [], f: Features = features(ob)): Decision {
   const out = decide(prev, f, cfg, consultOpen, blocked)
-  const log = [...prev.log, `${ob.tool}: ${ob.summary.slice(0, 120)} -> ${f.attempts === 0 ? 'ok' : 'ERR ' + f.sig.slice(0, 100)}`]
+  const log = [...prev.log, `${ob.tool}: ${ob.summary.slice(0, 120)} -> ${f.env ? 'refused by the environment' : f.attempts === 0 ? 'ok' : 'ERR ' + f.sig.slice(0, 100)}`]
   if (log.length > cfg.logSize) log.splice(0, log.length - cfg.logSize)
   out.state.log = log
   // One ring entry per failed log line (same rule as the "ERR" mark above), so the dossier can match them from the end.
@@ -261,43 +335,58 @@ export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT
 // The score and the ladder decision of one tool result, from its features alone (no log, no error text): what
 // observe decides live, and what a replay decides with another configuration.
 export function decide(prev: AgentState, f: Features, cfg: Config = DEFAULT_CONFIG, consultOpen = true, blocked: readonly Tier[] = []): Decision {
+  // A call the environment refused is no step of the agent's work: nothing changes, not even the grace window.
+  if (f.env) return { state: { ...prev } }
   const s: AgentState = { ...prev, errorCounts: { ...prev.errorCounts }, editCounts: { ...prev.editCounts } }
   s.stepsSinceAction++
   let progress = false
+  const failedBefore = failedSoFar(s)
 
-  for (let i = 0; i < f.attempts; i++) {
+  // Calls of one assistant message run in parallel: the same failure seen again in the same message is one failure,
+  // so such a repeat adds nothing (neither for its error nor for its test count).
+  let repeat = false
+  if (f.group !== undefined) {
+    if (s.message !== f.group) { s.message = f.group; s.messageSigs = [] }
+    if (f.attempts > 0) {
+      repeat = (s.messageSigs ?? []).includes(f.sig)
+      if (!repeat) s.messageSigs = [...(s.messageSigs ?? []), f.sig].slice(-20)
+    }
+  }
+
+  for (let i = 0; i < (repeat ? 0 : f.attempts); i++) {
     const n = (s.errorCounts[f.sig] ?? 0) + 1
     s.errorCounts[f.sig] = n
     s.score += n >= 2 ? 1 : 0.25
   }
 
-  // Oscillation: the same file edited again and again without progress, whatever the errors say.
+  // Oscillation: the same file edited again and again without progress, whatever the errors say. Only an edit made
+  // after a failed attempt (since the previous edit of that file) counts: a run of edits with no failure is work.
   if (f.edit !== undefined) {
-    const edits = s.editCounts[f.edit] ?? 0
-    if (edits >= cfg.oscillationEdits) s.score += 1
-    s.editCounts[f.edit] = edits + 1
+    s.editCounts[f.edit] = (s.editCounts[f.edit] ?? 0) + 1
+    if (failedBefore > (s.editMarks?.[f.edit] ?? 0)) {
+      const retries = s.retryEdits?.[f.edit] ?? 0
+      if (retries >= cfg.oscillationEdits) s.score += 1
+      s.retryEdits = { ...s.retryEdits, [f.edit]: retries + 1 }
+    }
+    s.editMarks = { ...s.editMarks, [f.edit]: failedBefore }
   }
 
   // Runs are applied in order. Progress wipes the score; later runs of the same output that do not
   // improve on the new baseline count again, so only the end state decides whether the call was progress.
-  for (const failing of f.counts) {
+  // A count that goes up (new failing tests, as in the red phase of TDD) adds nothing by itself.
+  for (const failing of repeat ? [] : f.counts) {
     if (failing === 0 || (s.lastFailing !== undefined && failing < s.lastFailing)) {
       progress = true
-      s.score = 0
-      s.errorCounts = {}
-      s.editCounts = {}
+      Object.assign(s, { score: 0, errorCounts: {}, ...noEdits() })
     } else if (s.lastFailing !== undefined) {
-      s.score += 1
+      if (failing === s.lastFailing) s.score += 1
       progress = false
     }
     s.lastFailing = failing
   }
 
   if (progress) {
-    s.score = 0
-    s.stepsSinceProgress = 0
-    s.errorCounts = {}
-    s.editCounts = {}
+    Object.assign(s, { score: 0, stepsSinceProgress: 0, errorCounts: {}, ...noEdits() })
     return { state: s, progress: true }
   }
 
@@ -362,6 +451,24 @@ export function isSilent(s: AgentState, now: number, cfg: Config = DEFAULT_CONFI
   return silent > window ? silent : undefined
 }
 
+// The silence window of a running agent starts again now: a gap that says nothing about the agent (the account at
+// its usage limit, the session closed or reloaded) is never counted as its silence.
+export function restartSilence<T extends AgentState>(s: T, now: number): T {
+  return s.running ? { ...s, lastEventAt: now } : s
+}
+
+// The session ended: whatever ran is over (its next event, after a resume, starts a new run for the stall check).
+export function sessionClosed<T extends AgentState>(s: T): T {
+  return { ...s, running: false, inFlight: 0, stalled: false }
+}
+
+// True when a rate-limit window of the account (`$.session.usage().rateLimits`) is used up: agents then wait for the
+// limit, they are not stuck.
+export function limitReached(rateLimits: unknown): boolean {
+  return Array.isArray(rateLimits) && rateLimits.some((w) =>
+    typeof w === 'object' && w !== null && typeof (w as { percentUsed?: unknown }).percentUsed === 'number' && (w as { percentUsed: number }).percentUsed >= 100)
+}
+
 // Flags the agent. A silent agent with no tool call running also gets its score raised to its threshold, so its
 // next tool call earns the next ladder note. With a tool call in flight the command may simply be slow: only
 // flag it (the lead is notified); if the command fails, the usual error signals take over.
@@ -379,7 +486,7 @@ export function pauseAgent(s: AgentState): AgentState {
 // grace window). With `now` it also counts as active then, so the pause itself is never read as silence.
 export function resumeAgent(s: AgentState, now?: number): AgentState {
   const { paused: _paused, lastFailing: _lastFailing, ...rest } = s
-  const fresh: AgentState = { ...rest, score: 0, level: 0, stepsSinceAction: 0, stepsSinceProgress: 0, errorCounts: {}, editCounts: {}, stalled: false }
+  const fresh: AgentState = { ...rest, score: 0, level: 0, stepsSinceAction: 0, stepsSinceProgress: 0, errorCounts: {}, ...noEdits(), stalled: false }
   return now === undefined ? fresh : { ...fresh, lastEventAt: now }
 }
 
@@ -397,7 +504,7 @@ export function noteProgress(s: AgentState, cfg: Config = DEFAULT_CONFIG, simula
   if (n < cfg.deescalateAfter) return { state: { ...s, progressSignals: n } }
   const back = LADDER[Math.max(tierRank(s.startTier), tierRank(s.tier) - 1)]!
   const state: AgentState = { ...s, tier: simulated ? s.tier : back, progressSignals: 0, deescalated: true,
-    score: 0, level: swapAt, stepsSinceAction: 0, errorCounts: {}, editCounts: {} }
+    score: 0, level: swapAt, stepsSinceAction: 0, errorCounts: {}, ...noEdits() }
   return { state, decided: true, tier: simulated ? undefined : back }
 }
 

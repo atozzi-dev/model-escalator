@@ -2,7 +2,7 @@
 
 model-escalator is a [Claude Code](https://code.claude.com) mod that runs subagents and in-process teammates on cheaper models and watches them. When one gets stuck (the same error again and again, failing tests that do not improve) it intervenes one step at a time: a nudge; a one-off consult with a senior model whose advice goes back to the agent; a hot swap that moves the same agent one model tier up and keeps its context; and finally a stop that hands control back to you. It also learns which model to start each kind of task on, and it meters what the work costs against the same work on your lead's model. The savings are estimates from API list prices, not guarantees: escalations and consults are part of the real cost, so a session can come out worse than the baseline.
 
-Status: version 0.1.0. Start with `observe` mode on a real project (see [Quick start](#quick-start)).
+Status: version 1.0.0. Start with `observe` mode on a real project (see [Quick start](#quick-start)).
 
 ## Requirements and installation
 
@@ -60,7 +60,7 @@ The mode is read from the `MODEL_ESCALATOR_MODE` environment variable when the s
 
 ## How the ladder works
 
-Each tracked agent has a difficulty score. It grows when the agent repeats the same failing command or error, when it keeps failing tests without progress, when it edits the same file again and again without progress (`oscillationEdits`), and when it makes many model requests without progress. Progress (for example failing tests dropping) resets it.
+Each tracked agent has a difficulty score. It grows when the agent repeats the same failing command or error, when it keeps failing tests without progress, when it edits the same file again and again between failed attempts (`oscillationEdits`), and when it makes many model requests without progress. Progress (for example failing tests dropping) resets it. Test summaries of jest, vitest, pytest, go test, cargo test and bun test are read. Some results never count: a call that Claude Code refused before it ran (a permission rule or prompt, the auto mode classifier, a hook, a stale or unread file, a blocked `sleep`), the same failure repeated by the parallel calls of one assistant message, and new failing tests added while writing tests first (a failing count that goes up).
 
 When the score reaches the threshold of the agent's starting tier (`thresholdHaiku`, `thresholdSonnet`, `thresholdOpus`) and `graceSteps` steps have passed since the last intervention, the next enabled level fires:
 
@@ -108,7 +108,7 @@ These are the subcommands listed by `/escalator help`:
 
 ### The agent map and the stats panel
 
-`/escalator map` draws the lead, every worker and the senior model, each with its model, what it is doing, its difficulty level and its cost, and the escalations and consults between them. On the desktop app, VS Code and mobile it is an animated SVG; in the terminal it is a coloured text tree with a spinner on working agents. Selecting an agent with the buttons under the drawing shows its detail (category, tiers, state, difficulty, cost, interventions, last failed attempts), with Consult now and Swap now buttons in active mode.
+`/escalator map` draws the lead, every worker and the senior model, each with its model, what it is doing, its difficulty level and its cost, and the escalations and consults between them. Where the client draws mod panes as SVG (the desktop app; VS Code and mobile where their Claude Code client draws them) it is an animated SVG; in the terminal it is a coloured text tree with a spinner on working agents. The command says which surface it used, or that the session has none. Selecting an agent with the buttons under the drawing shows its detail (category, tiers, state, difficulty, cost, interventions, last failed attempts), with Consult now and Swap now buttons in active mode.
 
 ![Example agent map: the lead on Opus, three workers on Haiku, Sonnet and Opus, a consult to the senior model and a swap from Haiku to Sonnet](docs/agent-map.svg)
 
@@ -121,11 +121,11 @@ Options are set from `/config` or under `pluginConfigs` in your settings (key `m
 | Option | Default | Meaning |
 |---|---|---|
 | `thresholdHaiku` | 3 | Difficulty score at which an agent that started on Haiku gets its next intervention |
-| `thresholdSonnet` | 4 | The same, for an agent that started on Sonnet |
-| `thresholdOpus` | 6 | The same, for an agent that started on Opus |
+| `thresholdSonnet` | 5 | The same, for an agent that started on Sonnet |
+| `thresholdOpus` | 7 | The same, for an agent that started on Opus |
 | `graceSteps` | 4 | Steps to wait after an intervention before the next one |
-| `oscillationEdits` | 3 | Edits of the same file without progress tolerated before each further edit raises the score |
-| `stallMinutes` | 10 | Minutes without any event after which a running agent is reported as stalled (log, status line, toast in active mode); its next tool call gets the next ladder note. A tool call still running counts as activity for three times this long |
+| `oscillationEdits` | 5 | Edits of the same file made after a failed attempt, without progress, tolerated before each further such edit raises the score. Edits with no failure in between never count |
+| `stallMinutes` | 10 | Minutes without any event after which a running agent is reported as stalled (log, status line, toast in active mode); its next tool call gets the next ladder note. A tool call still running counts as activity for three times this long. Nothing is reported while the session is closed or the account is at its usage limit |
 | `verifyCommand` | empty (off) | Check run at the end of each tracked agent's run, for example `npm test`. Split on spaces, quotes group, no shell: no pipes or redirects. A non-zero exit counts as a failed run for learning. See the note below |
 | `verifyTimeoutSeconds` | 120 | How long the check may run before it is abandoned and ignored (at most 600) |
 | `reviewRate` | 0 (off) | Share of the finished runs of cheaper models that a senior model reviews, from 0 to 1 (`0.1` is about one run in ten). Each review is one senior call |
@@ -188,7 +188,7 @@ This section lists what `claude plugin validate plugin` reports for the mod. Not
 - **Hooks:** `session.start`, `session.end`, `agent.spawn`, `tool.call` (all tool calls, to follow the agents, and the `ask_for_help` call), `turn.step` (usage metering, and the model rewrite on a swap), `turn.complete`, `command.run` (`/escalator`), `ui.render` (the map and stats panes), `ui.close`. Hooks that can block an agent catch their own errors and let the call through.
 - **Command:** `/escalator`.
 - **Tool:** `ask_for_help`, registered in active and observe mode. Every agent of the session sees it, the lead included; only tracked agents get an answer, and other callers get "Help is not available for this agent."
-- **Panels:** the map and the stats panel (`$.ui.open`, `$.ui.invalidate`, `$.ui.close`, `$.ui.panes`, `$.ui.resolve`).
+- **Panels:** the map and the stats panel (`$.ui.open`, `$.ui.invalidate`, `$.ui.close`, `$.ui.panes`, `$.ui.resolve`, `$.session.surfaces` to tell whether the session draws panels at all).
 - **UI output:** log lines, status line, toasts (`$.ui.log`, `$.ui.status`, `$.ui.toast`), and in active mode short notices in the main conversation (`$.session.append`, `notifyLead`).
 - **Environment variables (read only):** `MODEL_ESCALATOR_MODE`, `MODEL_ESCALATOR_BASELINE`, `EVAL_MODEL_ESCALATOR_MODE`, `EVAL_MODEL_ESCALATOR_BASELINE`.
 - **Session state:** key `model-escalator.session` (`$.state.get`, `$.state.set`): the per-agent snapshot, including recent tool summaries (file paths and command lines) and error text. It is redacted only when it is sent to the senior model.
@@ -212,7 +212,7 @@ These points come from the engine's documentation of hooks and from this mod's c
 
 ## Evaluations
 
-The repository includes seven A/B eval cases, comparing the escalation ladder with an all-strong-model baseline on tasks from easy to hard, with hidden acceptance tests. See [plugin/evals/README.md](plugin/evals/README.md) for how to run them. `scripts/ab-compare.mjs` compares the baseline and active results per case (score, spread, cost, verdict) and can write the table as Markdown: `node scripts/ab-compare.mjs baseline.json active.json`.
+The repository includes seven A/B eval cases, comparing the escalation ladder with an all-strong-model baseline on tasks from easy to hard, with hidden acceptance tests. See [plugin/evals/README.md](plugin/evals/README.md) for how to run them; on Windows, where `claude plugin eval` cannot grant Bash, use `scripts/ab-run.mjs` (same results format, see the "Windows" section there). `scripts/ab-compare.mjs` compares the baseline and active results per case (score, spread, cost, verdict) and can write the table as Markdown: `node scripts/ab-compare.mjs baseline.json active.json`.
 
 ## Limitations
 
@@ -225,6 +225,7 @@ The repository includes seven A/B eval cases, comparing the escalation ladder wi
 - **Models your organisation does not allow.** A refused swap target is not tried again in the session, the agent moves to the human level and you get a notice. A refused senior model is skipped for consults.
 - **Bedrock, Vertex and gateways.** The mod learns each tier's id from the requests it sees and prefers the shape of the lead's id; for a tier it never saw it uses the first-party id. If swaps report a model as not available, set `modelIds`.
 - **Supervisor notes are tagged, not hidden.** A note carries a per-session tag (`[supervisor:xxxxxx]`) so an agent can tell it from text in tool output. Text that claims to be a note without that tag is not one.
+- **VS Code extension.** As of Claude Code 2.1.296 the VS Code extension runs sessions without a surface for mod panes: `/escalator map` and `/escalator panel` say so instead of opening a pane nobody sees. Use Claude Code in a terminal (the VS Code integrated terminal works) or the desktop app. `/escalator`, `/escalator stats` and the other text commands work everywhere.
 - **Savings are estimates.** They come from list prices and the token counts the requests report; they are not a bill.
 
 ## Contributing and security
