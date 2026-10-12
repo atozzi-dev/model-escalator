@@ -58,6 +58,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ### Fixed
 
+- An agent spawned without a name is labelled by its task description on the map, in the logs and in `/escalator` commands, instead of by its category or raw id.
 - Calls that Claude Code refused before running them (permission rules, auto mode, hooks, a worktree guard, stale or unread files, a blocked sleep) no longer count towards an agent's difficulty score; recordings mark them.
 - Test summaries of `bun test` (and `claude plugin test`) are read, so failing counts and progress work in bun projects.
 - No stall is reported while the session is closed or the account is at its usage limit.
