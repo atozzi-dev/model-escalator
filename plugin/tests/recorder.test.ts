@@ -53,6 +53,16 @@ test('a tool event keeps derived features only: hashed signature and file, faili
   expect((tests as { f?: number[] }).f).toEqual([2])
 })
 
+test('a call refused by the environment is marked, with no attempt, signature or file', async () => {
+  const live = fresh()
+  const a = addAgent(live, { id: 'x1', label: 'fixer', cat: 'c', tier: 'haiku' })
+  const f = features({ tool: 'Edit', ok: false, text: '<tool_use_error>File has been modified since read, either by the user or by a linter.</tool_use_error>', summary: 'C:\\Secret\\Plan.ts' })
+  expect(toolEvent(live, a, 1_005_000, 1_004_000, 'Edit', f)).toEqual({ k: 'tool', a, at: 5000, d: 1000, t: 'Edit', env: 1 })
+  expect(Object.keys(live.rec.sigs).length).toBe(0)
+  // The format stays the same version: older recordings, which never carry the mark, still read back.
+  expect(RECORDING_VERSION).toBe(1)
+})
+
 test('signature texts lose Windows and UNC paths too, and secrets', async () => {
   expect(sigText('Error: ENOENT C:\\Users\\alice\\proj\\a.ts not found')).toBe('Error: ENOENT <path> not found')
   expect(sigText('cannot open \\\\server\\share\\x.txt')).toBe('cannot open <path>')

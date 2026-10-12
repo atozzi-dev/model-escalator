@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import { DEFAULT_CONFIG, parseConfig } from '../hooks/config'
 import { resetState } from '../hooks/register'
-import type { Recording } from '../hooks/recorder'
+import { addAgent, push as recPush, recordedOptions, startRecording, type Recording } from '../hooks/recorder'
 import { configOf, parseReplayArgs, REPLAY_KEYS, replayReport, replaySession, type AgentResult } from '../hooks/replay'
 
 type Drainable = { result: Promise<unknown> } & AsyncIterable<unknown>
@@ -150,6 +150,28 @@ test('a stall is replayed from the recorded silences, on the stall timer of the 
   expect(a.candidate).toEqual(a.actual)
   // A longer window sees no stall, and so no nudge either.
   expect(replaySession(rec, parseConfig({ stallMinutes: 10 })).agents[0]!.candidate).toEqual([])
+})
+
+// A hand-built observe session of one haiku agent: `tools` are its recorded tool events, one step before each.
+function handBuilt(tools: Record<string, unknown>[]): Recording {
+  const live = startRecording('hand', 0, 'observe', 'opus', recordedOptions(DEFAULT_CONFIG))
+  const a = addAgent(live, { id: 'x', label: 'x', cat: 'c', tier: 'haiku' })
+  recPush(live, { k: 'boot', at: 0 })
+  recPush(live, { k: 'spawn', a, at: 1, asked: 'haiku', tier: 'haiku' })
+  tools.forEach((t, i) => {
+    recPush(live, { k: 'step', a, at: 10 * i + 2, d: 0, m: 'haiku' })
+    recPush(live, { k: 'tool', a, at: 10 * i + 3, d: 0, t: 'Bash', ...t } as never)
+  })
+  recPush(live, { k: 'end', a, at: 10 * tools.length + 5 })
+  return live.rec
+}
+
+test('calls the recording marks as refused by the environment are replayed as refused; older recordings replay as before', async () => {
+  const refused = handBuilt(Array.from({ length: 20 }, () => ({ env: 1 })))
+  expect(ladder(replaySession(refused, DEFAULT_CONFIG).agents[0]!.candidate)).toEqual([])
+  // An older recording has no mark: its failed calls carry their attempts and signature, and score.
+  const older = handBuilt(Array.from({ length: 20 }, () => ({ n: 1, s: 'abc' })))
+  expect(ladder(replaySession(older, DEFAULT_CONFIG).agents[0]!.candidate).length).toBeGreaterThan(0)
 })
 
 test('arguments are checked with the same validation as the options', async () => {

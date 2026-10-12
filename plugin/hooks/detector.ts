@@ -222,10 +222,41 @@ export type Observation = { tool: string; ok: boolean; text: string; summary: st
 
 // What the score reads from one tool result, without its text: the failed attempts in it, the signature of its
 // error (empty when nothing failed), the failing count of each test run in it, and the edited file (normalised;
-// only for an edit tool). The recorder keeps these, so a replay scores exactly what the live detector scored.
-export type Features = { attempts: number; sig: string; counts: number[]; edit?: string }
+// only for an edit tool). `env` marks a call the environment refused before it did anything. The recorder keeps
+// these, so a replay scores exactly what the live detector scored.
+export type Features = { attempts: number; sig: string; counts: number[]; edit?: string; env?: true }
+
+// Refusals by Claude Code itself (a permission rule or prompt, the auto mode classifier, a safety check, the worktree
+// guard, a hook, a stale or unread file, a standalone sleep, the mod's own pause): the tool never ran, so the result
+// says nothing about the agent's work. Each pattern is anchored at the start of the result, where the engine puts its
+// refusal; a failure of the tool itself starts otherwise ("Exit code 1", the program's own output).
+const ENVIRONMENT_ERRORS: readonly RegExp[] = [
+  /^This agent is isolated in the worktree\b[\s\S]*\bRefusing to run it\b/,
+  /^Refusing to use \S+ as an isolation worktree\b/,
+  /^Permission for this (?:action|command) (?:was|has been) denied\b/,
+  /^Permission to use \S+(?: with command [\s\S]*?)? has been denied\./,
+  /^[^\n]{1,400} was blocked by a deny rule\b/,
+  /^The server-side auto mode classifier gave no verdict\b/,
+  /^The user doesn't want to proceed with this tool use\b/,
+  /^This \S+ command contains multiple operations\. The following parts? requires? approval\b/,
+  /^(?:PreToolUse|PermissionRequest)(?::\S+)? hook (?:error|blocking error|did not respond)\b/,
+  /^Operation stopped by hook\b/,
+  /^(?:<tool_use_error>)?(?:Error: )?File has been modified since read\b/,
+  /^(?:<tool_use_error>)?(?:Error: )?File has not been read yet\b/,
+  /^(?:<tool_use_error>)?Blocked: (?:standalone )?sleep \d/,
+  /^(?:<tool_use_error>)?\[supervisor:[0-9a-f]{6}\] You are paused\b/,
+]
+
+// True when a failed tool result is a refusal of the environment rather than a failure of the agent's work. Pure.
+export function environmentError(text: string): boolean {
+  if (typeof text !== 'string') return false
+  const t = text.trimStart()
+  return t !== '' && ENVIRONMENT_ERRORS.some((p) => p.test(t))
+}
 
 export function features(ob: Observation): Features {
+  // A refused call did nothing: no attempt, no error, no test run, no edit.
+  if (!ob.ok && environmentError(ob.text)) return { attempts: 0, sig: '', counts: [], env: true }
   // Failing counts per test run in the output; plain text without a recognised summary falls back
   // to the first "N failed" it mentions.
   const runs = parseTestRuns(ob.text)
@@ -250,7 +281,7 @@ type Decision = { state: AgentState; action?: Action; consultSkipped?: boolean; 
 // `f` is the call's features when the caller already read them (the recorder does).
 export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT_CONFIG, consultOpen = true, blocked: readonly Tier[] = [], f: Features = features(ob)): Decision {
   const out = decide(prev, f, cfg, consultOpen, blocked)
-  const log = [...prev.log, `${ob.tool}: ${ob.summary.slice(0, 120)} -> ${f.attempts === 0 ? 'ok' : 'ERR ' + f.sig.slice(0, 100)}`]
+  const log = [...prev.log, `${ob.tool}: ${ob.summary.slice(0, 120)} -> ${f.env ? 'refused by the environment' : f.attempts === 0 ? 'ok' : 'ERR ' + f.sig.slice(0, 100)}`]
   if (log.length > cfg.logSize) log.splice(0, log.length - cfg.logSize)
   out.state.log = log
   // One ring entry per failed log line (same rule as the "ERR" mark above), so the dossier can match them from the end.
@@ -261,6 +292,8 @@ export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT
 // The score and the ladder decision of one tool result, from its features alone (no log, no error text): what
 // observe decides live, and what a replay decides with another configuration.
 export function decide(prev: AgentState, f: Features, cfg: Config = DEFAULT_CONFIG, consultOpen = true, blocked: readonly Tier[] = []): Decision {
+  // A call the environment refused is no step of the agent's work: nothing changes, not even the grace window.
+  if (f.env) return { state: { ...prev } }
   const s: AgentState = { ...prev, errorCounts: { ...prev.errorCounts }, editCounts: { ...prev.editCounts } }
   s.stepsSinceAction++
   let progress = false
