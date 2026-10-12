@@ -78,6 +78,33 @@ test('generic "N failed, M passed" style in either order', async () => {
   expect(parseTestRuns('Results: 3 failing | 9 passing')).toEqual([{ framework: 'generic', failed: 3, passed: 9 }])
 })
 
+test('bun summary (bun test, claude plugin test): one run per pass/fail pair', async () => {
+  const failing = [
+    '(pass) adds numbers [1.20ms]',
+    '(fail) subtracts numbers [0.80ms]',
+    '',
+    ' 699 pass',
+    ' 2 fail',
+    ' 1234 expect() calls',
+    'Ran 701 tests across 58 files. [46.60s]',
+  ].join('\n')
+  expect(parseTestRuns(failing)).toEqual([{ framework: 'bun', failed: 2, passed: 699 }])
+  expect(parseTestRuns(' 705 pass\n 0 fail\nRan 705 tests across 58 files. [46.60s]')).toEqual([{ framework: 'bun', failed: 0, passed: 705 }])
+  // Skipped and todo counts may stand between the two lines.
+  expect(parseTestRuns(' 3 pass\n 1 skip\n 1 todo\n 4 fail')).toEqual([{ framework: 'bun', failed: 4, passed: 3 }])
+  expect(parseTestRuns(`${ESC}[32m 5 pass${ESC}[0m\n${ESC}[31m 1 fail${ESC}[0m`)).toEqual([{ framework: 'bun', failed: 1, passed: 5 }])
+  // A loop over the suite gives one run per summary.
+  expect(parseTestRuns(' 3 pass\n 2 fail\n 4 pass\n 1 fail').map((r) => r.failed)).toEqual([2, 1])
+  // A summary cut before its fail line still counts its passes, closed by the "Ran" line.
+  expect(parseTestRuns(' 9 pass\nRan 9 tests across 1 file. [5.00ms]')).toEqual([{ framework: 'bun', failed: 0, passed: 9 }])
+})
+
+test('bun-like words inside ordinary text are not a summary', async () => {
+  expect(parseTestRuns('we pass 3 values')).toEqual([])
+  expect(parseTestRuns('3 pass\nthe build is fine')).toEqual([])
+  expect(parseTestRuns('ticket 12 fail on retry')).toEqual([])
+})
+
 test('several runs in one output are all returned, in order', async () => {
   const one = (n: number) => `run ${n}\nTests:       ${n} failed, 5 passed, ${n + 5} total\nexit=1\n`
   const out = [3, 2, 2].map(one).join('')
