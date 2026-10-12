@@ -2,7 +2,7 @@
 
 model-escalator is a [Claude Code](https://code.claude.com) mod that runs subagents and in-process teammates on cheaper models and watches them. When one gets stuck (the same error again and again, failing tests that do not improve) it intervenes one step at a time: a nudge; a one-off consult with a senior model whose advice goes back to the agent; a hot swap that moves the same agent one model tier up and keeps its context; and finally a stop that hands control back to you. It also learns which model to start each kind of task on, and it meters what the work costs against the same work on your lead's model. The savings are estimates from API list prices, not guarantees: escalations and consults are part of the real cost, so a session can come out worse than the baseline.
 
-Status: version 0.1.0. Start with `observe` mode on a real project (see [Quick start](#quick-start)).
+Status: version 1.0.0. Start with `observe` mode on a real project (see [Quick start](#quick-start)).
 
 ## Requirements and installation
 
