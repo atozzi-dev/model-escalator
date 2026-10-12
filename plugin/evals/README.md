@@ -11,6 +11,7 @@ In every case the lead (the session model) plans the work and delegates it to su
 
 - Claude Code 2.1.295 or later, logged in.
 - `node` 20 or later and `bash` on the `PATH` (on Windows, Git Bash). The cases use only Node built-ins (`node:test`, `node:assert`): no network, no package installs.
+- On Windows, `claude plugin eval` starts each scaffold as plain `bash` from your `PATH`. In PowerShell and `cmd` the first `bash` on the `PATH` is usually the WSL launcher (`C:\Windows\System32\bash.exe`), and every run then fails with `scaffold failed (exit 1): ... execvpe(/bin/bash) failed`. Put Git Bash first for that terminal, in PowerShell: `$env:PATH = "C:\Program Files\Git\usr\bin;" + $env:PATH`. A Git Bash terminal already has it first.
 
 ## Running both arms
 
@@ -39,7 +40,7 @@ Why each flag:
 - `--max-cost-usd`: hard ceiling per arm; see the estimate below.
 - `--json`: the full result (per run: score, turns, cost, grader verdicts) for the comparison.
 
-The first run in this folder asks you to confirm that you trust the plugin (`--trust-plugin` answers it in CI). For a quick smoke test, filter cases: `--case paginate-off-by-one`, `--tag easy` or `--tag hard`, and `--runs 1`. The judge of the LLM grader defaults to Haiku; `--judge-model` changes it.
+The first run in this folder asks you to confirm that you trust the plugin. A run with `--json` (or in CI) cannot ask and stops with "not a trusted plugin directory": add `--trust-plugin`, or run once without `--json` to trust the folder. For a quick smoke test, filter cases: `--case paginate-off-by-one`, `--tag easy` or `--tag hard`, and `--runs 1`. The judge of the LLM grader defaults to Haiku; `--judge-model` changes it.
 
 ## The cases
 
