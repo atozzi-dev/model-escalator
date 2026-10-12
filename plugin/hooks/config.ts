@@ -39,7 +39,11 @@ export type Config = {
   modelCategories: boolean          // classify tasks with a small model (one short call per uncached spawn) instead of keywords only
   minReviewScore: number            // lowest review score (1 to 5) of an accepted run
   reworkWindowMinutes: number       // minutes after a cheap agent's run during which a lead edit of its files counts as rework; 0 = off
+  recordSessions: number            // sessions whose observation stream is recorded for /escalator replay (newest kept); 0 = off
 }
+
+// Most sessions the recorder keeps, whatever the option asks for (the store also caps the bytes).
+export const MAX_RECORD_SESSIONS = 50
 
 // USD per million tokens, Anthropic API list prices (Oct 2026), checked against /cost.
 // Cache writes cost 1.25x input for the 5-minute TTL and 2x input for the 1-hour TTL.
@@ -95,6 +99,8 @@ export const DEFAULT_CONFIG: Config = {
   modelCategories: false,
   minReviewScore: 3,
   reworkWindowMinutes: 30,
+  // Off by default: the recording lives in the plugin's store, next to the learned statistics.
+  recordSessions: 0,
   modelIds: { haiku: 'claude-haiku-5-5', sonnet: 'claude-sonnet-5-5', opus: 'claude-opus-5-5' },
 }
 
@@ -234,8 +240,14 @@ function optionValues(c: Config): [string, unknown][] {
     ['reviewRate', c.reviewRate], ['reviewModel', c.reviewModel], ['explore', c.explore],
     ['respectExplicitModel', c.respectExplicitModel], ['learnByCost', c.learnByCost], ['modelCategories', c.modelCategories],
     ['minReviewScore', c.minReviewScore], ['reworkWindowMinutes', c.reworkWindowMinutes],
+    ['recordSessions', c.recordSessions],
     ['prices', c.prices], ['modelIds', c.modelOverrides],
   ]
+}
+
+// The value in force of one option, by its user-facing name (as /escalator config shows it); undefined for an unknown name.
+export function optionValue(c: Config, name: string): unknown {
+  return optionValues(c).find(([n]) => n === name)?.[1]
 }
 
 function shown(v: unknown): string {
@@ -277,6 +289,7 @@ export function parseConfig(raw: Raw | undefined): Config {
     const explore = num(o.explore)
     const minScore = num(o.minReviewScore)
     const rework = num(o.reworkWindowMinutes)
+    const record = num(o.recordSessions)
     const reviewer = typeof o.reviewModel === 'string' ? o.reviewModel.trim() : ''
     return {
       ...d,
@@ -314,6 +327,7 @@ export function parseConfig(raw: Raw | undefined): Config {
       modelCategories: bool(o.modelCategories, d.modelCategories),
       minReviewScore: minScore !== undefined && minScore >= 1 && minScore <= 5 ? minScore : d.minReviewScore,
       reworkWindowMinutes: rework !== undefined && rework >= 0 ? rework : d.reworkWindowMinutes,
+      recordSessions: record !== undefined && record >= 0 ? Math.min(Math.floor(record), MAX_RECORD_SESSIONS) : d.recordSessions,
       reviewModel: reviewer.length <= 100 ? reviewer : d.reviewModel,
     }
   } catch {

@@ -7,10 +7,10 @@ const drain = async (st: Drainable) => { for await (const _ of st) { /* chunks *
 
 type Harness = { lastValue: unknown; invalidations: number; sets: number; lastBytes: number; maxBytes: number; clock: ReturnType<typeof mock.clock> }
 
-function wire(on: any): Harness {
+function wire(on: any, ownStore = false): Harness {
   resetState()
   mock.env(on, {})
-  mock.store(on)
+  if (!ownStore) mock.store(on)
   const h: Harness = { lastValue: undefined, invalidations: 0, sets: 0, lastBytes: 0, maxBytes: 0, clock: mock.clock(on, { now: 1_000_000 }) }
   on('session.start', () => ({ cwd: '/work' }) as never)
   on('command.register', () => ({ value: undefined }) as never)
@@ -137,6 +137,44 @@ test('redraws stay at 4 a second for the map and 1 a second for the stats panel,
   }
   expect(h.invalidations).toBeLessThanOrEqual((4 + 1) * 10 + 4)
   expect(h.invalidations / 10).toBeLessThanOrEqual(10)
+})
+
+test('50 agents with the recorder on: a few store writes, none per call, and a record well under its cap', { timeoutMs: 30000, options: { recordSessions: 5 } }, async ($, on) => {
+  const h = wire(on, true)
+  on('session.end', () => ({ sessionId: 's' }) as never)
+  let writes = 0
+  let stored: unknown
+  const data: Record<string, unknown> = {}
+  on('store.get', (_$: unknown, e: any) => ({ value: data[e.key] }))
+  on('store.set', (_$: unknown, e: any) => {
+    data[e.key] = e.value
+    if (e.key === 'recordings') { writes++; stored = e.value }
+    return { value: undefined }
+  })
+  await $.session.start({ cwd: '/work' } as never)
+  const ids: string[] = []
+  for (let i = 0; i < 50; i++) ids.push(((await $.agent.spawn({ prompt: 'p', description: `fix db test ${i}`, subagentType: 'general-purpose', model: 'haiku', name: `worker-${i}` } as never)) as { agentId: string }).agentId)
+  for (let round = 0; round < 4; round++) {
+    for (const agentId of ids) {
+      await $.tool.call({ tool: 'Bash', command: `npm test ${round}`, agentId } as never)
+      await drain($.turn.step({ turnId: 't' + round, index: round, model: 'haiku', messageCount: 3, agentId } as never) as never)
+    }
+  }
+  // Steady traffic writes nothing; 50 ends in a row write once at once and once more after the gap.
+  expect(writes).toBe(0)
+  for (const agentId of ids) await $.turn.complete({ turnId: 'z', agentId, answer: 'done' } as never)
+  await h.clock.advance(6000)
+  await h.clock.settle()
+  expect(writes).toBe(2)
+  await $.session.end({ reason: 'exit' } as never)
+  expect(writes).toBeLessThanOrEqual(3)
+  const [rec] = stored as { events: unknown[]; agents: unknown[] }[]
+  expect(rec!.agents.length).toBe(50)
+  // 50 spawns, 200 tool results, 200 requests, 50 ends, plus the ladder actions and one boot mark.
+  expect(rec!.events.length).toBeGreaterThanOrEqual(501)
+  const bytes = JSON.stringify(rec).length
+  expect(bytes / rec!.events.length).toBeLessThan(120)
+  expect(bytes).toBeLessThan(64 * 1024)
 })
 
 test('tool calls that only move counters are written once, one second after the last write, with the latest state', async ($, on) => {

@@ -65,3 +65,12 @@ test('learningHalfLifeDays defaults to 30, 0 disables, invalid falls back', asyn
   expect(parseConfig({ learningHalfLifeDays: -3 }).learningHalfLifeDays).toBe(30)
   expect(parseConfig({ learningHalfLifeDays: 'x' }).learningHalfLifeDays).toBe(30)
 })
+
+test('recordSessions is off by default, a whole count of sessions, at most 50', async () => {
+  expect(DEFAULT_CONFIG.recordSessions).toBe(0)
+  expect(parseConfig({ recordSessions: 10 }).recordSessions).toBe(10)
+  expect(parseConfig({ recordSessions: '7.9' }).recordSessions).toBe(7)
+  expect(parseConfig({ recordSessions: 500 }).recordSessions).toBe(50)
+  expect(parseConfig({ recordSessions: -1 }).recordSessions).toBe(0)
+  expect(parseConfig({ recordSessions: 'many' }).recordSessions).toBe(0)
+})

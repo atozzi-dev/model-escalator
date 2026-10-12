@@ -1,7 +1,8 @@
 import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, describeConfig, parseConfig, splitCommand, type Config } from './config'
-import { LADDER, afterHelp, agentHead, agentLabel, allowedMax, nextTier, canAskForHelp, classifyFailure, clipLabel, consultLimit, countStep, EFFORTS, escalated, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_AGENT_NAME, MAX_LEAD_NOTICES, newAgent, noteProgress, normalizePath, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
+import { LADDER, afterHelp, agentHead, agentLabel, allowedMax, nextTier, canAskForHelp, classifyFailure, clipLabel, consultLimit, countStep, EFFORTS, endRun, escalated, features, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_AGENT_NAME, MAX_LEAD_NOTICES, newAgent, noteProgress, normalizePath, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type Features, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
+import { addAgent as addRecAgent, indexOf as recIndexOf, mergeRecordings, parseRecordings, push as recPush, recordedOptions, relTime, resumeRecording, startRecording, stepEvent, toolEvent, type Live, type RecEvent, type RecordedMode, type Recording } from './recorder'
 import { buildDossier, inputFromState } from './dossier'
 import { cacheGet, cachePut, cacheKey, classifierInput, combineCategory, LABELS, parseCache } from './classify'
 import { categorize, costPerAccepted, formatStats, isAccepted, mulberry32, parseProjects, projectKey, recommendScopedWithExploration, recordReviewScoped, recordReworkScoped, recordScoped, scopedStats, type Projects, type Stats } from './learning'
@@ -21,6 +22,7 @@ const STATS_KEY = 'stats'
 const PROJECTS_KEY = 'projects'
 const SESSIONS_KEY = 'sessions'
 const CATEGORIES_KEY = 'categories'
+const RECORDINGS_KEY = 'recordings'
 const CATEGORY_CACHE_MAX = 200
 const SENIOR_SYSTEM =
   'You advise a junior coding agent that is stuck. Read its attempts, name the most likely root cause, ' +
@@ -67,7 +69,7 @@ const runKey = (id: string, turnId: unknown): string => `${id}:${typeof turnId =
 const writtenFiles = new Map<string, string[]>()
 // Finished runs of cheap agents (key `agentId:turnId`) whose files the lead may rework, oldest first.
 type ReworkRun = {
-  category: string; tier: Tier; label: string; files: Set<string>; endedAt: number
+  id: string; category: string; tier: Tier; label: string; files: Set<string>; endedAt: number
   reworked: boolean
   accepted?: boolean   // how the run was counted, once it is recorded
   at?: number          // when it was recorded
@@ -355,6 +357,12 @@ export function resetState(): void {
   lastSaveAt = undefined
   trailing?.cancel()
   trailing = undefined
+  recording = undefined
+  recDirty = false
+  recFlushAt = undefined
+  recTrailing?.cancel()
+  recTrailing = undefined
+  recFailNoted = false
 }
 
 function snapshot(): Snapshot {
@@ -413,6 +421,116 @@ function saveSoon($: EngineInterface): Promise<void> {
   } catch {
     trailing = undefined
     return save($)
+  }
+}
+
+// ---- Session recorder (option recordSessions) ----
+// Events are appended in memory (hooks/recorder.ts keeps the size under its cap) and written to the store in
+// batches: at the end of an agent's run (at most every REC_FLUSH_GAP_MS, with one trailing write), from the stall
+// check when REC_PERIODIC_MS passed since the last write, and at session end. Never per tool call or request.
+const REC_FLUSH_GAP_MS = 5000
+const REC_PERIODIC_MS = 30_000
+let recording: Live | undefined
+let recDirty = false
+let recFlushAt: number | undefined
+let recTrailing: { cancel: () => void } | undefined
+let recFailNoted = false
+
+const recordingOn = (): boolean => recording !== undefined && config.recordSessions > 0 && mode !== 'off'
+
+// The recorded index of a known agent. One the recording has not seen spawn (a reset of the recordings, events lost
+// in a reload) is added as cut, so a replay skips it. Undefined when the recorder is off or the agent is unknown.
+function recAgent(id: string | undefined): number | undefined {
+  if (!recordingOn() || id === undefined) return undefined
+  const known = recIndexOf(recording!, id)
+  if (known !== undefined) return known
+  const a = agents.get(id)
+  return a ? addRecAgent(recording!, { id, label: a.name ?? '', cat: a.category, tier: a.startTier }, true) : undefined
+}
+
+// Appends an event of agent `id`, stamped with the latest clock read unless the builder sets its own time. Memory
+// only; never throws.
+function recFor(id: string | undefined, build: (a: number, at: number) => RecEvent): void {
+  try {
+    const a = recAgent(id)
+    if (a === undefined) return
+    recPush(recording!, build(a, relTime(recording!, lastNow)))
+    recDirty = true
+  } catch { /* the recording is optional */ }
+}
+
+// Appends an event of the whole session (a refused model). Never throws.
+function recSession(build: (at: number) => RecEvent): void {
+  try {
+    if (!recordingOn()) return
+    recPush(recording!, build(relTime(recording!, lastNow)))
+    recDirty = true
+  } catch { /* the recording is optional */ }
+}
+
+// Starts the recording of a new session, or on a reload picks up the one this session already stored (events since
+// its last write are lost). Every start leaves a boot mark: the stall timer restarts there. Never throws.
+async function startRecorder($: EngineInterface, reload: boolean): Promise<void> {
+  recording = undefined
+  recDirty = false
+  recFlushAt = undefined
+  recTrailing?.cancel()
+  recTrailing = undefined
+  try {
+    if (config.recordSessions <= 0 || mode === 'off') return
+    const now = await clockNow($)
+    const opts = recordedOptions(config)
+    let live: Live | undefined
+    if (reload) {
+      const prior = parseRecordings(await $.store.get(RECORDINGS_KEY)).find((r) => r.id === sessionTag)
+      if (prior) live = resumeRecording(prior)
+    }
+    recording = live ?? startRecording(sessionTag, now ?? 0, mode as RecordedMode, baseline, opts)
+    // An option changed from /config reloads the module: the boot mark carries the options in force from then on.
+    const changed = JSON.stringify(opts) !== JSON.stringify(recording.rec.opts)
+    recPush(recording, { k: 'boot', at: relTime(recording, now), ...(changed ? { o: opts } : {}) })
+    recDirty = true
+  } catch {
+    recording = undefined
+  }
+}
+
+// Writes the recording to the store now (through the store queue). Never throws.
+async function flushRecording($: EngineInterface): Promise<void> {
+  if (!recording || !recDirty) return
+  recDirty = false
+  try {
+    recording.rec.baseline = baseline
+    const copy = JSON.parse(JSON.stringify(recording.rec)) as Recording
+    const keep = config.recordSessions
+    await storeQueue(async () => {
+      await $.store.set(RECORDINGS_KEY, mergeRecordings(await $.store.get(RECORDINGS_KEY), copy, keep))
+    })
+  } catch (err) {
+    if (recFailNoted) return
+    recFailNoted = true
+    try { await $.ui.log(`recording not saved: ${String((err as { message?: unknown } | undefined)?.message ?? err).slice(0, 200)}`, { to: 'debug' }) } catch { /* diagnostics only */ }
+  }
+}
+
+// Writes the recording soon: at once when the last write is REC_FLUSH_GAP_MS old, else once when that gap ends.
+function flushRecordingSoon($: EngineInterface): void {
+  try {
+    if (!recording || !recDirty) return
+    const now = lastNow
+    if (now === undefined || recFlushAt === undefined || now - recFlushAt >= REC_FLUSH_GAP_MS) {
+      recFlushAt = now
+      void flushRecording($)
+      return
+    }
+    if (recTrailing) return
+    recTrailing = $.clock.after(Math.max(1, REC_FLUSH_GAP_MS - (now - recFlushAt)), () => {
+      recTrailing = undefined
+      recFlushAt = lastNow
+      void flushRecording($)
+    })
+  } catch {
+    recTrailing = undefined
   }
 }
 
@@ -524,6 +642,7 @@ export const register: Register = (on, options) => {
       } catch { /* defaults */ }
       await save($)
     }
+    await startRecorder($, saved !== undefined)
     stallTimer?.cancel()
     stallTimer = undefined
     if (watching()) {
@@ -553,7 +672,7 @@ export const register: Register = (on, options) => {
       } catch { /* the tool is optional: the ladder works without it */ }
     }
     try {
-      await $.command.register({ name: 'escalator', description: 'Model escalator: savings report, stats panel and the live agent network', argumentHint: '[report|stats|config|history [n]|map|panel [close]|consult <id>|swap <id>|reset [history]|resume <id>|all|help]' })
+      await $.command.register({ name: 'escalator', description: 'Model escalator: savings report, stats panel and the live agent network', argumentHint: '[report|stats|config|history [n]|map|panel [close]|consult <id>|swap <id>|reset [history|recordings]|resume <id>|all|help]' })
     } catch { /* name taken: the report stays reachable through the status line */ }
     return r
   })
@@ -580,6 +699,18 @@ export const register: Register = (on, options) => {
     if (arg === 'reset history') {
       await storeQueue(async () => { await $.store.delete(SESSIONS_KEY) })
       return { text: 'Session history cleared. Learned stats are kept.' }
+    }
+    if (arg === 'reset recordings') {
+      await storeQueue(async () => { await $.store.delete(RECORDINGS_KEY) })
+      // This session's recording starts over: agents already running are recorded from now on as cut.
+      if (recording) {
+        const { at, mode: m } = recording.rec
+        const boots = recording.rec.events.filter((ev) => ev.k === 'boot')
+        recording = startRecording(sessionTag, at, m, baseline, recordedOptions(config))
+        for (const ev of boots.slice(-1)) recPush(recording, { k: 'boot', at: ev.at })
+        recDirty = false
+      }
+      return { text: 'Recorded sessions cleared. Learned stats and the session history are kept.' }
     }
     if (arg === 'resume' || arg.startsWith('resume ')) return { text: await resumeCommand($, arg.slice(6).trim()) }
     if (arg === 'consult' || arg.startsWith('consult ')) return { text: await consultNow($, arg.slice(7)) }
@@ -696,11 +827,11 @@ export const register: Register = (on, options) => {
     if (isFork(e)) return next(e)
     let ev = e
     const category = await taskCategory($, e)
+    const asked = tierOf(e.model ?? e.parentModel)
+    // `model` is what the Agent call asked for; when it is absent the agent definition or the parent decides, and
+    // the types give no way to tell those two apart: only a present `model` counts as an explicit choice.
+    const explicit = config.respectExplicitModel && mode !== 'baseline' && typeof e.model === 'string' && e.model !== ''
     try {
-      const asked = tierOf(e.model ?? e.parentModel)
-      // `model` is what the Agent call asked for; when it is absent the agent definition or the parent decides, and
-      // the types give no way to tell those two apart: only a present `model` counts as an explicit choice.
-      const explicit = config.respectExplicitModel && mode !== 'baseline' && typeof e.model === 'string' && e.model !== ''
       const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
       const projects = parseProjects(await $.store.get(PROJECTS_KEY))
       const choice = mode === 'baseline'
@@ -734,7 +865,14 @@ export const register: Register = (on, options) => {
       const fresh = newAgent(r.agentId, category, r.model, e.prompt)
       agents.set(r.agentId, name === undefined ? fresh : { ...fresh, name })
       ledger = addAgent(ledger, category)
-      if (watching()) mark(r.agentId, await clockNow($))
+      const now = watching() || recordingOn() ? await clockNow($) : undefined
+      if (watching()) mark(r.agentId, now)
+      try {
+        if (recordingOn()) {
+          const a = addRecAgent(recording!, { id: r.agentId, label: name ?? '', cat: category, tier: fresh.startTier })
+          recFor(r.agentId, (_a, at) => ({ k: 'spawn', a, at, asked, tier: fresh.startTier, ...(explicit ? { x: 1 as const } : {}) }))
+        }
+      } catch { /* the recording is optional */ }
       feed($, { type: 'spawn', agentId: r.agentId, label: name ?? category, model: String(r.model ?? '') })
       await save($)
     }
@@ -760,7 +898,10 @@ export const register: Register = (on, options) => {
     if ((e.tool as string) === HELP_TOOL) return next(e)
     const id = e.agentId
     const tracked = watching() && id !== undefined && agents.has(id)
-    if (tracked) mark(id, await clockNow($), toolStart)
+    // The recorder follows every known agent, in baseline mode too, and needs the call's start and end times.
+    const recorded = recordingOn() && id !== undefined && agents.has(id)
+    const startedAt = tracked || recorded ? await clockNow($) : undefined
+    if (tracked) mark(id, startedAt, toolStart)
     const who = id ? { agentId: id } : {}
     feed($, { type: 'tool-start', ...who, tool: String(e.tool), summary: summarize(e as unknown as Record<string, unknown>) })
     let r: Awaited<ReturnType<typeof next>>
@@ -772,7 +913,8 @@ export const register: Register = (on, options) => {
       throw err
     }
     feed($, { type: 'tool-end', ...who, tool: String(e.tool) })
-    if (tracked) mark(id, await clockNow($), toolEnd)
+    const endedAt = tracked || recorded ? await clockNow($) : undefined
+    if (tracked) mark(id, endedAt, toolEnd)
     // What a "consult now" or "swap now" queued for this agent goes out with its next tool result.
     if (tracked && r.deny === undefined) {
       const queued = takeNotes(id)
@@ -784,14 +926,22 @@ export const register: Register = (on, options) => {
       else if (id === undefined) await noteLeadEdit($, e as unknown as Record<string, unknown>)
     }
     if (noteTask(tracked ? id : undefined, e as unknown as Record<string, unknown>, r)) await save($)
+    // What the detector reads from the result, read once: the recorder keeps it and observe scores it.
+    let feats: Features | undefined
+    if (recorded && r.deny === undefined) {
+      try {
+        const f = features({ tool: e.tool, ok: r.isError !== true, text: textOf(r), summary: summarize(e as unknown as Record<string, unknown>) })
+        feats = f
+        recFor(id, (a) => toolEvent(recording!, a, endedAt, startedAt, String(e.tool), f))
+      } catch { /* observe reads the result itself */ }
+    }
     if (mode === 'off' || mode === 'baseline') return r
     const a = id ? agents.get(id) : undefined
     if (!id || !a || r.deny !== undefined) return r
     try {
       const limit = limitFor(a)
-      const { state, action, consultSkipped, progress } = observe(a, {
-        tool: e.tool, ok: r.isError !== true, text: textOf(r), summary: summarize(e as unknown as Record<string, unknown>),
-      }, config, limit === undefined, blockedTiers)
+      const ob = { tool: e.tool, ok: r.isError !== true, text: textOf(r), summary: summarize(e as unknown as Record<string, unknown>) }
+      const { state, action, consultSkipped, progress } = observe(a, ob, config, limit === undefined, blockedTiers, feats ?? features(ob))
       if (consultSkipped && limit) await noteLimit($, state, limit)
       if (!action) {
         // Progress while swapped up may send the agent back one tier (option deescalateAfter).
@@ -799,6 +949,7 @@ export const register: Register = (on, options) => {
         agents.set(id, back.state)
         if (back.decided) {
           ledger = addIntervention(ledger, 'deescalate')
+          recFor(id, (ra, at) => ({ k: 'deesc', a: ra, at, tier: back.state.tier, ...(mode === 'observe' ? { w: 1 as const } : {}) }))
           await $.ui.log(`${agentLabel(state)} (${state.category}): ${mode === 'observe' ? 'would de-escalate' : `de-escalate to ${back.state.tier}`}`)
         }
         if (back.decided && mode === 'active') feed($, { type: 'ladder', agentId: id, action: 'swap', toModel: back.state.tier, level: back.state.level, score: back.state.score })
@@ -809,6 +960,7 @@ export const register: Register = (on, options) => {
         return r
       }
       ledger = addIntervention(ledger, action)
+      recFor(id, (ra, at) => ({ k: 'act', a: ra, at, act: action, lvl: state.level, tier: mode === 'observe' ? a.tier : state.tier, ...(mode === 'observe' ? { w: 1 as const } : {}) }))
       if (mode === 'observe') {
         await $.ui.log(`${agentLabel(state)} (${state.category}): would ${labelOf(action)}`)
         // Measure only: never swap, never raise the effort.
@@ -847,7 +999,9 @@ export const register: Register = (on, options) => {
     if (!e.agentId && !baselinePinned) baseline = tierOf(e.model)
     let a = e.agentId ? agents.get(e.agentId) : undefined
     seenModels = rememberModel(seenModels, e.model, !e.agentId)
-    if (e.agentId && watching() && agents.has(e.agentId)) mark(e.agentId, await clockNow($))
+    const recorded = recordingOn() && e.agentId !== undefined && agents.has(e.agentId)
+    const startedAt = recorded || (e.agentId && watching() && agents.has(e.agentId)) ? await clockNow($) : undefined
+    if (e.agentId && watching() && agents.has(e.agentId)) mark(e.agentId, startedAt)
     // The request's own effort, before any rewrite: the effort level can act only on one it can raise.
     const ownEffort = effortOf(e)
     try {
@@ -866,7 +1020,9 @@ export const register: Register = (on, options) => {
     const sent = boost ? ({ ...e, effort: boost } as TurnStepInput) : e
     const r = swap ? yield* guardedSwap($, sent, next, a!) : yield* next(sent)
     seenModels = rememberModel(seenModels, r.usage?.model, !e.agentId)
-    if (e.agentId && watching() && agents.has(e.agentId)) mark(e.agentId, await clockNow($))
+    const endedAt = recorded || (e.agentId && watching() && agents.has(e.agentId)) ? await clockNow($) : undefined
+    if (e.agentId && watching() && agents.has(e.agentId)) mark(e.agentId, endedAt)
+    if (recorded) recFor(e.agentId, (ra) => stepEvent(recording!, ra, endedAt, startedAt, String(r.usage?.model ?? e.model ?? ''), ownEffort, asUsage(r.usage)))
     // Idle requests count only where a score is acted on: active, and observe (which measures it).
     try {
       const counted = e.agentId ? agents.get(e.agentId) : undefined
@@ -900,6 +1056,8 @@ export const register: Register = (on, options) => {
       const written = writtenFiles.get(id) ?? []
       writtenFiles.delete(id)
       try {
+        const aborted = (e as { isAborted?: unknown }).isAborted === true
+        recFor(id, (ra, at) => ({ k: 'end', a: ra, at, ...(mode !== 'baseline' ? { esc: escalated(a, config.levels) } : {}), ...(aborted ? { ab: 1 as const } : {}) }))
         if (mode !== 'baseline') {
           const wasEscalated = escalated(a, config.levels)
           const argv = splitCommand(config.verifyCommand)
@@ -921,7 +1079,8 @@ export const register: Register = (on, options) => {
         }
         // The run is over: its cost was taken above, the next run starts from none.
         const { runCost: _spent, ...rest } = agents.get(id) ?? a
-        agents.set(id, { ...rest, level: 0, score: 0, stepsSinceAction: 0, deescalated: false, progressSignals: 0, running: false, inFlight: 0, stalled: false })
+        agents.set(id, endRun(rest))
+        flushRecordingSoon($)
         await save($)
         await $.ui.status(statusLine(ledger))
       } catch { /* best effort */ }
@@ -938,6 +1097,10 @@ export const register: Register = (on, options) => {
       }
       if (pendingNotices.size > 0) await Promise.race([Promise.allSettled([...pendingNotices]), $.clock.sleep(1000)])
     } catch { /* best effort */ }
+    // The recording's last write, with the outcomes that landed meanwhile.
+    recTrailing?.cancel()
+    recTrailing = undefined
+    await flushRecording($)
     try {
       if (mode !== 'off' && ledger.agentSteps > 0) {
         const entry = { at: await $.clock.now(), mode, baseline, ledger }
@@ -978,6 +1141,7 @@ async function probeModel($: EngineInterface, model: string): Promise<ModelFailu
 async function refuseSwapTarget($: EngineInterface, id: string, tier: Tier, model: string): Promise<Tier> {
   blockedTiers = refuseTier(blockedTiers, tier)
   refusedSeniors = refuseTier(refusedSeniors, tier)
+  recSession((at) => ({ k: 'refused', at, tier }))
   for (const [aid, a] of [...agents]) {
     const ok = usableTier(a, blockedTiers)
     if (a.tier !== ok) {
@@ -1072,6 +1236,8 @@ async function checkStalls($: EngineInterface): Promise<void> {
     if (!watching()) return
     const now = await clockNow($)
     if (now === undefined) return
+    // A long run without an end still reaches the store now and then (a reload loses only what came after).
+    if (recDirty && (recFlushAt === undefined || now - recFlushAt >= REC_PERIODIC_MS)) { recFlushAt = now; void flushRecording($) }
     const found: { a: AgentState; silent: number }[] = []
     for (const [id, a] of [...agents]) {
       if (a.running && a.lastEventAt === undefined) { agents.set(id, { ...a, lastEventAt: now }); continue }
@@ -1080,6 +1246,7 @@ async function checkStalls($: EngineInterface): Promise<void> {
       const stalled = markStall(a, config)
       agents.set(id, stalled)
       feed($, { type: 'stall', agentId: id })
+      recFor(id, (ra, at) => ({ k: 'stall', a: ra, at }))
       ledger = addIntervention(ledger, 'stall')
       found.push({ a: stalled, silent })
     }
@@ -1177,7 +1344,7 @@ function trackRun(a: AgentState, key: string, files: readonly string[], now: num
     if (!watching() || aborted || config.reworkWindowMinutes <= 0 || files.length === 0 || now === undefined) return
     if (!isCheaper(a.startTier, baseline)) return
     reworkRuns.delete(key)
-    reworkRuns.set(key, { category: a.category, tier: a.startTier, label: agentLabel(a), files: new Set(files), endedAt: now, reworked: false })
+    reworkRuns.set(key, { id: a.id, category: a.category, tier: a.startTier, label: agentLabel(a), files: new Set(files), endedAt: now, reworked: false })
     if (reworkRuns.size > MAX_REWORK_RUNS) reworkRuns.delete(reworkRuns.keys().next().value as string)
   } catch { /* rework tracking is optional */ }
 }
@@ -1202,6 +1369,7 @@ async function noteLeadEdit($: EngineInterface, input: Record<string, unknown>):
     const run = hitKey === undefined ? undefined : reworkRuns.get(hitKey)
     if (!run || run.reworked) return
     run.reworked = true
+    recFor(run.id, (ra, at) => ({ k: 'rework', a: ra, at }))
     if (run.accepted === undefined) run.pending = true
     else {
       const was = run.accepted
@@ -1276,6 +1444,7 @@ async function reviewRun($: EngineInterface, a: AgentState, files: readonly stri
     const prompt = buildReviewPrompt({ task: a.taskTitle ? `${a.taskTitle}\n\n${a.task}` : a.task, diff, scoped })
     let text = ''
     let why = 'no reply'
+    const costBefore = ledger.consultCost
     try {
       // The engine answers { isAnswered, text, usage }; the published 2.1.277 types still say string.
       const reply = await $.model.complete({ model, system: REVIEW_SYSTEM, prompt, maxTokens: 400 }) as ModelReply
@@ -1292,6 +1461,8 @@ async function reviewRun($: EngineInterface, a: AgentState, files: readonly stri
       why = String((err as { message?: unknown } | undefined)?.message ?? err).slice(0, 200)
     }
     const review = parseReview(text)
+    const reviewCost = Math.max(0, ledger.consultCost - costBefore)
+    recFor(a.id, (ra, at) => ({ k: 'review', a: ra, at, score: review?.score ?? 0, c: Math.round(reviewCost * 1e6) / 1e6 }))
     if (!review) {
       try { await $.ui.log(`${agentLabel(a)} (${a.category}): review gave no score (${text ? 'no SCORE line' : why})`) } catch { /* best effort */ }
       return
@@ -1354,6 +1525,7 @@ async function verifyAndRecord($: EngineInterface, a: TrackedAgent, wasEscalated
         await $.ui.toast('Verification could not run: check the verifyCommand option')
       }
     } else {
+      recFor(a.id, (ra, at) => ({ k: 'verify', a: ra, at, ok: !failed }))
       await $.ui.log(`${agentLabel(a)} (${a.category}): verification ${failed ? 'failed' : 'passed'} (${detail})`)
       if (failed) await $.ui.toast(`${shortName(a)}: verification failed`)
     }
@@ -1405,6 +1577,7 @@ const COMMAND_HELP = [
   '/escalator resume <id>|all: resume agents paused at the human level',
   '/escalator reset: forget the learned stats (history and category cache are kept)',
   '/escalator reset history: clear the recorded session history',
+  '/escalator reset recordings: clear the sessions recorded for replay (option recordSessions)',
   '/escalator help: this list',
 ].join('\n')
 
@@ -1574,6 +1747,7 @@ async function consultNow($: EngineInterface, query: string): Promise<string> {
     consulting.add(a.id)
     try {
       ledger = addIntervention(ledger, 'consult')
+      recFor(a.id, (ra, at) => ({ k: 'manual', a: ra, at, act: 'consult' }))
       try { await $.ui.log(`${agentLabel(a)} (${a.category}): consult now (asked by the user)`) } catch { /* the note is best effort */ }
       const note = await consult($, a)
       queueNote(a.id, note)
@@ -1581,7 +1755,7 @@ async function consultNow($: EngineInterface, query: string): Promise<string> {
       const cur = agents.get(a.id)
       if (cur) agents.set(a.id, { ...cur, stepsSinceAction: 0 })
       await save($)
-      return actionDone(note.includes('Advice from a senior model')
+      return actionDone(note.includes(ADVICE_HEAD)
         ? `Consulted the senior model about ${agentHead(a)}: the advice reaches it on its next tool call.`
         : `The senior model gave no advice for ${agentHead(a)}: a generic hint reaches it on its next tool call.`)
     } finally {
@@ -1609,6 +1783,7 @@ async function swapNow($: EngineInterface, query: string): Promise<string> {
     }
     agents.set(a.id, state)
     ledger = addIntervention(ledger, 'swap')
+    recFor(a.id, (ra, at) => ({ k: 'manual', a: ra, at, act: 'swap' }))
     feed($, { type: 'ladder', agentId: a.id, action: 'swap', toModel: state.tier, level: state.level, score: state.score })
     queueNote(a.id, await act($, state, 'swap'))
     const cur: TrackedAgent = agents.get(a.id) ?? state
@@ -1669,6 +1844,7 @@ async function resumeCommand($: EngineInterface, target: string): Promise<string
     for (const a of chosen) {
       agents.set(a.id, resumeAgent(a, now))
       feed($, { type: 'resume', agentId: a.id })
+      recFor(a.id, (ra, at) => ({ k: 'resume', a: ra, at }))
     }
     await save($)
     const lines = chosen.map((a) => `${agentLabel(a)} (${a.category}, ${a.tier})`)
@@ -1727,12 +1903,18 @@ async function consult($: EngineInterface, s: AgentState, extra = ''): Promise<s
   const senior = pickSenior(config.senior, refusedSeniors) ?? config.senior
   const before = ledger.consultCost
   feed($, { type: 'consult', agentId: s.id, phase: 'start', model: senior })
+  let note: string | undefined
   try {
-    return await consultRun($, s, extra)
+    note = await consultRun($, s, extra)
+    return note
   } finally {
-    feed($, { type: 'consult', agentId: s.id, phase: 'end', model: senior, cost: Math.max(0, ledger.consultCost - before) })
+    const cost = Math.max(0, ledger.consultCost - before)
+    feed($, { type: 'consult', agentId: s.id, phase: 'end', model: senior, cost })
+    recFor(s.id, (ra, at) => ({ k: 'consult', a: ra, at, ok: note?.includes(ADVICE_HEAD) === true, c: Math.round(cost * 1e6) / 1e6 }))
   }
 }
+
+const ADVICE_HEAD = 'Advice from a senior model'
 
 async function consultRun($: EngineInterface, s: AgentState, extra: string): Promise<string> {
   // One consult action, counted before the calls so a refused call and its retry make one.
@@ -1758,7 +1940,7 @@ async function consultRun($: EngineInterface, s: AgentState, extra: string): Pro
     if (cur) agents.set(s.id, skipGrace(cur, config))
     return tag('Still stuck. List three different hypotheses and test the cheapest one first.')
   }
-  return tag(`Advice from a senior model:
+  return tag(`${ADVICE_HEAD}:
 ${advice}`)
 }
 
@@ -1800,6 +1982,9 @@ async function handleHelp($: EngineInterface, input: Record<string, unknown>, id
   try {
     const a = id ? agents.get(id) : undefined
     if (!id || !a || mode === 'off' || mode === 'baseline') return 'Help is not available for this agent.'
+    // Every request is recorded; `g` marks the ones that got a consult (the replay decides again with its options).
+    const granted = mode === 'active' && canAskForHelp(a, config) && limitFor(a) === undefined
+    recFor(id, (ra, at) => ({ k: 'help', a: ra, at, ...(granted ? { g: 1 as const } : {}) }))
     if (mode === 'observe') {
       await $.ui.log(`${agentLabel(a)} (${a.category}): would consult (asked for help)`)
       ledger = addIntervention(ledger, 'ask')

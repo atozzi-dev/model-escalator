@@ -100,6 +100,7 @@ These are the subcommands listed by `/escalator help`:
 | `/escalator resume <id>\|all` | Resume agents paused at the human level |
 | `/escalator reset` | Forget the learned statistics (the session history and the task category cache are kept) |
 | `/escalator reset history` | Clear the recorded session history |
+| `/escalator reset recordings` | Clear the session recordings kept for replay (`recordSessions`) |
 | `/escalator help` | List the subcommands |
 
 `<id>` is the agent's id or its name. An unknown subcommand shows the list.
@@ -149,8 +150,17 @@ Options are set from `/config` or under `pluginConfigs` in your settings (key `m
 | `respectExplicitModel` | false | When on and the Agent call names a model, learning and exploration do not change the starting model. The ladder still applies |
 | `modelCategories` | false | Labels each new subagent task with one short call to a small model (Haiku) instead of keywords only. Cached; a failed call falls back to the keywords |
 | `reworkWindowMinutes` | 30 | Minutes after a cheaper run during which an edit by the lead to a file that run wrote counts as rework: the run is moved to not accepted once. `0` turns it off. Only edits made through Claude Code are seen |
+| `recordSessions` | 0 (off) | Records what the mod observed in each session and keeps the last N sessions (at most 50), so they can be replayed later with other options. Works in every mode except `off`, `observe` included. See [Session recordings](#session-recordings) |
 
 `verifyCommand` runs without a shell, so on Windows give the real executable: `npm.cmd test`, or `node node_modules/jest/bin/jest.js`. On Windows `bash` usually resolves to the WSL launcher (`C:\Windows\System32\bash.exe`); use the full path of Git Bash instead. A command that cannot start or hits `verifyTimeoutSeconds` is not counted as a failed run. Check the command once by hand first: a command that starts but fails for an unrelated reason counts as a failed run.
+
+## Session recordings
+
+With `recordSessions` above 0 the mod records, for each agent it follows, the stream its detector reads: the spawn (task category, requested and starting tier), each tool result as features (tool name, number of failed attempts, a hash of the error signature, the failing count of each test run, a hash of the edited file), each model request (tier, effort, token usage), the ladder actions taken (marked as logged only in `observe`), consults and their cost, help requests, stalls, de-escalations, refused models, manual consults, swaps and resumes, the end of each run (escalated or not, aborted) and its outcome when known (verification, review score, rework). Times are kept as milliseconds since the session started.
+
+Privacy: the only text kept is the agent's name (redacted, at most 40 characters) or its task category, and the text of up to 300 error signatures per session (the normalised first 160 characters of the error, with numbers and file paths replaced, then redacted with the same patterns as the senior dossier). Commands, tool output, prompts, advice and file paths are never kept; files and error signatures are compared through a hash. Redaction is pattern based, so treat the recordings like the rest of the plugin's store.
+
+Size: one session is capped at 256 KiB of JSON text; a longer session drops its oldest events first, counts them, and marks the agents that lost events. All recordings together are capped at 1.25 MiB (the store holds 4 MiB in all); the oldest sessions go first. Fifty agents with eight events each take about 35 KiB. Recording appends in memory only: the store is written at the end of an agent's run (at most once every 5 seconds), every 30 seconds while agents run, and when the session ends. A reload of the mod keeps the recording but loses the events since its last write. `/escalator reset recordings` clears them.
 
 ## How savings are estimated
 
@@ -173,7 +183,7 @@ This section lists what `claude plugin validate plugin` reports for the mod. Not
 - **UI output:** log lines, status line, toasts (`$.ui.log`, `$.ui.status`, `$.ui.toast`), and in active mode short notices in the main conversation (`$.session.append`, `notifyLead`).
 - **Environment variables (read only):** `MODEL_ESCALATOR_MODE`, `MODEL_ESCALATOR_BASELINE`, `EVAL_MODEL_ESCALATOR_MODE`, `EVAL_MODEL_ESCALATOR_BASELINE`.
 - **Session state:** key `model-escalator.session` (`$.state.get`, `$.state.set`): the per-agent snapshot, including recent tool summaries (file paths and command lines) and error text. It is redacted only when it is sent to the senior model.
-- **Store** (`$.store.get`, `$.store.set`, `$.store.delete`): `stats` (learned counters per category and start tier), `projects` (the same per project; the working directory is stored as a hash), `sessions` (session summaries: mode, reference model, cost totals; no prompts), `categories` (the classification cache: the subagent type, the first 120 characters of its description and the first 12 words of its prompt, normalised, with the label; at most 200 entries). `/escalator reset` clears `stats` and `projects`; `/escalator reset history` clears `sessions`.
+- **Store** (`$.store.get`, `$.store.set`, `$.store.delete`): `stats` (learned counters per category and start tier), `projects` (the same per project; the working directory is stored as a hash), `sessions` (session summaries: mode, reference model, cost totals; no prompts), `categories` (the classification cache: the subagent type, the first 120 characters of its description and the first 12 words of its prompt, normalised, with the label; at most 200 entries), and with `recordSessions` on, `recordings` (the last N session recordings: per-agent events as hashed features, redacted error signatures and agent labels; 256 KiB per session and 1.25 MiB in all, see [Session recordings](#session-recordings)). `/escalator reset` clears `stats` and `projects`; `/escalator reset history` clears `sessions`; `/escalator reset recordings` clears `recordings`.
 - **Model calls** (`$.model.complete`, `$.model.classify`): the senior consult; the sampled review (`reviewRate`); a one-token probe of a swap target when a swap fails with an error the mod does not recognise; and the category classification (`modelCategories`, Haiku by default). Model calls go through the provider of your Claude Code session; the mod makes no network calls of its own.
 - **Processes** (`$.process.run`, no shell): `git diff --stat` in the project folder at each consult; `git diff HEAD`, read only with external diff drivers and text filters off, for a sampled review; and the `verifyCommand` you set, at the end of each tracked run. The agent's output never chooses a command.
 - **Plan usage** (`$.session.usage`): read only, and only shown by `/escalator` and the panel.
