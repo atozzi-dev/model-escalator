@@ -44,6 +44,8 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ### Changed
 
+- New detector defaults, calibrated on observed runs: `thresholdSonnet` 5, `thresholdOpus` 7, `oscillationEdits` 5, and an idle allowance of 60 requests at 0.1 points each.
+- The same failure from parallel calls of one assistant message counts once, a failing test count that goes up (writing tests first) adds nothing, and oscillation counts only edits made after a failed attempt.
 - With many simultaneous agents the mod writes its session state less often: tool calls that only move counters are batched to one write per second, and the agent map no longer rewrites the state on every redraw.
 - The agent map also works in the terminal: `/escalator map` shows a coloured text tree with an animated spinner on working agents.
 - Log lines, the paused list and lead notices name an agent by its spawn name and show the task it claimed from the shared task list.
@@ -56,6 +58,9 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ### Fixed
 
+- Calls that Claude Code refused before running them (permission rules, auto mode, hooks, a worktree guard, stale or unread files, a blocked sleep) no longer count towards an agent's difficulty score; recordings mark them.
+- Test summaries of `bun test` (and `claude plugin test`) are read, so failing counts and progress work in bun projects.
+- No stall is reported while the session is closed or the account is at its usage limit.
 - `/escalator map` and `/escalator panel` say when the session has no surface that draws mod panes (for example the VS Code extension) instead of reporting a pane as opened.
 - A paused agent can still hand back its report and use `SendMessage` and the task-list tools, so the human-level summary reaches the lead; `/escalator resume` reminds you to message an agent that already ended its turn.
 - A slow command that is still running and then succeeds no longer earns the agent a "not making progress" note; the stall is only reported to the lead.
