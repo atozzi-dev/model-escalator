@@ -12,6 +12,7 @@ In every case the lead (the session model) plans the work and delegates it to su
 - Claude Code 2.1.295 or later, logged in.
 - `node` 20 or later and `bash` on the `PATH` (on Windows, Git Bash). The cases use only Node built-ins (`node:test`, `node:assert`): no network, no package installs.
 - On Windows, `claude plugin eval` starts each scaffold as plain `bash` from your `PATH`. In PowerShell and `cmd` the first `bash` on the `PATH` is usually the WSL launcher (`C:\Windows\System32\bash.exe`), and every run then fails with `scaffold failed (exit 1): ... execvpe(/bin/bash) failed`. Put Git Bash first for that terminal, in PowerShell: `$env:PATH = "C:\Program Files\Git\usr\bin;" + $env:PATH`. A Git Bash terminal already has it first.
+- Before it grants Bash to a run, `claude plugin eval` lists every folder on the `PATH` (to keep credential helpers out of the sandbox). A folder you cannot read stops every run with "a PATH directory could not be examined for keychain credential helpers (EPERM)". On Windows this is often `C:\Windows\System32\config\systemprofile\AppData\Local\Microsoft\WindowsApps` in the system `PATH`. Drop it for that terminal, in PowerShell: `$env:PATH = ($env:PATH -split ';' | Where-Object { $_ -and $_ -notlike '*\systemprofile\*' }) -join ';'`.
 
 ## Running both arms
 
