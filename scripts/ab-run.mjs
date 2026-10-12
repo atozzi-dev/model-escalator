@@ -159,7 +159,13 @@ export function parseTrace(text) {
   const toolUses = [];
   const mainIds = new Set();
   let anonymousMain = 0;
+  // A run resumed by background agents emits one `result` per lead turn: `result` keeps the
+  // last one (the final outcome), turns add up across all of them, and the cost, which is
+  // cumulative for the session, is taken as the largest value seen.
   let result = null;
+  let resultTurns = null;
+  let maxCost = null;
+  let durationSum = null;
   let lastMainText = null;
   for (const line of text.split(/\r?\n/)) {
     const s = line.trim();
@@ -172,6 +178,9 @@ export function parseTrace(text) {
     }
     if (ev.type === 'result') {
       result = ev;
+      if (typeof ev.num_turns === 'number') resultTurns = (resultTurns ?? 0) + ev.num_turns;
+      if (typeof ev.total_cost_usd === 'number') maxCost = maxCost === null ? ev.total_cost_usd : Math.max(maxCost, ev.total_cost_usd);
+      if (typeof ev.duration_ms === 'number') durationSum = (durationSum ?? 0) + ev.duration_ms;
     } else if (ev.type === 'assistant' && ev.message) {
       const parent = ev.parent_tool_use_id ?? null;
       if (parent === null) {
@@ -193,9 +202,11 @@ export function parseTrace(text) {
     result,
     toolUses,
     mainTurns,
-    turns: typeof result?.num_turns === 'number' ? result.num_turns : mainTurns,
-    costUsd: typeof result?.total_cost_usd === 'number' ? result.total_cost_usd : null,
-    durationMs: typeof result?.duration_ms === 'number' ? result.duration_ms : null,
+    turns: resultTurns ?? mainTurns,
+    costUsd: maxCost,
+    // Sum of the per-turn durations, informational only: the runner records wall-clock time.
+    durationMs: durationSum,
+    // Only the last result decides: earlier lead turns may legitimately end mid-work.
     isError: result?.is_error === true,
     lastMessage: resultText ?? lastMainText ?? '',
   };
@@ -702,7 +713,11 @@ function claudeVersion(claude, env) {
   return (r.stdout ?? '').trim().split(/\s+/)[0] || 'unknown';
 }
 
-function turnCounter(maxTurns) {
+/**
+ * Stream line handler: counts distinct main-loop message ids over the whole stream, across
+ * every lead turn (a resumed run emits one `result` per turn), and returns 'kill' past maxTurns.
+ */
+export function turnCounter(maxTurns) {
   const ids = new Set();
   return (line) => {
     if (!line.startsWith('{') || !line.includes('"assistant"')) return null;
@@ -764,7 +779,7 @@ async function runOnce({ c, n, opts, model, bashPath, claude, resultsDir, judgeE
       passed: !error && graded.graders.every((g) => g.passed),
       turns: trace.turns,
       judgeCostUsd: graded.judgeCostUsd,
-      durationSeconds: trace.durationMs !== null ? trace.durationMs / 1000 : (Date.now() - t0) / 1000,
+      durationSeconds: (Date.now() - t0) / 1000,
       skippedPaidGraders: false,
       graders: graded.graders,
     };

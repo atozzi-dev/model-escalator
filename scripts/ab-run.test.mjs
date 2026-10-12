@@ -25,6 +25,7 @@ import {
   buildCaseEntry,
   buildResultJson,
   isBlockedBash,
+  turnCounter,
 } from './ab-run.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -169,6 +170,52 @@ test('parseTrace without a result event leaves cost unknown', () => {
   assert.equal(t.costUsd, null);
   assert.equal(t.turns, 3);
   assert.equal(t.lastMessage, 'PASS');
+});
+
+test('parseTrace sums num_turns over every result of a resumed run', () => {
+  // The lead resumes when a background agent notifies: one result event per lead turn.
+  const t = parseTrace(fixture('ab-run-trace-resumed.jsonl'));
+  assert.equal(t.turns, 8); // 4 + 1 + 3
+  assert.equal(t.costUsd, 0.6258); // cumulative: taken once, not summed
+  assert.equal(t.isError, false);
+  assert.equal(t.result.num_turns, 3); // the last result still names the final turn
+});
+
+test('parseTrace takes the largest cumulative cost, not the last one', () => {
+  const lines = [
+    { type: 'result', is_error: false, num_turns: 1, total_cost_usd: 0.5, result: 'a' },
+    { type: 'result', is_error: false, num_turns: 1, total_cost_usd: 0.7, result: 'b' },
+    { type: 'result', is_error: false, num_turns: 1, total_cost_usd: 0.6, result: 'c' },
+  ].map((e) => JSON.stringify(e)).join('\n');
+  assert.equal(parseTrace(lines).costUsd, 0.7);
+});
+
+test('parseTrace: an error on the last result makes the run an error', () => {
+  const t = parseTrace(fixture('ab-run-trace-resumed-error.jsonl'));
+  assert.equal(t.isError, true);
+  assert.equal(t.result.subtype, 'error_max_turns');
+  assert.equal(t.turns, 8);
+});
+
+test('parseTrace: an error on an earlier result alone does not make the run an error', () => {
+  const lines = [
+    { type: 'result', subtype: 'error_during_execution', is_error: true, num_turns: 2, total_cost_usd: 0.1, result: '' },
+    { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.1, result: 'PASS' },
+  ].map((e) => JSON.stringify(e)).join('\n');
+  const t = parseTrace(lines);
+  assert.equal(t.isError, false);
+  assert.equal(t.turns, 3);
+});
+
+test('turnCounter counts main-loop turns across resumed results and kills past the limit', () => {
+  const main = (id) => JSON.stringify({ type: 'assistant', parent_tool_use_id: null, message: { id, content: [] } });
+  const result = JSON.stringify({ type: 'result', is_error: false, num_turns: 1, total_cost_usd: 0, result: '' });
+  const onLine = turnCounter(2);
+  assert.equal(onLine(main('a1')), null);
+  assert.equal(onLine(result), null);
+  assert.equal(onLine(main('a2')), null); // second lead turn, after a result: still counted
+  assert.equal(onLine(main('a2')), null); // same message id: not a new turn
+  assert.equal(onLine(main('a3')), 'kill');
 });
 
 // --- graders ----------------------------------------------------------------------------
