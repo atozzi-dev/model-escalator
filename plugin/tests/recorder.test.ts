@@ -63,6 +63,14 @@ test('a call refused by the environment is marked, with no attempt, signature or
   expect(RECORDING_VERSION).toBe(1)
 })
 
+test('a tool event keeps the assistant message of the call when it is known', async () => {
+  const live = fresh()
+  const a = addAgent(live, { id: 'x1', label: 'fixer', cat: 'c', tier: 'haiku' })
+  const f = features({ tool: 'Bash', ok: false, text: 'boom', summary: 'x', group: 3 })
+  expect(toolEvent(live, a, 1_005_000, 1_005_000, 'Bash', f)).toMatchObject({ g: 3 })
+  expect(toolEvent(live, a, 1_005_000, 1_005_000, 'Bash', features({ tool: 'Bash', ok: false, text: 'boom', summary: 'x' }))).not.toHaveProperty('g')
+})
+
 test('signature texts lose Windows and UNC paths too, and secrets', async () => {
   expect(sigText('Error: ENOENT C:\\Users\\alice\\proj\\a.ts not found')).toBe('Error: ENOENT <path> not found')
   expect(sigText('cannot open \\\\server\\share\\x.txt')).toBe('cannot open <path>')

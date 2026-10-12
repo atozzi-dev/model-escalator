@@ -16,7 +16,14 @@ declare module 'claude-code' {
           stepsSinceProgress: number
           errorCounts: Record<string, number>
           editCounts: Record<string, number>
+          retryEdits?: Record<string, number>
+          editMarks?: Record<string, number>
           lastFailing?: number
+          requests?: number
+          messageCalls?: number
+          messageTools?: number
+          message?: number
+          messageSigs?: string[]
           log: string[]
           tokens: number
           lastEventAt?: number

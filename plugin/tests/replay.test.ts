@@ -174,6 +174,12 @@ test('calls the recording marks as refused by the environment are replayed as re
   expect(ladder(replaySession(older, DEFAULT_CONFIG).agents[0]!.candidate).length).toBeGreaterThan(0)
 })
 
+test('recorded messages are replayed: parallel repeats of one failure count once', async () => {
+  const calls = (withGroup: boolean) => Array.from({ length: 6 }, (_, i) => ({ n: 1, s: 'abc', ...(withGroup ? { g: 1 + Math.floor(i / 3) } : {}) }))
+  expect(ladder(replaySession(handBuilt(calls(true)), DEFAULT_CONFIG).agents[0]!.candidate)).toEqual([])
+  expect(ladder(replaySession(handBuilt(calls(false)), DEFAULT_CONFIG).agents[0]!.candidate).length).toBeGreaterThan(0)
+})
+
 test('arguments are checked with the same validation as the options', async () => {
   const ok = parseReplayArgs('thresholdHaiku=4 graceSteps=6 levels=nudge,swap,human', DEFAULT_CONFIG)
   if ('error' in ok) throw new Error(ok.error)

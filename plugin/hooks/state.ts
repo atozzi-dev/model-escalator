@@ -64,6 +64,17 @@ export function parseSnapshot(v: unknown): Snapshot | undefined {
     const title = clipLabel(a.taskTitle, MAX_TASK_TITLE)
     if (title === undefined) delete live.taskTitle
     else live.taskTitle = title
+    // The oscillation counters (edits after a failure, the failure count at each file's last edit): maps of whole,
+    // non-negative counts, or nothing.
+    for (const k of ['retryEdits', 'editMarks'] as const) {
+      const m = a[k]
+      if (!(isObj(m) && Object.values(m).every((n) => typeof n === 'number' && Number.isInteger(n) && n >= 0))) delete live[k]
+    }
+    // The model requests started and the message of the last call: whole, non-negative numbers; the signatures counted
+    // in that message: strings. Anything else is dropped (the next call starts a fresh message).
+    const whole = (n: unknown): boolean => typeof n === 'number' && Number.isInteger(n) && n >= 0
+    for (const k of ['requests', 'messageCalls', 'messageTools', 'message'] as const) if (!whole(a[k])) delete live[k]
+    if (!(Array.isArray(a.messageSigs) && a.messageSigs.every((x) => typeof x === 'string'))) delete live.messageSigs
     // The ring of full error texts: kept only as an array of strings, and cut to its bounds.
     if (Array.isArray(a.recentErrors) && a.recentErrors.every((e) => typeof e === 'string')) {
       live.recentErrors = (a.recentErrors as string[]).slice(-MAX_RECENT_ERRORS).map((e) => e.slice(0, MAX_ERROR_TEXT))

@@ -1,7 +1,7 @@
 import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, describeConfig, parseConfig, splitCommand, type Config } from './config'
-import { LADDER, afterHelp, agentHead, agentLabel, allowedMax, nextTier, canAskForHelp, classifyFailure, clipLabel, consultLimit, countStep, EFFORTS, endRun, escalated, features, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_AGENT_NAME, MAX_LEAD_NOTICES, newAgent, noteProgress, normalizePath, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type Features, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
+import { LADDER, afterHelp, agentHead, beginRequest, endRequest, startCall, agentLabel, allowedMax, nextTier, canAskForHelp, classifyFailure, clipLabel, consultLimit, countStep, EFFORTS, endRun, escalated, features, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_AGENT_NAME, MAX_LEAD_NOTICES, newAgent, noteProgress, normalizePath, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type Features, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
 import { parseReplayArgs, replayReport } from './replay'
 import { addAgent as addRecAgent, indexOf as recIndexOf, mergeRecordings, parseRecordings, push as recPush, recordedOptions, relTime, resumeRecording, startRecording, stepEvent, toolEvent, type Live, type RecEvent, type RecordedMode, type Recording } from './recorder'
 import { buildDossier, inputFromState } from './dossier'
@@ -904,6 +904,12 @@ export const register: Register = (on, options) => {
     const recorded = recordingOn() && id !== undefined && agents.has(id)
     const startedAt = tracked || recorded ? await clockNow($) : undefined
     if (tracked) mark(id, startedAt, toolStart)
+    // The assistant message the call belongs to, when it can be told (see startCall).
+    let group: number | undefined
+    try {
+      const known = id !== undefined && mode !== 'off' ? agents.get(id) : undefined
+      if (known) { const c = startCall(known); agents.set(known.id, c.state); group = c.group }
+    } catch { group = undefined }
     const who = id ? { agentId: id } : {}
     feed($, { type: 'tool-start', ...who, tool: String(e.tool), summary: summarize(e as unknown as Record<string, unknown>) })
     let r: Awaited<ReturnType<typeof next>>
@@ -932,7 +938,7 @@ export const register: Register = (on, options) => {
     let feats: Features | undefined
     if (recorded && r.deny === undefined) {
       try {
-        const f = features({ tool: e.tool, ok: r.isError !== true, text: textOf(r), summary: summarize(e as unknown as Record<string, unknown>) })
+        const f = features({ tool: e.tool, ok: r.isError !== true, text: textOf(r), summary: summarize(e as unknown as Record<string, unknown>), group })
         feats = f
         recFor(id, (a) => toolEvent(recording!, a, endedAt, startedAt, String(e.tool), f))
       } catch { /* observe reads the result itself */ }
@@ -942,7 +948,7 @@ export const register: Register = (on, options) => {
     if (!id || !a || r.deny !== undefined) return r
     try {
       const limit = limitFor(a)
-      const ob = { tool: e.tool, ok: r.isError !== true, text: textOf(r), summary: summarize(e as unknown as Record<string, unknown>) }
+      const ob = { tool: e.tool, ok: r.isError !== true, text: textOf(r), summary: summarize(e as unknown as Record<string, unknown>), group }
       const { state, action, consultSkipped, progress } = observe(a, ob, config, limit === undefined, blockedTiers, feats ?? features(ob))
       if (consultSkipped && limit) await noteLimit($, state, limit)
       if (!action) {
@@ -999,6 +1005,11 @@ export const register: Register = (on, options) => {
   // 3. Swap the model of escalated agents, and meter every request's cost.
   on('turn.step', async function* ($, e, next) {
     if (!e.agentId && !baselinePinned) baseline = tierOf(e.model)
+    // A new request: the tool calls it asks for belong to a new assistant message of the agent.
+    try {
+      const known = e.agentId && mode !== 'off' ? agents.get(e.agentId) : undefined
+      if (known) agents.set(known.id, beginRequest(known))
+    } catch { /* the request goes on unchanged */ }
     let a = e.agentId ? agents.get(e.agentId) : undefined
     seenModels = rememberModel(seenModels, e.model, !e.agentId)
     const recorded = recordingOn() && e.agentId !== undefined && agents.has(e.agentId)
@@ -1021,6 +1032,10 @@ export const register: Register = (on, options) => {
     const boost = mode === 'active' && a?.effortBoosted === true ? raiseEffort(ownEffort, config.effortBoost) : undefined
     const sent = boost ? ({ ...e, effort: boost } as TurnStepInput) : e
     const r = swap ? yield* guardedSwap($, sent, next, a!) : yield* next(sent)
+    try {
+      const asked = e.agentId && Array.isArray(r.toolUses) ? agents.get(e.agentId) : undefined
+      if (asked) agents.set(asked.id, endRequest(asked, r.toolUses.length))
+    } catch { /* the calls then count one by one */ }
     seenModels = rememberModel(seenModels, r.usage?.model, !e.agentId)
     const endedAt = recorded || (e.agentId && watching() && agents.has(e.agentId)) ? await clockNow($) : undefined
     if (e.agentId && watching() && agents.has(e.agentId)) mark(e.agentId, endedAt)

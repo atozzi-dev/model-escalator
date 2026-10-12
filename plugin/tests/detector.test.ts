@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { DEFAULT_CONFIG, type Config } from '../hooks/config'
-import { escalated, failingTests, newAgent, normalizeError, observe, rememberModel, resolveModelId, type AgentState } from '../hooks/detector'
+import { beginRequest, decide, endRequest, escalated, startCall, failingTests, features, newAgent, normalizeError, observe, rememberModel, resolveModelId, type AgentState } from '../hooks/detector'
 
 const err = (text: string) => ({ tool: 'Bash', ok: false, text, summary: 'npm test' })
 const run = (s: AgentState, n: number, text: string) => {
@@ -39,6 +39,70 @@ test('fewer failing tests is progress and resets the score', async () => {
   expect(s.score).toBeGreaterThan(0)
   s = observe(s, { tool: 'Bash', ok: false, text: '2 failed', summary: 'npm test' }).state
   expect(s.score).toBe(0)
+})
+
+test('a failing count that goes up (new failing tests: the red phase) adds no points by itself', async () => {
+  const counts = (n: number) => ({ attempts: 0, sig: '', counts: [n] })
+  let s = decide(newAgent('a1', 'x', 'haiku', 'fix'), counts(0)).state
+  s = decide(s, counts(2)).state
+  expect(s.score).toBe(0)
+  s = decide(s, counts(5)).state
+  expect(s.score).toBe(0)
+  // The same count again while failing: no progress, one point.
+  s = decide(s, counts(5)).state
+  expect(s.score).toBe(1)
+  // Within one output too: the runs of a loop that only add failing tests add nothing.
+  expect(decide(newAgent('a2', 'x', 'haiku', 'fix'), { attempts: 0, sig: '', counts: [1, 3, 4] }).state.score).toBe(0)
+})
+
+test('the same error from calls of one assistant message (parallel calls) counts once', async () => {
+  const fail = (sig: string, group?: number) => ({ attempts: 1, sig, counts: [], ...(group === undefined ? {} : { group }) })
+  let s = newAgent('a1', 'x', 'haiku', 'fix')
+  for (let i = 0; i < 3; i++) s = decide(s, fail('E', 1)).state
+  expect(s.errorCounts).toEqual({ E: 1 })
+  expect(s.score).toBe(0.25)
+  // The next message repeating it is a real repeat.
+  s = decide(s, fail('E', 2)).state
+  expect(s.errorCounts).toEqual({ E: 2 })
+  expect(s.score).toBe(1.25)
+  // Another error in the same message counts.
+  s = decide(s, fail('F', 2)).state
+  expect(s.errorCounts).toEqual({ E: 2, F: 1 })
+  // A parallel repeat of a failing test run adds nothing for the count either.
+  let t = decide(newAgent('a2', 'x', 'haiku', 'fix'), { attempts: 1, sig: 'T', counts: [3], group: 1 }).state
+  t = decide(t, { attempts: 1, sig: 'T', counts: [3], group: 1 }).state
+  expect(t.score).toBe(0.25)
+  // Without a message (an older recording) every call counts, as before.
+  let u = newAgent('a3', 'x', 'haiku', 'fix')
+  for (let i = 0; i < 3; i++) u = decide(u, fail('E')).state
+  expect(u.errorCounts).toEqual({ E: 3 })
+})
+
+test('features carry the message of the call when it is known', async () => {
+  expect(features({ tool: 'Bash', ok: false, text: 'boom', summary: 'x', group: 4 }).group).toBe(4)
+  expect(features({ tool: 'Bash', ok: false, text: 'boom', summary: 'x' }).group).toBeUndefined()
+})
+
+test('the message of a tool call: the agent request it follows, for as many calls as that request asked for', async () => {
+  let s = newAgent('a1', 'x', 'haiku', 'fix')
+  // No request seen yet: no message.
+  let c = startCall(s)
+  expect(c.group).toBeUndefined()
+  s = beginRequest(c.state)
+  s = beginRequest(s)
+  expect(s.requests).toBe(2)
+  // While the request is still streaming, how many calls it asks for is not known yet: its calls belong to it.
+  c = startCall(s)
+  expect(c.group).toBe(2)
+  // The request asked for two calls: the second belongs to it, a third cannot.
+  s = endRequest(c.state, 2)
+  c = startCall(s)
+  expect(c.group).toBe(2)
+  c = startCall(c.state)
+  expect(c.group).toBeUndefined()
+  // A request that asked for no call has no message for later calls.
+  s = endRequest(beginRequest(c.state), 0)
+  expect(startCall(s).group).toBeUndefined()
 })
 
 test('resolveModelId falls back to full default ids', async () => {
