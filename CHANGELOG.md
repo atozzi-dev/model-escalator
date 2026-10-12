@@ -31,6 +31,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - `recordSessions` option (off by default): records what the mod observed in the last N sessions (derived features, hashed signatures and short redacted text, size-capped) in the plugin store; `/escalator reset recordings` clears them.
 - `/escalator replay [option=value ...]` replays the recorded sessions with other thresholds, grace steps or levels, without model calls, and compares interventions, possible false positives and a self-check against what happened.
 - Seven A/B eval cases (easy to hard) with hidden acceptance tests, tamper-proof test checks and a quality judge, to compare the escalation ladder against an all-strong-model baseline.
+- `scripts/ab-run.mjs` runs the A/B eval cases where `claude plugin eval` cannot grant Bash (Windows): a fresh copy of the mod per run, the same graders, and the same result format, so `ab-compare.mjs` reads it unchanged. The agents' shell is not sandboxed.
 - `scripts/ab-compare.mjs` compares the baseline and active A/B eval results per case (score, spread, cost, verdict) and can write the table as Markdown; CI runs its tests.
 - Learned evidence fades over time (`learningHalfLifeDays`, default 30, 0 never forgets), and `/escalator stats` shows readable counters with the age of each entry instead of raw JSON.
 - Notice in the main conversation, read by the lead, when an agent is swapped to a stronger model, its swap target is unavailable, or it needs a human (option `notifyLead`, on by default, at most 10 per session).
