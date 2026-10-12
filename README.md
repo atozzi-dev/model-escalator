@@ -64,7 +64,7 @@ Each tracked agent has a difficulty score. It grows when the agent repeats the s
 
 When the score reaches the threshold of the agent's starting tier (`thresholdHaiku`, `thresholdSonnet`, `thresholdOpus`) and `graceSteps` steps have passed since the last intervention, the next enabled level fires:
 
-1. **nudge**: a note to the agent to stop, re-read the error and change approach;
+1. **nudge**: a note asking the agent to pause, re-read the last error in full and continue with a different approach;
 2. **consult**: one call to the senior model (`seniorModel`, default `opus`) with a dossier of the agent's recent attempts; the advice reaches the agent with its next tool result;
 3. **effort** (off by default, see `effortStep`): the same model with a higher effort;
 4. **swap**: the same agent continues one tier up (Haiku, then Sonnet, then Opus), up to `maxTier`, keeping its context;
@@ -72,7 +72,7 @@ When the score reaches the threshold of the agent's starting tier (`thresholdHai
 
 Agents that already run on the highest allowed tier skip the swap. `levels` removes levels from the list; the effort level is controlled by `effortStep` only.
 
-Learning is separate from the ladder. A run is accepted when it was not escalated, passed `verifyCommand` if one is set, and (when reviewed) scored at least `minReviewScore`. For each task category the mod starts new agents on the tier with the lowest failure rate, or, once there is enough priced data, the lowest cost per accepted run (`learnByCost`). Evidence fades with `learningHalfLifeDays`.
+Learning is separate from the ladder. A run is accepted when it was not escalated, passed `verifyCommand` if one is set, and (when reviewed) scored at least `minReviewScore`. For each task category the mod starts new agents on the requested tier and moves the start one tier up while that tier fails (is not accepted) in more than 40% of at least 5 runs; once there is enough priced data, it picks the tier with the lowest cost per accepted run instead (`learnByCost`). Evidence fades with `learningHalfLifeDays`.
 
 Some features are off by default because they change cost or behaviour in ways the A/B evals have not yet confirmed:
 
