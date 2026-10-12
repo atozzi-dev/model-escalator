@@ -55,6 +55,18 @@
       "description": "How long the verification command may run before it is abandoned and ignored (at most 600).",
       "default": 120
     },
+    "reviewRate": {
+      "type": "number",
+      "title": "Review rate",
+      "description": "Share of the runs of cheaper models (started below the lead's or baseline model) whose diff a senior model reviews and scores 1-5, from 0 to 1 (0.1 reviews about one run in ten). Each review costs one senior call. 0 is off.",
+      "default": 0
+    },
+    "reviewModel": {
+      "type": "string",
+      "title": "Review model",
+      "description": "Model that reviews a sampled run (alias or full id). Empty uses the senior model.",
+      "default": ""
+    },
     "seniorModel": {
       "type": "string",
       "title": "Senior model",
@@ -121,6 +133,42 @@
       "description": "Days after which learned evidence counts half, so a category is not stuck on a stronger model forever because of old runs. 0 never forgets.",
       "default": 30
     },
+    "explore": {
+      "type": "number",
+      "title": "Explore cheaper models",
+      "description": "From 0 to 1: how often a task starts on the cheaper model that learning had ruled out, to check whether it became good enough. It only lowers a tier that learning raised, never below the model you asked for, and is rarer the stronger the evidence (Thompson sampling). Some tasks deliberately run on a weaker model. 0 is off.",
+      "default": 0
+    },
+    "respectExplicitModel": {
+      "type": "boolean",
+      "title": "Respect a model asked for explicitly",
+      "description": "When on and the Agent call names a model, the task starts on it: learning and exploration do not change the starting model (the log says what they would have suggested). The ladder still moves the agent up when it is stuck. Off by default: the lead usually names a cheap model itself, and learning is there to correct that choice. Turn it on for strict respect of what was asked.",
+      "default": false
+    },
+    "learnByCost": {
+      "type": "boolean",
+      "title": "Choose the model by cost per accepted run",
+      "description": "Once the mod has enough priced runs of a task category on the models involved, a task starts on the model with the lowest cost per accepted run (the mean cost of a run divided by the share of runs that were accepted). Off keeps the rule that only looks at how often a model failed.",
+      "default": true
+    },
+    "modelCategories": {
+      "type": "boolean",
+      "title": "Classify tasks with a small model",
+      "description": "Label each new subagent task (tests, bugfix, feature, review, ...) with one short call to a small model instead of keywords only, so the mod learns per task kind more accurately. Adds about a second to a spawn that is not in its cache; the call's cost is not counted in the report. Off by default.",
+      "default": false
+    },
+    "minReviewScore": {
+      "type": "number",
+      "title": "Lowest review score of an accepted run",
+      "description": "From 1 to 5: a run reviewed below this score (reviewRate) counts as not accepted when the mod learns which model to use. 3 is works but needs changes.",
+      "default": 3
+    },
+    "reworkWindowMinutes": {
+      "type": "number",
+      "title": "Rework window (minutes)",
+      "description": "When the lead edits, within this many minutes, a file a cheaper agent wrote in its run, the run counts as reworked: it is moved to not accepted for learning and shown by /escalator stats. Edits you make outside Claude Code are not visible. 0 is off.",
+      "default": 30
+    },
     "effortStep": {
       "type": "boolean",
       "title": "Raise the effort before a model swap",
@@ -143,6 +191,12 @@
       "type": "number",
       "title": "Consult budget (USD)",
       "description": "Dollars the senior calls may cost in the session, retried calls included. Once reached, no further consult. 0 means no dollar limit.",
+      "default": 0
+    },
+    "recordSessions": {
+      "type": "number",
+      "title": "Recorded sessions",
+      "description": "Keep a recording of what the mod observed in the last N sessions (at most 50), so /escalator replay can try other thresholds and levels on them without spending. Stored in the plugin's store, capped in size; error signatures are redacted, commands, outputs, prompts and file paths are not kept. Works in every mode except off. 0 is off.",
       "default": 0
     }
   }

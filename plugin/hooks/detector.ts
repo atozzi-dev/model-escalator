@@ -220,46 +220,67 @@ function cutError(text: string): string {
 
 export type Observation = { tool: string; ok: boolean; text: string; summary: string }
 
-// `consultOpen` false means a limit forbids consults now: a consult due at this trigger is skipped to the next
-// enabled level, and `consultSkipped` tells the caller that a limit stopped it.
-// `blocked` lists the tiers the account refused this session: a swap never reaches them, nor any tier above.
-export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT_CONFIG, consultOpen = true, blocked: readonly Tier[] = []): { state: AgentState; action?: Action; consultSkipped?: boolean; progress?: boolean } {
-  const s: AgentState = { ...prev, errorCounts: { ...prev.errorCounts }, editCounts: { ...prev.editCounts }, log: [...prev.log] }
-  s.stepsSinceAction++
-  let progress = false
+// What the score reads from one tool result, without its text: the failed attempts in it, the signature of its
+// error (empty when nothing failed), the failing count of each test run in it, and the edited file (normalised;
+// only for an edit tool). The recorder keeps these, so a replay scores exactly what the live detector scored.
+export type Features = { attempts: number; sig: string; counts: number[]; edit?: string }
 
+export function features(ob: Observation): Features {
   // Failing counts per test run in the output; plain text without a recognised summary falls back
   // to the first "N failed" it mentions.
   const runs = parseTestRuns(ob.text)
   const counts = runs.length > 0 ? runs.map(r => r.failed) : [failingTests(ob.text)].filter((n): n is number => n !== undefined)
-
   // Failed attempts in this output. An isError result is one attempt. A loop (or `; echo "exit=$?"`)
   // can hide failures behind ok=true, so every failing run and every non-zero exit marker counts as
   // well. The largest of the three wins, they are never summed, so one failed attempt weighs once
-  // here (plus once below when its failing count does not drop).
+  // here (plus once more when its failing count does not drop).
   const failedRuns = runs.filter(r => r.failed > 0).length
   const badExits = exitCodes(ob.text).filter(c => c !== 0).length
   const attempts = Math.max(ob.ok ? 0 : 1, failedRuns, badExits)
-  if (attempts > 0) {
-    const sig = normalizeError(ob.text)
-    for (let i = 0; i < attempts; i++) {
-      const n = (s.errorCounts[sig] ?? 0) + 1
-      s.errorCounts[sig] = n
-      s.score += n >= 2 ? 1 : 0.25
-    }
+  const f: Features = { attempts, sig: attempts > 0 ? normalizeError(ob.text) : '', counts }
+  if (EDIT_TOOLS.includes(ob.tool) && ob.summary) f.edit = normalizePath(ob.summary)
+  return f
+}
+
+type Decision = { state: AgentState; action?: Action; consultSkipped?: boolean; progress?: boolean }
+
+// `consultOpen` false means a limit forbids consults now: a consult due at this trigger is skipped to the next
+// enabled level, and `consultSkipped` tells the caller that a limit stopped it.
+// `blocked` lists the tiers the account refused this session: a swap never reaches them, nor any tier above.
+// `f` is the call's features when the caller already read them (the recorder does).
+export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT_CONFIG, consultOpen = true, blocked: readonly Tier[] = [], f: Features = features(ob)): Decision {
+  const out = decide(prev, f, cfg, consultOpen, blocked)
+  const log = [...prev.log, `${ob.tool}: ${ob.summary.slice(0, 120)} -> ${f.attempts === 0 ? 'ok' : 'ERR ' + f.sig.slice(0, 100)}`]
+  if (log.length > cfg.logSize) log.splice(0, log.length - cfg.logSize)
+  out.state.log = log
+  // One ring entry per failed log line (same rule as the "ERR" mark above), so the dossier can match them from the end.
+  if (f.attempts > 0) out.state.recentErrors = [...(prev.recentErrors ?? []), cutError(String(ob.text ?? ''))].slice(-MAX_RECENT_ERRORS)
+  return out
+}
+
+// The score and the ladder decision of one tool result, from its features alone (no log, no error text): what
+// observe decides live, and what a replay decides with another configuration.
+export function decide(prev: AgentState, f: Features, cfg: Config = DEFAULT_CONFIG, consultOpen = true, blocked: readonly Tier[] = []): Decision {
+  const s: AgentState = { ...prev, errorCounts: { ...prev.errorCounts }, editCounts: { ...prev.editCounts } }
+  s.stepsSinceAction++
+  let progress = false
+
+  for (let i = 0; i < f.attempts; i++) {
+    const n = (s.errorCounts[f.sig] ?? 0) + 1
+    s.errorCounts[f.sig] = n
+    s.score += n >= 2 ? 1 : 0.25
   }
 
   // Oscillation: the same file edited again and again without progress, whatever the errors say.
-  if (EDIT_TOOLS.includes(ob.tool) && ob.summary) {
-    const key = normalizePath(ob.summary)
-    const edits = s.editCounts[key] ?? 0
+  if (f.edit !== undefined) {
+    const edits = s.editCounts[f.edit] ?? 0
     if (edits >= cfg.oscillationEdits) s.score += 1
-    s.editCounts[key] = edits + 1
+    s.editCounts[f.edit] = edits + 1
   }
 
   // Runs are applied in order. Progress wipes the score; later runs of the same output that do not
   // improve on the new baseline count again, so only the end state decides whether the call was progress.
-  for (const failing of counts) {
+  for (const failing of f.counts) {
     if (failing === 0 || (s.lastFailing !== undefined && failing < s.lastFailing)) {
       progress = true
       s.score = 0
@@ -271,11 +292,6 @@ export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT
     }
     s.lastFailing = failing
   }
-
-  s.log.push(`${ob.tool}: ${ob.summary.slice(0, 120)} -> ${attempts === 0 ? 'ok' : 'ERR ' + normalizeError(ob.text).slice(0, 100)}`)
-  // One ring entry per failed log line (same rule as the "ERR" mark above), so the dossier can match them from the end.
-  if (attempts > 0) s.recentErrors = [...(prev.recentErrors ?? []), cutError(String(ob.text ?? ''))].slice(-MAX_RECENT_ERRORS)
-  if (s.log.length > cfg.logSize) s.log.splice(0, s.log.length - cfg.logSize)
 
   if (progress) {
     s.score = 0
@@ -299,6 +315,12 @@ export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT
     return { state: s, consultSkipped: pick.skipped }
   }
   return { state: s }
+}
+
+// The end of an agent's run (turn.complete): a fresh ladder for its next run. The tier, a pause and the
+// counters that outlive a run (consults, failures since the last progress) are kept.
+export function endRun<T extends AgentState>(s: T): T {
+  return { ...s, level: 0, score: 0, stepsSinceAction: 0, deescalated: false, progressSignals: 0, running: false, inFlight: 0, stalled: false }
 }
 
 // The effort level may act: not yet raised on this tier, and the agent's last request carried an effort below the top.

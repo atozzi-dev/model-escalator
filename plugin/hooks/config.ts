@@ -31,7 +31,19 @@ export type Config = {
   effortBoost: Effort               // lowest effort the effort level raises a request to (it always goes at least one step up)
   learningHalfLifeDays: number      // days after which learned evidence counts half; 0 = never fades
   notifyLead: boolean               // message the lead (main conversation) when an agent is swapped up or needs a human
+  reviewRate: number                // share (0 to 1) of the runs of cheap models reviewed by a senior model; 0 = off
+  reviewModel: string               // model that reviews a sampled run; empty = the senior model
+  explore: number                   // weight (0 to 1) of exploring a tier below the learned one at spawn; 0 = off
+  respectExplicitModel: boolean     // a model asked for in the Agent call is never changed at spawn by learning or exploration
+  learnByCost: boolean              // pick the start tier by cost per accepted run once there is enough cost data
+  modelCategories: boolean          // classify tasks with a small model (one short call per uncached spawn) instead of keywords only
+  minReviewScore: number            // lowest review score (1 to 5) of an accepted run
+  reworkWindowMinutes: number       // minutes after a cheap agent's run during which a lead edit of its files counts as rework; 0 = off
+  recordSessions: number            // sessions whose observation stream is recorded for /escalator replay (newest kept); 0 = off
 }
+
+// Most sessions the recorder keeps, whatever the option asks for (the store also caps the bytes).
+export const MAX_RECORD_SESSIONS = 50
 
 // USD per million tokens, Anthropic API list prices (Oct 2026), checked against /cost.
 // Cache writes cost 1.25x input for the 5-minute TTL and 2x input for the 1-hour TTL.
@@ -77,6 +89,18 @@ export const DEFAULT_CONFIG: Config = {
   modelOverrides: {},
   verifyCommand: '',
   verifyTimeoutSeconds: 120,
+  // Off by default: every sampled run costs one senior call.
+  reviewRate: 0,
+  reviewModel: '',
+  // Off by default: exploring deliberately runs some tasks on a model learning had ruled out.
+  explore: 0,
+  respectExplicitModel: false,
+  learnByCost: true,
+  modelCategories: false,
+  minReviewScore: 3,
+  reworkWindowMinutes: 30,
+  // Off by default: the recording lives in the plugin's store, next to the learned statistics.
+  recordSessions: 0,
   modelIds: { haiku: 'claude-haiku-5-5', sonnet: 'claude-sonnet-5-5', opus: 'claude-opus-5-5' },
 }
 
@@ -200,8 +224,53 @@ export function splitCommand(line: string): string[] {
   return out
 }
 
-export function parseConfig(raw: Raw | undefined): Config {
-  const d = DEFAULT_CONFIG
+// The options as the user names them (the `userConfig` keys), with the value in force, read back from a parsed config.
+function optionValues(c: Config): [string, unknown][] {
+  return [
+    ['thresholdHaiku', c.threshold.haiku], ['thresholdSonnet', c.threshold.sonnet], ['thresholdOpus', c.threshold.opus],
+    ['graceSteps', c.grace], ['seniorModel', c.senior],
+    ['levels', c.levels.filter((l) => l !== 'effort').join(',')], ['maxTier', c.maxTier],
+    ['effortStep', c.levels.includes('effort')], ['effortBoost', c.effortBoost],
+    ['prudentTokenRatio', c.prudentTokenRatio], ['oscillationEdits', c.oscillationEdits],
+    ['idleSteps', c.idleSteps], ['idleWeight', c.idleWeight], ['stallMinutes', c.stallMinutes],
+    ['verifyCommand', c.verifyCommand], ['verifyTimeoutSeconds', c.verifyTimeoutSeconds],
+    ['maxConsultsPerAgent', c.maxConsultsPerAgent], ['maxConsultsPerSession', c.maxConsultsPerSession],
+    ['consultBudgetUsd', c.consultBudgetUsd], ['pauseAtHuman', c.pauseAtHuman], ['notifyLead', c.notifyLead],
+    ['deescalateAfter', c.deescalateAfter], ['learningHalfLifeDays', c.learningHalfLifeDays],
+    ['reviewRate', c.reviewRate], ['reviewModel', c.reviewModel], ['explore', c.explore],
+    ['respectExplicitModel', c.respectExplicitModel], ['learnByCost', c.learnByCost], ['modelCategories', c.modelCategories],
+    ['minReviewScore', c.minReviewScore], ['reworkWindowMinutes', c.reworkWindowMinutes],
+    ['recordSessions', c.recordSessions],
+    ['prices', c.prices], ['modelIds', c.modelOverrides],
+  ]
+}
+
+// The value in force of one option, by its user-facing name (as /escalator config shows it); undefined for an unknown name.
+export function optionValue(c: Config, name: string): unknown {
+  return optionValues(c).find(([n]) => n === name)?.[1]
+}
+
+function shown(v: unknown): string {
+  if (typeof v === 'string') return v === '' ? '(empty)' : v
+  return typeof v === 'object' ? JSON.stringify(v) : String(v)
+}
+
+// One line per option: `name: value`, plus `(changed, default X)` when it differs from the default.
+export function describeConfig(c: Config): string[] {
+  const defaults = new Map(optionValues(DEFAULT_CONFIG))
+  return optionValues(c).map(([name, v]) => {
+    const d = defaults.get(name)
+    if (JSON.stringify(v) === JSON.stringify(d)) return `${name}: ${shown(v)}`
+    // Long values (prices, model ids, commands) are cut, and their default is not repeated.
+    const now = shown(v)
+    return now.length > 60 ? `${name}: ${now.slice(0, 57)}... (changed)` : `${name}: ${now} (changed${shown(d).length > 60 ? '' : `, default ${shown(d)}`})`
+  })
+}
+
+// `fallback` gives the value of every option that is absent or invalid (the defaults unless a caller layers options,
+// as the replay does over the options in force).
+export function parseConfig(raw: Raw | undefined, fallback: Config = DEFAULT_CONFIG): Config {
+  const d = fallback
   const o: Raw = raw ?? {}
   try {
     const ratio = num(o.prudentTokenRatio)
@@ -218,6 +287,12 @@ export function parseConfig(raw: Raw | undefined): Config {
     const deesc = num(o.deescalateAfter)
     const halfLife = num(o.learningHalfLifeDays)
     const effortStep = bool(o.effortStep, d.effortStep)
+    const rate = num(o.reviewRate)
+    const explore = num(o.explore)
+    const minScore = num(o.minReviewScore)
+    const rework = num(o.reworkWindowMinutes)
+    const record = num(o.recordSessions)
+    const reviewer = typeof o.reviewModel === 'string' ? o.reviewModel.trim() : ''
     return {
       ...d,
       threshold: {
@@ -229,14 +304,14 @@ export function parseConfig(raw: Raw | undefined): Config {
       idleSteps: idle !== undefined && idle >= 1 ? Math.floor(idle) : d.idleSteps,
       idleWeight: idleW !== undefined && idleW >= 0 ? idleW : d.idleWeight,
       stallMinutes: positive(o.stallMinutes, d.stallMinutes),
-      verifyCommand: vc.length <= 1000 ? vc : d.verifyCommand,
+      verifyCommand: typeof o.verifyCommand === 'string' && vc.length <= 1000 ? vc : d.verifyCommand,
       verifyTimeoutSeconds: vt !== undefined && vt > 0 ? Math.min(vt, 600) : d.verifyTimeoutSeconds,
       grace: grace !== undefined && grace >= 0 ? Math.floor(grace) : d.grace,
       senior: senior !== '' && senior.length <= 100 ? senior : d.senior,
-      levels: withEffort(parseLevels(o.levels, d.levels), effortStep),
+      levels: withEffort(parseLevels(o.levels, d.levels.filter((l) => l !== 'effort')), effortStep),
       maxTier: parseMaxTier(o.maxTier, d.maxTier),
       prices: parsePrices(o.prices, d.prices),
-      modelOverrides: parseModelIds(o.modelIds),
+      modelOverrides: o.modelIds === undefined ? d.modelOverrides : parseModelIds(o.modelIds),
       prudentTokenRatio: ratio !== undefined && ratio > 0 && ratio <= 1 ? ratio : d.prudentTokenRatio,
       maxConsultsPerAgent: perAgent !== undefined && perAgent >= 0 ? Math.floor(perAgent) : d.maxConsultsPerAgent,
       maxConsultsPerSession: perSession !== undefined && perSession >= 0 ? Math.floor(perSession) : d.maxConsultsPerSession,
@@ -247,6 +322,15 @@ export function parseConfig(raw: Raw | undefined): Config {
       effortBoost: parseEffort(o.effortBoost, d.effortBoost),
       notifyLead: bool(o.notifyLead, d.notifyLead),
       learningHalfLifeDays: halfLife !== undefined && halfLife >= 0 ? halfLife : d.learningHalfLifeDays,
+      reviewRate: rate !== undefined && rate >= 0 && rate <= 1 ? rate : d.reviewRate,
+      explore: explore !== undefined && explore >= 0 && explore <= 1 ? explore : d.explore,
+      respectExplicitModel: bool(o.respectExplicitModel, d.respectExplicitModel),
+      learnByCost: bool(o.learnByCost, d.learnByCost),
+      modelCategories: bool(o.modelCategories, d.modelCategories),
+      minReviewScore: minScore !== undefined && minScore >= 1 && minScore <= 5 ? minScore : d.minReviewScore,
+      reworkWindowMinutes: rework !== undefined && rework >= 0 ? rework : d.reworkWindowMinutes,
+      recordSessions: record !== undefined && record >= 0 ? Math.min(Math.floor(record), MAX_RECORD_SESSIONS) : d.recordSessions,
+      reviewModel: typeof o.reviewModel === 'string' && reviewer.length <= 100 ? reviewer : d.reviewModel,
     }
   } catch {
     return d

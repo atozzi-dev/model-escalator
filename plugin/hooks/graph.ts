@@ -156,7 +156,8 @@ function addEdge(s: GraphState, kind: EdgeKind, from: string, to: string, at: nu
 
 const workerCount = (s: GraphState): number => s.nodes.filter((n) => n.kind === 'worker').length
 
-// A finished or live node ignores activity updates once it is done, and a paused one until it resumes.
+// A done node ignores a tool end and a paused one every activity update until it resumes; a done node that
+// starts a tool or takes a step wakes up (see tool-start and step).
 const frozen = (n: GraphNode): boolean => n.status === 'done' || n.status === 'paused'
 
 function applySpawn(s: GraphState, i: Extract<GraphInput, { type: 'spawn' }>): GraphState {
@@ -243,7 +244,7 @@ function reduceUnsafe(s: GraphState, i: GraphInput): GraphState {
       const id = idOf(i.agentId)
       const n = find(s, id)
       if (!n || typeof i.tool !== 'string' || !i.tool) return s
-      if (frozen(n)) return s
+      if (n.status === 'paused') return s
       return patch(s, id, { status: 'active', action: actionText(i.tool, i.summary), since: n.status === 'active' ? n.since : at })
     }
     case 'tool-end': {
@@ -257,7 +258,9 @@ function reduceUnsafe(s: GraphState, i: GraphInput): GraphState {
       const n = find(s, id)
       if (!n) return s
       const model = typeof i.model === 'string' && i.model ? cap(i.model, 100) : n.model
-      return patch(s, id, { model, tier: tierOf(model), cost: n.cost + money(i.cost), ...(frozen(n) ? {} : { action: 'thinks' }) })
+      // A worker that finished and then steps again was woken (a background command ended, a message came).
+      const wake: Partial<GraphNode> = n.status === 'done' ? { status: 'active', since: at } : {}
+      return patch(s, id, { model, tier: tierOf(model), cost: n.cost + money(i.cost), ...(n.status === 'paused' ? {} : { action: 'thinks', ...wake }) })
     }
     case 'ladder': return applyLadder(s, i)
     case 'consult': return applyConsult(s, i)

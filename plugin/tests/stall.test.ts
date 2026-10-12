@@ -143,35 +143,38 @@ test('a model request counts as activity', async ($, on) => {
   expect(w.stalls().length).toBe(0)
 })
 
-test('a tool call in flight is not a stall until three windows have passed', async ($, on) => {
-  const w = await wire(on, $, undefined, 100 * MIN)
+// The two tests below use a 2 minute window (three windows: 6 minutes with a call in flight) instead of the default
+// 10: the check runs every 30 s either way, so the virtual time they advance, and the work the mock clock does,
+// shrinks fivefold. The 3x rule at the default window is covered by the isSilent unit test above.
+test('a tool call in flight is not a stall until three windows have passed', { options: { stallMinutes: 2 } }, async ($, on) => {
+  const w = await wire(on, $, undefined, 20 * MIN)
   const call = $.tool.call({ tool: 'Bash', command: 'npm run build', agentId: w.agentId } as never)
   await w.clock.settle()
-  await w.clock.advance(25 * MIN)
+  await w.clock.advance(5 * MIN)
   expect(w.stalls().length).toBe(0)
-  await w.clock.advance(10 * MIN)
+  await w.clock.advance(2 * MIN)
   expect(w.stalls().length).toBe(1)
   expect(w.stalls()[0]).toContain('tool call')
-  await w.clock.advance(66 * MIN)
+  await w.clock.advance(14 * MIN)
   await call
   expect(w.stalls().length).toBe(1)
 })
 
-test('a slow command that succeeds is notified and counted but gets no note', async ($, on) => {
-  const w = await wire(on, $, undefined, 40 * MIN)
+test('a slow command that succeeds is notified and counted but gets no note', { options: { stallMinutes: 2 } }, async ($, on) => {
+  const w = await wire(on, $, undefined, 8 * MIN)
   const call = $.tool.call({ tool: 'Bash', command: 'npm run build', agentId: w.agentId } as never)
   await w.clock.settle()
-  await w.clock.advance(31 * MIN)
+  await w.clock.advance(7 * MIN)
   expect(w.stalls().length).toBe(1)
   expect(w.toasts.length).toBe(1)
-  await w.clock.advance(10 * MIN)
+  await w.clock.advance(2 * MIN)
   const r = await call as { context?: readonly string[] }
   expect(r.context?.length ?? 0).toBe(0)
   const out = await $.command.run({ command: 'escalator', args: '' } as never) as { text?: string }
   expect(out.text ?? '').toContain('stall')
   const next = $.tool.call({ tool: 'Read', file_path: '/src/a.ts', agentId: w.agentId } as never)
   await w.clock.settle()
-  await w.clock.advance(41 * MIN)
+  await w.clock.advance(9 * MIN)
   expect(((await next) as { context?: readonly string[] }).context?.length ?? 0).toBe(0)
 })
 

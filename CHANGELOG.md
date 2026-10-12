@@ -13,6 +13,25 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - Agents that keep making model requests without any progress now climb the escalation ladder too, after a generous number of requests.
 - Agents that go silent for `stallMinutes` (default 10) are reported in the log, the status line and a toast, and get a note on their next tool call; a tool call still running counts as activity for three times that window.
 - `ask_for_help` tool: a tracked agent that is stuck can ask for the senior consult directly, once per grace window; in observe mode the request is only logged.
+- Sampled senior review (`reviewRate`, off by default): a share of the runs of cheaper models gets its diff reviewed by a senior model against a short rubric; the 1-5 score is stored per category and shown by `/escalator stats`. Reviews count against `consultBudgetUsd`.
+- Eval runs can set the mode and the reference model through `EVAL_MODEL_ESCALATOR_MODE` and `EVAL_MODEL_ESCALATOR_BASELINE`, since `claude plugin eval` only forwards `EVAL_*` variables; the plain variables win when both are set.
+- `explore` option (0 to 1, off by default): sometimes starts a task on the cheaper model that learning had ruled out, using Thompson sampling, never below the requested model; `observe` mode only logs what it would explore.
+- Learning judges each run as accepted or not: not escalated, passed `verifyCommand` if set and, when reviewed, scored at least `minReviewScore` (default 3); a review that lands after its run moves it to not accepted once.
+- `learnByCost` option (default on): once it has enough priced runs, a task starts on the model with the lowest cost per accepted run, otherwise the failure-rate rule applies; the log says `chosen by cost per accepted run`. `/escalator stats` shows the mean cost per run and per accepted run where known.
+- Rework rate (`reworkWindowMinutes`, default 30, 0 is off): when the lead edits, within the window, a file a cheaper agent wrote, that run is moved to not accepted for learning, counted as `reworked` in `/escalator stats` and logged once.
+- `/escalator map` opens a live map of the agent network (lead, workers and senior with their models, actions, levels and costs) in a panel on the desktop app, VS Code and mobile; the terminal shows a short note for now.
+- Optional model-based task categories (`modelCategories`, off by default): a small model labels each new subagent task (including feature and review work the keywords cannot see), the label is cached, and learning works per label. It adds one short call to uncached spawns; its cost is not counted in the report.
+- Learning keeps a small statistics table per project (hashed working directory, at most 30) next to the global one; a project's own evidence decides the starting model once it has enough runs, otherwise the global table applies. `/escalator reset` clears both.
+- `respectExplicitModel` option (off by default): when on, a model named in the Agent call is not raised or explored away by learning, and the log notes what learning suggested; the escalation ladder still applies when the agent is stuck.
+- `/escalator help`, `/escalator config` (effective options marked when changed, plus mode and baseline sources) and `/escalator history [n]` (recent session summaries); `/escalator reset history` clears the session history.
+- `/escalator stats` shows this session's savings per task category (real cost, savings against the strong model, escalations per agent).
+- On a subscription, `/escalator` shows a "Plan usage" block with the plan windows Claude Code reports (five-hour, seven-day) and the ladder's estimated saving for the session.
+- `/escalator panel` opens a panel with the session cost and savings, plan usage, savings per task category and the learned statistics, refreshed at most once a second while it is open; `/escalator panel close` closes it.
+- Map: select an agent with the buttons under the drawing to see its detail (category, tiers, state, difficulty, cost, interventions, last failed attempts) and use Consult now and Swap now; the same actions are available as `/escalator consult <id>` and `/escalator swap <id>`.
+- `recordSessions` option (off by default): records what the mod observed in the last N sessions (derived features, hashed signatures and short redacted text, size-capped) in the plugin store; `/escalator reset recordings` clears them.
+- `/escalator replay [option=value ...]` replays the recorded sessions with other thresholds, grace steps or levels, without model calls, and compares interventions, possible false positives and a self-check against what happened.
+- Seven A/B eval cases (easy to hard) with hidden acceptance tests, tamper-proof test checks and a quality judge, to compare the escalation ladder against an all-strong-model baseline.
+- `scripts/ab-compare.mjs` compares the baseline and active A/B eval results per case (score, spread, cost, verdict) and can write the table as Markdown; CI runs its tests.
 - Learned evidence fades over time (`learningHalfLifeDays`, default 30, 0 never forgets), and `/escalator stats` shows readable counters with the age of each entry instead of raw JSON.
 - Notice in the main conversation, read by the lead, when an agent is swapped to a stronger model, its swap target is unavailable, or it needs a human (option `notifyLead`, on by default, at most 10 per session).
 - Optional effort step (`effortStep`, off by default): before a model swap, a stuck agent keeps its model and its requests carry a higher effort (one step up, at least `effortBoost`); skipped for models without effort, dropped after a swap, not counted as an escalation for learning.
@@ -24,6 +43,8 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ### Changed
 
+- With many simultaneous agents the mod writes its session state less often: tool calls that only move counters are batched to one write per second, and the agent map no longer rewrites the state on every redraw.
+- The agent map also works in the terminal: `/escalator map` shows a coloured text tree with an animated spinner on working agents.
 - Log lines, the paused list and lead notices name an agent by its spawn name and show the task it claimed from the shared task list.
 - The senior consult receives the full text of recent failed attempts (hidden failures included), the files the agent touched and the output of a read-only `git diff --stat`, all capped and with obvious secrets redacted.
 - A refused senior consult is retried once on the other senior model with a shorter dossier; if that is refused too, the next ladder step is due immediately instead of after a grace window.

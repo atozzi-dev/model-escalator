@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: paginate-off-by-one
+description: Easy. Two small off-by-one bugs in two files of a pagination helper; a cheap model should fix them alone.
+tags: [easy, bugfix]
+context:
+  scaffold_script: scaffold.sh
