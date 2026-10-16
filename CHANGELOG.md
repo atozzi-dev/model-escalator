@@ -4,6 +4,8 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-16
+
 ### Added
 
 - `/escalator export [session|learned|history|all]` prints this session's costs and savings per category, the learned statistics per category and model (with review scores), or the session history as CSV tables to paste into a spreadsheet. It only reads the mod's own store.
