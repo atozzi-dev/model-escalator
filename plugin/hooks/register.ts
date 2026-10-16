@@ -2,7 +2,8 @@ import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepInpu
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, describeConfig, parseConfig, splitCommand, type Config } from './config'
 import { LADDER, afterHelp, agentHead, beginRequest, endRequest, limitReached, restartSilence, sessionClosed, startCall, agentLabel, allowedMax, nextTier, canAskForHelp, classifyFailure, consultLimit, countStep, EFFORTS, endRun, escalated, features, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_LEAD_NOTICES, newAgent, noteProgress, normalizePath, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, spawnName, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type Features, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
-import { parseReplayArgs, replayReport } from './replay'
+import { exportCsv } from './export'
+import { parseReplayArgs,replayReport } from './replay'
 import { addAgent as addRecAgent, indexOf as recIndexOf, mergeRecordings, parseRecordings, push as recPush, recordedOptions, relTime, resumeRecording, startRecording, stepEvent, toolEvent, type Live, type RecEvent, type RecordedMode, type Recording } from './recorder'
 import { buildDossier, inputFromState } from './dossier'
 import { cacheGet, cachePut, cacheKey, classifierInput, combineCategory, LABELS, parseCache } from './classify'
@@ -676,7 +677,7 @@ export const register: Register = (on, options) => {
       } catch { /* the tool is optional: the ladder works without it */ }
     }
     try {
-      await $.command.register({ name: 'escalator', description: 'Model escalator: savings report, stats panel and the live agent network', argumentHint: '[report|stats|config|history [n]|map|panel [close]|consult <id>|swap <id>|reset [history|recordings]|replay [option=value ...]|resume <id>|all|help]' })
+      await $.command.register({ name: 'escalator', description: 'Model escalator: savings report, stats panel and the live agent network', argumentHint: '[report|stats|config|history [n]|export [session|learned|history|all]|map|panel [close]|consult <id>|swap <id>|reset [history|recordings]|replay [option=value ...]|resume <id>|all|help]' })
     } catch { /* name taken: the report stays reachable through the status line */ }
     return r
   })
@@ -686,6 +687,7 @@ export const register: Register = (on, options) => {
     if (arg === 'help') return { text: COMMAND_HELP }
     if (arg === 'config') return { text: await configCommand($) }
     if (arg === 'history' || arg.startsWith('history ')) return { text: await historyCommand($, arg.slice(7).trim()) }
+    if (arg === 'export' || arg.startsWith('export ')) return { text: await exportCommand($, arg.slice(6).trim()) }
     if (arg === 'stats') {
       const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
       const reviews = formatReviews(stats)
@@ -1617,6 +1619,7 @@ const COMMAND_HELP = [
   '/escalator stats: what the mod has learned per task category, and this session\'s savings per category',
   '/escalator config: the effective configuration and the environment mode',
   '/escalator history [n]: the last n recorded sessions (default 10, at most 50)',
+  '/escalator export [session|learned|history|all]: costs, savings and quality as CSV tables to paste into a spreadsheet (default: session)',
   '/escalator map: open the live network of agents',
   '/escalator panel [close]: open (or close) a panel with the session, plan usage, savings per category and learned statistics',
   '/escalator consult <id>: ask the senior model about an agent now; the advice reaches it on its next tool call',
@@ -1689,6 +1692,27 @@ async function historyCommand($: any, arg: string): Promise<string> {
   const shownRows = rows.slice(-n).reverse()
   return `Last ${shownRows.length} of ${rows.length} recorded sessions (newest first, times in UTC):\n` + shownRows.join('\n') +
     '\n\nClear with /escalator reset history.'
+}
+
+const EXPORT_USAGE = 'Usage: /escalator export [session|learned|history|all] (default: session)'
+
+// `/escalator export [kind]`: the session, learned or history tables as CSV in a fenced block. Read only, any mode.
+async function exportCommand($: any, arg: string): Promise<string> {
+  const kind = arg === '' ? 'session' : arg
+  if (kind !== 'session' && kind !== 'learned' && kind !== 'history' && kind !== 'all') return EXPORT_USAGE
+  try {
+    let stats: Stats | undefined
+    let projectStats: Stats | undefined
+    let sessions: unknown[] = []
+    try { stats = ((await $.store.get(STATS_KEY)) ?? undefined) as Stats | undefined } catch { /* no stats */ }
+    try { projectStats = parseProjects(await $.store.get(PROJECTS_KEY))[projectId]?.stats } catch { /* no project stats */ }
+    try { const v = await $.store.get(SESSIONS_KEY); sessions = Array.isArray(v) ? v : [] } catch { /* no history */ }
+    let now: number | undefined
+    try { now = await clockNow($) } catch { /* no decay */ }
+    return '```csv\n' + exportCsv(kind, { ledger, stats, projectStats, sessions, now, halfLifeMs: halfLifeMs() }) + '\n```'
+  } catch {
+    return 'Could not build the CSV tables.'
+  }
 }
 
 // The surfaces that draw the session's panels; undefined when the question fails (the caller then keeps its plain message).

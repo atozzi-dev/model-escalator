@@ -126,6 +126,7 @@ These are the subcommands listed by `/escalator help`:
 | `/escalator stats` | What the mod has learned per task category, the review scores of sampled runs, and this session's savings per category |
 | `/escalator config` | The effective configuration and the environment mode, with the variable each value came from |
 | `/escalator history [n]` | The last `n` recorded sessions (default 10, at most 50) |
+| `/escalator export [session\|learned\|history\|all]` | This session's costs, the learned statistics or the session history as CSV tables (default `session`), printed as text to paste into a spreadsheet; reads the plugin store only |
 | `/escalator map` | Open the live network of agents |
 | `/escalator panel [close]` | Open (or close) a panel with the session, plan usage, savings per category and learned statistics |
 | `/escalator consult <id>` | Ask the senior model about an agent now; the advice reaches it on its next tool call. Active mode only |
