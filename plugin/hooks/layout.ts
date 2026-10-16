@@ -1,14 +1,13 @@
 // Pure, stable layout of the agent network for the renderers. No $ calls, no clock, no randomness: the same
 // graph and the same memory always give the same coordinates.
 //
-// Geometry (all boxes are LAYOUT.nodeW x LAYOUT.nodeH, top-left origin):
-//   - the lead sits at the top, centred on the worker grid;
-//   - workers fill a fixed grid of LAYOUT.columns x LAYOUT.rows slots below the lead. Slot k is in row
-//     floor(k / columns); inside a row slots fill from the centre outwards, so a few workers stay under the lead;
-//   - the senior, once a consult happened, sits on the lead's row above the last column, to the right;
-//   - group nodes ("+N done", "+N more") sit on a fixed row under the grid, two centre columns.
-// The canvas width never changes (the grid has a fixed number of columns); the height grows with the last row
-// in use, downwards only, so no existing box ever moves when the canvas grows.
+// Geometry: a vertical tree sized for a side pane (LAYOUT.width wide, top-left origin).
+//   - the lead sits at the top left; the senior, once a consult happened, on the same row at the right;
+//   - workers are full-width rows under the lead, one per slot (slot k is row k), indented to leave a gutter on
+//     the left for the tree's trunk; a gutter on the right carries consults and messages between workers;
+//   - group nodes ("+N done", "+N more") are shorter rows under the last slot.
+// The canvas width never changes; the height grows with the last row in use, downwards only, so no existing
+// box ever moves when the canvas grows.
 //
 // Stability policy. Each worker owns a slot; the slot map comes back with every layout and is passed in again
 // next time (`previous`, a Layout or just { slots, retired }, JSON-safe so it can live in $.state). A position
@@ -24,16 +23,30 @@
 //   - a worker that disappears from the graph frees its slot; the next newcomer may reuse that position.
 // The output is bounded: at most LAYOUT.slots workers, the lead, the senior and two group nodes.
 //
-// Edges: every visible graph edge gets two anchor points on the borders of its boxes. An endpoint that is hidden
-// in a group is routed to that group node; parallel edges that end up between the same pair are merged (counts
-// summed, latest `at`). An edge whose endpoints are both hidden, or that would loop on one node, is dropped.
+// Edges: every visible graph edge is routed as a polyline of horizontal and vertical segments (`points`), from a
+// point on the border of its first box (x1, y1) to a point on the border of the second (x2, y2), through lanes
+// that never cross a box: lead <-> row on a lane of the left gutter per kind (spawn, message, notice), row <->
+// senior along the right edge, row <-> row through the right gutter. An endpoint that is hidden in a group is
+// routed to that group node; parallel edges that end up between the same pair are merged (counts summed, latest
+// `at`). An edge whose endpoints are both hidden, or that would loop on one node, is dropped.
 
 import { LEAD_ID, SENIOR_ID, type EdgeKind, type GraphState, type NodeKind } from './graph'
 
 export const LAYOUT = (() => {
-  const columns = 6
-  const rows = 5
-  return { nodeW: 168, nodeH: 60, gapX: 24, gapY: 40, margin: 24, columns, rows, slots: columns * rows, members: 50 } as const
+  const width = 440
+  const margin = 16
+  const indent = 50                      // left edge of the rows: the gutter before it carries the tree's trunk
+  const gutter = 24                      // right gutter: consults and messages between workers
+  const rows = 30
+  return {
+    width, margin, indent, gutter, rows, slots: rows, members: 50,
+    topW: 196,                           // lead and senior
+    nodeW: width - margin - gutter - indent,
+    nodeH: 50, groupH: 32, gapY: 10, topGap: 22,
+    // x of the vertical lanes: the left ones start under the lead, one per edge kind; `right` runs in the right
+    // gutter between rows, `senior` along the right edge up to the senior's bottom border
+    lanes: { spawn: 24, message: 32, notice: 40, right: width - margin - gutter + 10, senior: width - margin - 6 },
+  } as const
 })()
 
 export const GROUP_DONE_ID = 'group:done'
@@ -69,7 +82,10 @@ export type LayoutEdge = {
   readonly count: number
   readonly at: number
   readonly rerouted: boolean
+  readonly points: readonly Point[]      // the route from (x1, y1) to (x2, y2): horizontal and vertical segments
 }
+
+export type Point = readonly [number, number]
 
 export type LayoutMemory = {
   readonly slots?: Readonly<Record<string, number>>
@@ -88,29 +104,22 @@ export type Layout = {
 
 const EDGE_KINDS: readonly string[] = ['spawn', 'message', 'consult', 'notice']
 
-const GRID_W = LAYOUT.columns * LAYOUT.nodeW + (LAYOUT.columns - 1) * LAYOUT.gapX
-const WIDTH = 2 * LAYOUT.margin + GRID_W
+const WIDTH = LAYOUT.width
+const rowY = (r: number): number => LAYOUT.margin + LAYOUT.nodeH + LAYOUT.topGap + r * (LAYOUT.nodeH + LAYOUT.gapY)
 
-// Column of each position inside a row, from the centre outwards (6 columns: 2, 3, 1, 4, 0, 5).
-const COLUMN_ORDER: readonly number[] = Array.from({ length: LAYOUT.columns }, (_, c) => c)
-  .sort((a, b) => Math.abs(a - (LAYOUT.columns - 1) / 2) - Math.abs(b - (LAYOUT.columns - 1) / 2) || a - b)
-
-const colX = (c: number): number => LAYOUT.margin + c * (LAYOUT.nodeW + LAYOUT.gapX)
-const rowY = (r: number): number => LAYOUT.margin + LAYOUT.nodeH + LAYOUT.gapY + r * (LAYOUT.nodeH + LAYOUT.gapY)
-
-function box(id: string, kind: LayoutNode['kind'], x: number, y: number, extra: Partial<LayoutNode> = {}): LayoutNode {
-  return { id, kind, x, y, w: LAYOUT.nodeW, h: LAYOUT.nodeH, cx: x + LAYOUT.nodeW / 2, cy: y + LAYOUT.nodeH / 2, ...extra }
+function box(id: string, kind: LayoutNode['kind'], x: number, y: number, w: number, h: number, extra: Partial<LayoutNode> = {}): LayoutNode {
+  return { id, kind, x, y, w, h, cx: x + w / 2, cy: y + h / 2, ...extra }
 }
 
-const leadBox = (): LayoutNode => box(LEAD_ID, 'lead', LAYOUT.margin + (GRID_W - LAYOUT.nodeW) / 2, LAYOUT.margin)
-const seniorBox = (): LayoutNode => box(SENIOR_ID, 'senior', colX(LAYOUT.columns - 1), LAYOUT.margin)
-const slotBox = (id: string, slot: number): LayoutNode =>
-  box(id, 'worker', colX(COLUMN_ORDER[slot % LAYOUT.columns] ?? 0), rowY(Math.floor(slot / LAYOUT.columns)), { slot })
+const leadBox = (): LayoutNode => box(LEAD_ID, 'lead', LAYOUT.margin, LAYOUT.margin, LAYOUT.topW, LAYOUT.nodeH)
+const seniorBox = (): LayoutNode =>
+  box(SENIOR_ID, 'senior', LAYOUT.width - LAYOUT.margin - LAYOUT.topW, LAYOUT.margin, LAYOUT.topW, LAYOUT.nodeH)
+const slotBox = (id: string, slot: number): LayoutNode => box(id, 'worker', LAYOUT.indent, rowY(slot), LAYOUT.nodeW, LAYOUT.nodeH, { slot })
 
+// Group rows sit under the last slot: "+N done" first, then "+N more", each always at the same place.
 function groupBox(group: GroupKind, count: number, members: readonly string[]): LayoutNode {
-  const centre = Math.floor((LAYOUT.columns - 1) / 2)
-  const col = group === 'done' ? centre : centre + 1
-  return box(group === 'done' ? GROUP_DONE_ID : GROUP_MORE_ID, 'group', colX(col), rowY(LAYOUT.rows), {
+  const y = rowY(LAYOUT.rows) + (group === 'done' ? 0 : LAYOUT.groupH + LAYOUT.gapY)
+  return box(group === 'done' ? GROUP_DONE_ID : GROUP_MORE_ID, 'group', LAYOUT.indent, y, LAYOUT.nodeW, LAYOUT.groupH, {
     group, count, label: `+${count} ${group}`, members,
   })
 }
@@ -120,12 +129,35 @@ const own = (o: Record<string, unknown>, k: string): unknown => (Object.prototyp
 const finite = (v: unknown, fallback: number): number => (typeof v === 'number' && Number.isFinite(v) ? v : fallback)
 const counter = (v: unknown): number => Math.max(0, Math.floor(finite(v, 0)))
 
-// Anchor points on the borders of two boxes: bottom to top when one is below the other, side to side otherwise.
-function anchors(a: LayoutNode, b: LayoutNode): [number, number, number, number] {
-  if (b.y >= a.y + a.h) return [a.cx, a.y + a.h, b.cx, b.y]
-  if (a.y >= b.y + b.h) return [a.cx, a.y, b.cx, b.y + b.h]
-  if (b.x >= a.x + a.w) return [a.x + a.w, a.cy, b.x, b.cy]
-  return [a.x, a.cy, b.x + b.w, b.cy]
+// Fallback for a pair no lane serves (the lead and the senior): bottom to top when one box is below the other,
+// side to side otherwise, with an elbow halfway so every segment stays horizontal or vertical.
+function direct(a: LayoutNode, b: LayoutNode): Point[] {
+  if (b.y >= a.y + a.h || a.y >= b.y + b.h) {
+    const down = b.y >= a.y + a.h
+    const y1 = down ? a.y + a.h : a.y
+    const y2 = down ? b.y : b.y + b.h
+    const my = (y1 + y2) / 2
+    return a.cx === b.cx ? [[a.cx, y1], [b.cx, y2]] : [[a.cx, y1], [a.cx, my], [b.cx, my], [b.cx, y2]]
+  }
+  const right = b.x >= a.x + a.w
+  const x1 = right ? a.x + a.w : a.x
+  const x2 = right ? b.x : b.x + b.w
+  const mx = (x1 + x2) / 2
+  return a.cy === b.cy ? [[x1, a.cy], [x2, b.cy]] : [[x1, a.cy], [mx, a.cy], [mx, b.cy], [x2, b.cy]]
+}
+
+const isRow = (n: LayoutNode): boolean => n.kind === 'worker' || n.kind === 'group'
+
+// The route of one edge: the first point on `a`'s border, the last on `b`'s.
+function route(kind: EdgeKind, a: LayoutNode, b: LayoutNode): Point[] {
+  const L = LAYOUT.lanes
+  const left = kind === 'spawn' ? L.spawn : kind === 'notice' ? L.notice : L.message
+  if (a.kind === 'lead' && isRow(b)) return [[left, a.y + a.h], [left, b.cy], [b.x, b.cy]]
+  if (isRow(a) && b.kind === 'lead') return [[a.x, a.cy], [left, a.cy], [left, b.y + b.h]]
+  if (isRow(a) && b.kind === 'senior') return [[a.x + a.w, a.cy], [L.senior, a.cy], [L.senior, b.y + b.h]]
+  if (a.kind === 'senior' && isRow(b)) return [[L.senior, a.y + a.h], [L.senior, b.cy], [b.x + b.w, b.cy]]
+  if (isRow(a) && isRow(b)) return [[a.x + a.w, a.cy], [L.right, a.cy], [L.right, b.cy], [b.x + b.w, b.cy]]
+  return direct(a, b)
 }
 
 type Worker = { id: string; done: boolean; since: number }
@@ -245,8 +277,10 @@ function layoutUnsafe(graph: GraphState, previous: LayoutMemory | undefined): La
     const a = byId.get(m.from)
     const b = byId.get(m.to)
     if (!a || !b) continue
-    const [x1, y1, x2, y2] = anchors(a, b)
-    edges.push({ id, kind: m.kind, from: m.from, to: m.to, x1, y1, x2, y2, count: m.count, at: m.at, rerouted: m.rerouted })
+    const points = route(m.kind, a, b)
+    const [x1, y1] = points[0]!
+    const [x2, y2] = points[points.length - 1]!
+    edges.push({ id, kind: m.kind, from: m.from, to: m.to, x1, y1, x2, y2, count: m.count, at: m.at, rerouted: m.rerouted, points })
   }
 
   const bottom = nodes.reduce((y, n) => Math.max(y, n.y + n.h), 0)
