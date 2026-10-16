@@ -8,6 +8,10 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 - README section on getting work delegated: example prompts, when not to delegate, and a `CLAUDE.md` snippet that makes delegation the default for multi-part work.
 
+### Fixed
+
+- `/escalator map` and `/escalator panel` no longer suggest the desktop app, which does not draw mod panes yet; they point to a terminal (the VS Code integrated terminal works too).
+
 ## [1.0.0] - 2026-10-12
 
 ### Added
