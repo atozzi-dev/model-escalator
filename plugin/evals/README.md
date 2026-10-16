@@ -167,6 +167,11 @@ node scripts/ab-run.mjs --arm active   --model opus --runs 3 --max-cost-usd 35 -
 node scripts/ab-compare.mjs plugin/evals/results/baseline.json plugin/evals/results/active.json --tolerance 5 --markdown ab-report.md
 ```
 
+Every run is started with `--settings '{"enabledPlugins":{"model-escalator@model-escalator":false}}'`, so a copy of the mod installed from the marketplace is not loaded next to the `--plugin-dir` copy (two copies would distort both arms). `store-swap` also moves aside the stores of the installed copy (`model-escalator_*.json`). Check these in the smoke test:
+
+- the modification time of the installed store (`~/.claude/plugins/store/model-escalator_model-escalator-<hash>.json`) does not change;
+- the trace or log of the run shows a single copy of the mod.
+
 With `CLAUDE_CODE_OAUTH_TOKEN` set (see above) the two arms may run in two terminals at the same time; without it, run them one after the other.
 
 ## Checking a case without spending

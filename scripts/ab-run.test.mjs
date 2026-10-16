@@ -32,6 +32,7 @@ import {
   moveStoreAside,
   restoreStore,
   clearStore,
+  DISABLE_INSTALLED_SETTINGS,
 } from './ab-run.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -615,9 +616,17 @@ function fakeFs(files) {
 
 test('storeFileNames keeps only the mod learning stores', () => {
   assert.deepEqual(
-    storeFileNames(['model-escalator_inline-601199656486.json', 'other.json', 'model-escalator_inline-1.json.tmp']),
-    ['model-escalator_inline-601199656486.json'],
+    storeFileNames(['model-escalator_inline-601199656486.json', 'other.json', 'model-escalator_inline-1.json.tmp', 'model-escalator_model-escalator-ab12.json']),
+    ['model-escalator_inline-601199656486.json', 'model-escalator_model-escalator-ab12.json'],
   );
+});
+
+test('buildClaudeArgs disables the installed copy of the mod with inline settings', () => {
+  const args = buildClaudeArgs({ pluginDir: '/tmp/p', model: 'opus', allowedTools: ['Read'] });
+  const i = args.indexOf('--settings');
+  assert.ok(i >= 0);
+  assert.deepEqual(JSON.parse(args[i + 1]), { enabledPlugins: { 'model-escalator@model-escalator': false } });
+  assert.equal(DISABLE_INSTALLED_SETTINGS, args[i + 1]);
 });
 
 test('moveStoreAside then restoreStore brings the original back and drops what the runs wrote', () => {

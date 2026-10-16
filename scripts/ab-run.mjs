@@ -392,10 +392,21 @@ export function chooseIsolation({ requested, env }) {
   throw new Error(`unknown isolation mode: ${requested} (use auto, config-dir or store-swap)`);
 }
 
-/** The mod's learning stores are `<config>/plugins/store/model-escalator_inline-<hash>.json`. */
+/**
+ * The mod's learning stores are `<config>/plugins/store/model-escalator_<source>-<hash>.json`: `inline`
+ * for a `--plugin-dir` copy, `model-escalator` for the copy installed from the marketplace. Both are
+ * moved aside, so the user's store stays intact even if the installed copy were loaded anyway.
+ */
 export function storeFileNames(names) {
-  return names.filter((n) => /^model-escalator_inline-.+\.json$/.test(n));
+  return names.filter((n) => /^model-escalator_.+\.json$/.test(n));
 }
+
+/**
+ * Settings override passed to every run. The user may have the mod installed and enabled; without this
+ * each run would load two copies (the installed one and the `--plugin-dir` copy), which distorts both
+ * arms and writes into the user's real store. Only this run is affected.
+ */
+export const DISABLE_INSTALLED_SETTINGS = JSON.stringify({ enabledPlugins: { 'model-escalator@model-escalator': false } });
 
 /** Move the learning stores into `backupDir` (same folder tree, so the rename stays on one volume). */
 export function moveStoreAside({ storeDir, backupDir, fs }) {
@@ -471,6 +482,7 @@ export function buildClaudeArgs({ pluginDir, model, allowedTools, permissionMode
     '--output-format', 'stream-json',
     '--verbose',
     '--no-session-persistence',
+    '--settings', DISABLE_INSTALLED_SETTINGS,
   ];
   if (permissionMode) args.push('--permission-mode', permissionMode);
   args.push('--allowedTools', ...allowedTools);
