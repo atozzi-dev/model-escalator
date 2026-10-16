@@ -16,7 +16,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ### Fixed
 
-- `/escalator map` and `/escalator panel` no longer suggest the desktop app, which does not draw mod panes yet; they point to a terminal (the VS Code integrated terminal works too).
+- The desktop app draws mod panes as of Claude Code 2.1.300: the README and the hints of `/escalator map` and `/escalator panel` in a session without panes now point to the desktop app or a terminal (the VS Code integrated terminal works too).
 
 ## [1.0.0] - 2026-10-12
 
