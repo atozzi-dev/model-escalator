@@ -14,7 +14,7 @@ const SCRIPTS: Record<string, (i: number) => { isError: boolean; text: string }>
   // Failing tests that drop now and then: some interventions, some progress.
   slow: (i) => ({ isError: false, text: `Tests: ${[5, 5, 5, 5, 5, 3, 3, 3, 3, 3, 3, 1, 1, 0][Math.min(i, 13)]} failed, 4 passed` }),
   // Mostly fine: the same error twice, far apart (below the default threshold).
-  clean: (i) => (i === 5 || i === 15 ? { isError: true, text: `Error: flaky ${i}` } : { isError: false, text: 'ok' }),
+  clean: (i) => (i === 3 || i === 9 ? { isError: true, text: `Error: flaky ${i}` } : { isError: false, text: 'ok' }),
 }
 
 type Harness = { store: Record<string, unknown>; clock: ReturnType<typeof mock.clock> }
@@ -53,7 +53,8 @@ function wire(on: any, env: Record<string, string> = {}): Harness {
 const runCommand = async ($: any, args: string) =>
   (await $.command.run({ command: 'escalator', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as never) as { text: string }).text
 
-// One recorded session: three agents interleaved, each a step then a tool call per round, a second per round.
+// One recorded session: three agents interleaved, each a tool call per round (and a model step every fourth round), a second per round.
+// Only the stuck agent needs the long run (to climb the whole ladder); the other two scripts are over after 14 and 10 rounds.
 async function recordSession($: any, h: Harness, rounds = 24): Promise<Recording> {
   await $.session.start({ cwd: '/work' } as never)
   const ids: string[] = []
@@ -61,8 +62,9 @@ async function recordSession($: any, h: Harness, rounds = 24): Promise<Recording
     ids.push(((await $.agent.spawn({ prompt: 'p', description: 'fix the parser', subagentType: 'general-purpose', model: 'haiku', name } as never)) as { agentId: string }).agentId)
   }
   for (let i = 0; i < rounds; i++) {
-    for (const agentId of ids) {
-      await drain($.turn.step({ turnId: 't', index: i, model: 'claude-haiku-5-5', messageCount: 3, agentId, effort: 'medium' } as never) as never)
+    for (const [n, agentId] of ids.entries()) {
+      if (i >= Math.min(rounds, [Infinity, 14, 10][n]!)) continue
+      if (i % 4 === 0) await drain($.turn.step({ turnId: 't', index: i, model: 'claude-haiku-5-5', messageCount: 3, agentId, effort: 'medium' } as never) as never)
       await $.tool.call({ tool: 'Bash', command: 'npm test', agentId } as never)
     }
     await h.clock.advance(1000)
