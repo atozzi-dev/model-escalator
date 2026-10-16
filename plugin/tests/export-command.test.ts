@@ -29,7 +29,8 @@ const full = (): Record<string, unknown> => ({
 })
 
 const csvBody = (text: string): string => {
-  const m = /^```csv\n([\s\S]*)\n```$/.exec(text)
+  // A title line first: the fence must start on its own line after the command's name prefix.
+  const m = /^CSV \([a-z]+\), paste into a spreadsheet:\n```csv\n([\s\S]*)\n```$/.exec(text)
   expect(m).not.toBe(null)
   return m?.[1] ?? ''
 }

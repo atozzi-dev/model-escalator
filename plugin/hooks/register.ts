@@ -1709,7 +1709,8 @@ async function exportCommand($: any, arg: string): Promise<string> {
     try { const v = await $.store.get(SESSIONS_KEY); sessions = Array.isArray(v) ? v : [] } catch { /* no history */ }
     let now: number | undefined
     try { now = await clockNow($) } catch { /* no decay */ }
-    return '```csv\n' + exportCsv(kind, { ledger, stats, projectStats, sessions, now, halfLifeMs: halfLifeMs() }) + '\n```'
+    // A title line first, so the fence starts on its own line after the command's name prefix.
+    return `CSV (${kind}), paste into a spreadsheet:\n` + '```csv\n' + exportCsv(kind, { ledger, stats, projectStats, sessions, now, halfLifeMs: halfLifeMs() }) + '\n```'
   } catch {
     return 'Could not build the CSV tables.'
   }
