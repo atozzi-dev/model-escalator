@@ -83,6 +83,39 @@ Some features are off by default because they change cost or behaviour in ways t
 - `modelCategories`: adds one classification call per uncached spawn, and its cost is not in the report.
 - `respectExplicitModel`: the mod cannot tell a model you asked for from one the lead chose, and lead agents often name a cheap model; correcting that choice is what learning is for.
 
+## Getting work delegated
+
+The mod acts only on subagents and in-process teammates. It never changes your main conversation, so when Claude Code does all the work itself on the lead model there is nothing to escalate, and the mod can only measure the cost. Delegation is what makes the savings possible, and Claude Code does not always delegate on its own: for a multi-part request, ask for it explicitly.
+
+Prompts that work well:
+
+- "Split this feature into independent parts (the parser, the validator and the tests), and hand each part to a subagent on haiku. Review their results before you finish."
+- "Run the test suite and fix the failing tests in a background subagent on haiku. Tell me when it is done."
+- "Add a CSV export to the reports page. Use one subagent for the backend and one for the tests, both on sonnet, and integrate the result yourself."
+
+Not every request is worth delegating. A one-file edit is faster done directly, so for a small change ask Claude Code to do it itself:
+
+- "Rename `userId` to `accountId` in `src/auth.ts`. Do it yourself, without subagents."
+
+Naming a model in the request is fine: the ladder still escalates a stuck agent. The option `respectExplicitModel` (off by default) only decides whether learning may change the starting model of an agent whose Agent call names one; when it is on, the named model is kept and the ladder still applies.
+
+To make delegation the default for multi-part work in one project, paste this into the project's `CLAUDE.md`. Claude Code reads it when a session starts, so start a new session after the change:
+
+```markdown
+## Delegation
+
+For a request with two or more independent parts (several modules, pages or files that do not depend on each other's unwritten code):
+
+- write a short plan first;
+- hand each part to a subagent with the Agent tool, on `haiku` for routine work and `sonnet` for parts that need judgement;
+- give each subagent a self-contained prompt: the files to touch, the interface to keep, and how to check the result;
+- keep the integration and the final verification yourself.
+
+Do not delegate questions, explanations, changes to one or two files, or tightly coupled work: do those yourself.
+```
+
+The rule applies to every request in that project, so keep the last paragraph: without it, small requests get split into subagents too, which costs more than doing them directly.
+
 ## Commands
 
 These are the subcommands listed by `/escalator help`:
