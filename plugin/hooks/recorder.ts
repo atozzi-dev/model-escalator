@@ -2,7 +2,8 @@
 // detector observes (spawn, tool results as features, model requests, ladder actions, stalls, the end of each run
 // and its outcome), so a later replay can score the same stream with another configuration. Text is kept only
 // where it helps a person read a recording: agent labels and error signatures, both redacted and capped. Commands,
-// outputs, prompts and file paths are never kept (files and signatures are compared through a hash).
+// outputs, prompts and file paths are never kept (files, signatures, and the outputs and commands of shell calls that
+// exited 0 but reported a failure are compared through a hash).
 //
 // The functions mutate the live recording in place: the hot path only appends to memory, and register.ts writes
 // the recording to the store in batches.
@@ -10,6 +11,7 @@
 import { optionValue, type Config } from './config'
 import { tierOf, type Action, type Effort, type Features, type Tier } from './detector'
 import { redactSecrets } from './dossier'
+import { hashKey } from './testparse'
 
 export const RECORDING_VERSION = 1
 // Size caps, in characters of JSON text (the store measures its 4 MiB limit the same way): one session, and all
@@ -40,8 +42,9 @@ export type RecAgent = { id: string; label: string; cat: string; tier: Tier; cut
 export type RecEvent =
   | { k: 'boot'; at: number; o?: Record<string, unknown> }                            // session start or module reload; o: options changed
   | { k: 'spawn'; a: number; at: number; asked: Tier; tier: Tier; x?: 1 }              // x: an explicit model kept
-  // env: refused by the environment before it ran (no n, s, f or e then); g: the agent's assistant message it belongs to
-  | { k: 'tool'; a: number; at: number; d: number; t: string; n?: number; s?: string; f?: number[]; e?: string; env?: 1; g?: number }
+  // env: refused by the environment before it ran (no n, s, f or e then); g: the agent's assistant message it belongs to;
+  // o, c: the output print and the command hash of a shell call that exited 0 but reported a failure (absent in older recordings)
+  | { k: 'tool'; a: number; at: number; d: number; t: string; n?: number; s?: string; f?: number[]; e?: string; env?: 1; g?: number; o?: string; c?: string }
   | { k: 'step'; a: number; at: number; d: number; m: Tier; ef?: Effort | number; u?: [number, number, number, number] }
   | { k: 'act'; a: number; at: number; act: Action; lvl: number; tier: Tier; w?: 1 }   // a ladder action taken
   | { k: 'deesc'; a: number; at: number; tier: Tier; w?: 1 }
@@ -75,20 +78,8 @@ export type Live = { rec: Recording; ix: Map<string, number>; last: number; sigC
 
 export const sizeOf = (v: unknown): number => JSON.stringify(v).length
 
-// A 53-bit string hash (cyrb53), base 36: equal inputs give equal keys, and a collision within one session is
-// practically impossible. Used for error signatures and file paths, which are only ever compared.
-export function hashKey(text: string): string {
-  let h1 = 0xdeadbeef
-  let h2 = 0x41c6ce57
-  for (let i = 0; i < text.length; i++) {
-    const c = text.charCodeAt(i)
-    h1 = Math.imul(h1 ^ c, 2654435761)
-    h2 = Math.imul(h2 ^ c, 1597334677)
-  }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909)
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909)
-  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36)
-}
+// The string hash lives with the output reader (the detector hashes outputs and commands too); kept here by name.
+export { hashKey }
 
 export function recordedOptions(c: Config): Record<string, unknown> {
   return Object.fromEntries(RECORDED_OPTIONS.map((n) => [n, optionValue(c, n)]))
@@ -185,6 +176,11 @@ export function toolEvent(live: Live, a: number, end: number | undefined, start:
   if (f.counts.length > 0) ev.f = f.counts.slice(0, 50)
   if (f.edit !== undefined) ev.e = hashKey(f.edit)
   if (f.group !== undefined) ev.g = f.group
+  // Already hashes (features never carry the output or the command as text).
+  if (f.out !== undefined) {
+    ev.o = f.out
+    if (f.cmd !== undefined) ev.c = f.cmd
+  }
   return ev
 }
 

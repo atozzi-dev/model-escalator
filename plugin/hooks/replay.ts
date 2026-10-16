@@ -188,7 +188,9 @@ export function replaySession(rec: Recording, cfg: Config, followRecorded = fals
         x.s = toolEnd(x.s, e.at)
         const f: Features = { attempts: num(e.n), sig: typeof e.s === 'string' ? e.s : '', counts: Array.isArray(e.f) ? e.f.filter((n) => Number.isFinite(n)) : [],
           ...(typeof e.e === 'string' ? { edit: e.e } : {}), ...(e.env === 1 ? { env: true as const } : {}),
-          ...(Number.isInteger(e.g) ? { group: e.g } : {}) }
+          ...(Number.isInteger(e.g) ? { group: e.g } : {}),
+          // Recordings made before output prints have none: the signal stays silent on them, as it was live.
+          ...(typeof e.o === 'string' ? { out: e.o, cmd: typeof e.c === 'string' ? e.c : '' } : {}) }
         const limit = consultLimit(x.s, sessionConsults(), consultCost, c)
         const prev = x.s
         const out = decide(prev, f, c, limit === undefined, blocked)
