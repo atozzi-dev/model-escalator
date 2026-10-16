@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import { DEFAULT_CONFIG } from '../hooks/config'
 import {
-  decide, endRun, features, newAgent, normalizeCommand, observe, REPEAT_OUTPUT_WEIGHT, resumeAgent,
+  decide, endRun, features, newAgent, normalizeCommand, observe, readOnlyCommand, REPEAT_OUTPUT_WEIGHT, resumeAgent,
   type Action, type AgentState, type Features, type Observation,
 } from '../hooks/detector'
 import { addAgent, hashKey, push, recordedOptions, startRecording, toolEvent, type Recording } from '../hooks/recorder'
@@ -9,7 +9,7 @@ import { resetState } from '../hooks/register'
 import { replaySession } from '../hooks/replay'
 import { parseSnapshot } from '../hooks/state'
 import { normalizeOutput, outputPrint, softFailure } from '../hooks/testparse'
-import { EXIT_ZERO_RUNS } from './fixtures/exit-zero'
+import { EXIT_ZERO_RUNS, EXIT_ZERO_SHELL_RUNS } from './fixtures/exit-zero'
 
 // The 0.7 observation's one true miss, rebuilt without its exit marker: a check that prints FAIL but exits 0
 // (for example piped through `tail`), tried again with a new candidate each time.
@@ -91,6 +91,37 @@ test('no output print for other tools, failed calls, refusals, test summaries or
   expect(features({ tool: 'Bash', ok: false, text: 'Permission to use Bash with command x has been denied.', summary: 'x' }).out).toBeUndefined()
 })
 
+// ---- Reading is not trying ----
+
+test('commands that only read or search are recognised, behind cd prefixes and paths too', async () => {
+  for (const cmd of [
+    'cat src/errors.ts', 'grep -rn "Error:" src', 'egrep FAIL log', 'sed -n 1,40p log.txt', 'sed -ne 5p x', 'git diff', 'git log --oneline -5',
+    'git show HEAD~1', 'git status', 'git blame src/a.ts', 'git grep Error', 'git -C sub --no-pager log', 'git -c core.pager=cat diff',
+    'cat out.log | grep FAIL', 'cd app && cat out.log | grep FAIL', 'cd "my dir"; tail -20 server.log', 'cd a && cd b && head -5 x',
+    'rg FAIL', 'ag Error', 'awk "/FAIL/" log', 'find . -name "*.log"', 'ls -la', 'wc -l x', 'diff a b', 'jq . r.json', 'less x', 'more x',
+    'type out.txt', 'Get-Content out.log', 'get-content out.log -Tail 5', 'Select-String -Path x -Pattern FAIL', '/usr/bin/cat x',
+    'C:\\Tools\\rg.exe FAIL', 'LC_ALL=C grep -r Error .', '  tail -f log',
+  ]) expect({ cmd, read: readOnlyCommand(cmd) }).toEqual({ cmd, read: true })
+})
+
+test('commands that run something are not reads, whatever they are piped into', async () => {
+  for (const cmd of [
+    'bash check.sh | tail -1', 'node test.js || true', 'cd app && npm test 2>&1 | tail -5', 'sed -i s/a/b/ x', 'sed -n -i 1p x',
+    "sed 's/a/b/' x", 'git commit -m "fix"', 'git push', 'git stash', 'echo "apple" > answer.txt && bash check.sh', 'python -c "print(1)"',
+    'npx tsc | head', 'cd app && make', 'pwsh ./check.ps1', '', 'cd app',
+  ]) expect({ cmd, read: readOnlyCommand(cmd) }).toEqual({ cmd, read: false })
+  expect(readOnlyCommand(undefined as unknown as string)).toBe(false)
+})
+
+test('a read whose output names a failure has no output print', async () => {
+  for (const summary of ['cat src/errors.ts', 'grep -rn "Error:" src', 'sed -n 1,40p log.txt', 'git diff', 'git log', 'cd app && cat out.log | grep FAIL']) {
+    expect({ summary, out: features({ tool: 'Bash', ok: true, text: GUESS, summary }).out }).toEqual({ summary, out: undefined })
+  }
+  expect(features({ tool: 'PowerShell', ok: true, text: GUESS, summary: 'Get-Content out.log' }).out).toBeUndefined()
+  expect(features(guess('apple')).out).toBeDefined()
+  expect(features({ tool: 'Bash', ok: true, text: GUESS, summary: 'node test.js || true' }).out).toBeDefined()
+})
+
 // ---- Score ----
 
 const run = (s: AgentState, obs: Observation[]): { state: AgentState; acts: { act: Action; call: number }[] } => {
@@ -112,9 +143,9 @@ test('the same failure output for a new attempt adds half a point from its secon
   expect(s.score).toBe(0.5)
   s = observe(s, guess('secret')).state
   expect(s.score).toBe(1)
-  // It is no failed attempt: no error count, nothing for the senior's error ring.
+  // It is no failed attempt (no error count), but the senior's dossier gets its output.
   expect(s.errorCounts).toEqual({})
-  expect(s.recentErrors).toBeUndefined()
+  expect(s.recentErrors).toEqual([GUESS, GUESS, GUESS])
 })
 
 test('the exit-0 guesser climbs to a swap within its 25 attempts, never faster than a nudge at the 7th', async () => {
@@ -125,7 +156,7 @@ test('the exit-0 guesser climbs to a swap within its 25 attempts, never faster t
 test('the same command with the same output and no edit in between is a re-read: it adds nothing', async () => {
   let s = newAgent('a1', 'x', 'haiku', 't')
   // (A bare "FAIL" line would be a failed go test run, read by the test parser: not this signal.)
-  const tailLog: Observation = { tool: 'Bash', ok: true, text: 'Error: connection refused\nretrying', summary: 'tail -2 server.log' }
+  const tailLog: Observation = { tool: 'Bash', ok: true, text: 'Error: connection refused\nretrying', summary: './status.sh' }
   expect(features(tailLog).out).toBeDefined()
   for (let i = 0; i < 30; i++) s = observe(s, tailLog).state
   expect(s.score).toBe(0)
@@ -262,6 +293,18 @@ test('the exit-0 fixture: every positive is flagged, up to a swap; no look-alike
   const LADDER = ['nudge', 'consult', 'effort', 'swap', 'human']
   for (const r of EXIT_ZERO_RUNS) {
     const hits = replaySession(recordingOf(r.tier, toFeatures(r.events)), DEFAULT_CONFIG).agents[0]!.candidate.filter((h) => LADDER.includes(h.act))
+    if (r.label === 'positive') expect({ name: r.name, swap: hits.some((h) => h.act === 'swap') }).toEqual({ name: r.name, swap: true })
+    else expect({ name: r.name, hits: hits.length }).toEqual({ name: r.name, hits: 0 })
+  }
+})
+
+test('the exit-0 fixture with real commands: checks that run code are flagged up to a swap; reads never are', async () => {
+  const LADDER = ['nudge', 'consult', 'effort', 'swap', 'human']
+  for (const r of EXIT_ZERO_SHELL_RUNS) {
+    const feats = r.calls.map((c) => features(c.edit !== undefined
+      ? { tool: 'Edit', ok: true, text: 'ok', summary: c.edit }
+      : { tool: c.tool ?? 'Bash', ok: true, text: c.text ?? '', summary: c.cmd ?? '' }))
+    const hits = replaySession(recordingOf(r.tier, feats), DEFAULT_CONFIG).agents[0]!.candidate.filter((h) => LADDER.includes(h.act))
     if (r.label === 'positive') expect({ name: r.name, swap: hits.some((h) => h.act === 'swap') }).toEqual({ name: r.name, swap: true })
     else expect({ name: r.name, hits: hits.length }).toEqual({ name: r.name, hits: 0 })
   }

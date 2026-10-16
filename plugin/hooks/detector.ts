@@ -244,6 +244,10 @@ export type Observation = { tool: string; ok: boolean; text: string; summary: st
 // replay scores exactly what the live detector scored.
 export type Features = { attempts: number; sig: string; counts: number[]; edit?: string; env?: true; group?: number; out?: string; cmd?: string }
 
+// How the agent's log marks a soft failure after "ok": the call exited 0, its output reports a failure. The dossier
+// reads it back to show that output to the senior.
+export const SOFT_FAILURE_MARK = '(the output reports a failure)'
+
 // Tools whose result is the output of a command the agent chose.
 const SHELL_TOOLS = ['Bash', 'PowerShell']
 
@@ -252,6 +256,51 @@ const SHELL_TOOLS = ['Bash', 'PowerShell']
 export const REPEAT_OUTPUT_WEIGHT = 0.5
 // Failure outputs remembered per agent (the latest ones).
 export const MAX_OUTPUTS = 20
+
+// Programs that only show or search what exists. Run first in a command, they read: their output naming a failure
+// (a source file, a log, a diff) is no attempt of the agent's, however often it comes back.
+const READERS = new Set(['cat', 'head', 'tail', 'less', 'more', 'grep', 'egrep', 'fgrep', 'rg', 'ag', 'awk', 'find', 'ls', 'wc', 'diff',
+  'jq', 'type', 'get-content', 'select-string'])
+const GIT_READS = new Set(['log', 'show', 'diff', 'status', 'blame', 'grep'])
+// git's own options that take a value as the next word.
+const GIT_VALUE_OPTIONS = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace'])
+
+// Shell words, quotes kept together; runs of | ; & are one word each.
+const words = (cmd: string): string[] => cmd.match(/"[^"]*"|'[^']*'|[|;&]+|[^\s|;&]+/g) ?? []
+const isOperator = (w: string): boolean => /^[|;&]+$/.test(w)
+
+// True when the command's first program only reads: a viewer or a search from READERS, `sed -n` (without -i), or a
+// read-only git subcommand. `cd dir &&` (or `;`) prefixes and leading VAR=value assignments are skipped; what the
+// first program is piped into does not matter (`bash check.sh | tail -1` runs a check, `cat log | grep FAIL` reads).
+// Pure; never throws.
+export function readOnlyCommand(cmd: string): boolean {
+  try {
+    if (typeof cmd !== 'string') return false
+    let w = words(cmd)
+    for (;;) {
+      if (w[0] === 'cd' && w.length >= 3 && (w[2] === '&&' || w[2] === ';')) { w = w.slice(3); continue }
+      if (w[0] !== undefined && /^[A-Za-z_]\w*=/.test(w[0])) { w = w.slice(1); continue }
+      break
+    }
+    const first = w.findIndex(isOperator)
+    const args = (first < 0 ? w : w.slice(0, first)).map((x) => x.replace(/^["']|["']$/g, ''))
+    const program = (args[0] ?? '').split(/[\\/]/).pop()!.toLowerCase().replace(/\.exe$/, '')
+    if (READERS.has(program)) return true
+    if (program === 'sed') {
+      const quiet = args.slice(1).some((a) => /^-[A-Za-z]*n[A-Za-z]*$/.test(a) || a === '--quiet' || a === '--silent')
+      const inPlace = args.slice(1).some((a) => /^-[A-Za-z]*i/.test(a) || a.startsWith('--in-place'))
+      return quiet && !inPlace
+    }
+    if (program === 'git') {
+      let i = 1
+      while (i < args.length && args[i]!.startsWith('-')) i += GIT_VALUE_OPTIONS.has(args[i]!) ? 2 : 1
+      return GIT_READS.has(args[i] ?? '')
+    }
+    return false
+  } catch {
+    return false
+  }
+}
 
 // One key per command line: the same command with other spacing is the same command.
 export function normalizeCommand(cmd: string): string {
@@ -304,8 +353,9 @@ export function features(ob: Observation): Features {
   if (EDIT_TOOLS.includes(ob.tool) && ob.summary) f.edit = normalizePath(ob.summary)
   if (typeof ob.group === 'number' && Number.isFinite(ob.group)) f.group = ob.group
   // A command that exits 0 can still fail (piped into `tail`, `|| true`, a script that always exits 0): when nothing
-  // else read a verdict in it and its output reports a failure, keep its print to see whether it comes back.
-  if (ob.ok && attempts === 0 && counts.length === 0 && SHELL_TOOLS.includes(ob.tool) && softFailure(ob.text)) {
+  // else read a verdict in it and its output reports a failure, keep its print to see whether it comes back. A command
+  // that only reads (cat, grep, git diff, ...) tries nothing: a failure it shows is not the agent's attempt.
+  if (ob.ok && attempts === 0 && counts.length === 0 && SHELL_TOOLS.includes(ob.tool) && !readOnlyCommand(ob.summary) && softFailure(ob.text)) {
     f.out = outputPrint(ob.text)
     f.cmd = hashKey(normalizeCommand(ob.summary))
   }
@@ -375,12 +425,13 @@ export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT
   const out = decide(prev, f, cfg, consultOpen, blocked)
   const verdict = f.env ? 'refused by the environment'
     : f.attempts > 0 ? 'ERR ' + f.sig.slice(0, 100)
-      : f.out !== undefined ? 'ok (the output reports a failure)' : 'ok'
+      : f.out !== undefined ? `ok ${SOFT_FAILURE_MARK}` : 'ok'
   const log = [...prev.log, `${ob.tool}: ${ob.summary.slice(0, 120)} -> ${verdict}`]
   if (log.length > cfg.logSize) log.splice(0, log.length - cfg.logSize)
   out.state.log = log
-  // One ring entry per failed log line (same rule as the "ERR" mark above), so the dossier can match them from the end.
-  if (f.attempts > 0) out.state.recentErrors = [...(prev.recentErrors ?? []), cutError(String(ob.text ?? ''))].slice(-MAX_RECENT_ERRORS)
+  // One ring entry per failed log line (same rule as the "ERR" mark above) and per soft failure (marked
+  // SOFT_FAILURE_MARK), so the dossier can match them from the end.
+  if (f.attempts > 0 || f.out !== undefined) out.state.recentErrors = [...(prev.recentErrors ?? []), cutError(String(ob.text ?? ''))].slice(-MAX_RECENT_ERRORS)
   return out
 }
 

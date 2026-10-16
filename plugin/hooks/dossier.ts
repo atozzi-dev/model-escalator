@@ -1,13 +1,14 @@
 // Pure builder for the dossier handed to a senior model: what the agent was asked to do, what it
 // tried, the real error text of the failures and the files it touched. No instructions live here
 // (the system prompt stays with the caller): the text only reports facts. Never throws.
-import type { AgentState } from './detector'
+import { SOFT_FAILURE_MARK, type AgentState } from './detector'
 
 export type DossierAttempt = {
   tool: string
   summary: string
   ok: boolean
-  error?: string            // full error/output text for failures
+  soft?: boolean            // ok, but its output reports a failure (a command that exited 0 anyway)
+  error?: string            // full error/output text for failures and soft failures
 }
 
 export type DossierInput = {
@@ -93,11 +94,14 @@ const sig = (e: string) => e.replace(/\d+/g, '#').replace(/\s+/g, ' ').trim().sl
 
 type Group = { a: DossierAttempt; count: number }
 
+// A failure, or a soft one: its text is worth showing.
+const failing = (a: DossierAttempt): boolean => !a.ok || a.soft === true
+
 function group(attempts: DossierAttempt[]): Group[] {
   const out: Group[] = []
   for (const a of attempts) {
     const last = out[out.length - 1]
-    if (last && !a.ok && !last.a.ok && last.a.tool === a.tool && sig(last.a.error ?? '') === sig(a.error ?? '') && (a.error ?? '') !== '') last.count++
+    if (last && failing(a) && failing(last.a) && last.a.ok === a.ok && last.a.tool === a.tool && sig(last.a.error ?? '') === sig(a.error ?? '') && (a.error ?? '') !== '') last.count++
     else out.push({ a, count: 1 })
   }
   return out
@@ -115,10 +119,12 @@ function render(input: DossierInput, lim: DossierLimits): string {
   if (attempts.length > 0) {
     const lines: string[] = []
     for (const { a, count } of group(attempts)) {
-      const head = `- ${str(a.tool)}: ${redactSecrets(str(a.summary).slice(0, 200))} -> ${a.ok ? 'ok' : 'FAILED'}${count > 1 ? ` (same error ×${count})` : ''}`
+      const soft = a.ok && a.soft === true
+      const verdict = soft ? 'ok, but the output reports a failure' : a.ok ? 'ok' : 'FAILED'
+      const head = `- ${str(a.tool)}: ${redactSecrets(str(a.summary).slice(0, 200))} -> ${verdict}${count > 1 ? ` (same ${soft ? 'output' : 'error'} ×${count})` : ''}`
       lines.push(head)
       const err = str(a.error)
-      if (!a.ok && err.trim()) {
+      if (failing(a) && err.trim()) {
         const body = redactSecrets(truncateMiddle(err.trim(), lim.maxErrorChars))
         lines.push(body.split('\n').map((l) => '    ' + l).join('\n'))
       }
@@ -169,12 +175,13 @@ export function buildDossier(input: DossierInput, limits: Partial<DossierLimits>
   }
 }
 
-// "tool: summary -> ok" / "tool: summary -> ERR <normalised error>", as written by observe().
+// "tool: summary -> ok" / "tool: summary -> ok (the output reports a failure)" / "tool: summary -> ERR <normalised
+// error>", as written by observe().
 const LOG_LINE = /^([^:]*): ([\s\S]*?) -> (ok|ERR)(?: ([\s\S]*))?$/
 
 // Builds the input from today's AgentState. `recentErrors` is an optional bounded ring of full error
-// texts, oldest first, one per failed attempt: it is matched to the failed log entries from the end.
-// Without it, the normalised error stored in the log line is used.
+// texts, oldest first, one per failed attempt or soft failure: it is matched to those log entries from the end.
+// Without it, a failed attempt shows the normalised error stored in the log line; a soft failure shows no text.
 export function inputFromState(
   s: AgentState & { recentErrors?: string[] },
   opts: { diffStat?: string; extra?: string } = {},
@@ -183,14 +190,19 @@ export function inputFromState(
     const errors = Array.isArray(s.recentErrors) ? s.recentErrors : []
     const parsed = s.log.map((line) => {
       const m = LOG_LINE.exec(line)
-      return m ? { tool: m[1]!, summary: m[2]!, ok: m[3] === 'ok', error: m[4] } : { tool: '', summary: line, ok: true, error: undefined }
+      if (!m) return { tool: '', summary: line, ok: true, soft: false, error: undefined as string | undefined }
+      const soft = m[3] === 'ok' && m[4] === SOFT_FAILURE_MARK
+      return { tool: m[1]!, summary: m[2]!, ok: m[3] === 'ok', soft, error: soft ? undefined : m[4] }
     })
-    const failedIdx = parsed.map((p, i) => (p.ok ? -1 : i)).filter((i) => i >= 0)
+    const failedIdx = parsed.map((p, i) => (p.ok && !p.soft ? -1 : i)).filter((i) => i >= 0)
     failedIdx.reverse().forEach((logIdx, k) => {
       const full = errors[errors.length - 1 - k]
       if (full) parsed[logIdx]!.error = full
     })
-    const attempts: DossierAttempt[] = parsed.map((p) => (p.ok ? { tool: p.tool, summary: p.summary, ok: true } : { tool: p.tool, summary: p.summary, ok: false, ...(p.error ? { error: p.error } : {}) }))
+    const attempts: DossierAttempt[] = parsed.map((p) => (
+      p.soft ? { tool: p.tool, summary: p.summary, ok: true, soft: true, ...(p.error ? { error: p.error } : {}) }
+        : p.ok ? { tool: p.tool, summary: p.summary, ok: true }
+          : { tool: p.tool, summary: p.summary, ok: false, ...(p.error ? { error: p.error } : {}) }))
     const files = Object.entries(s.editCounts ?? {}).map(([path, edits]) => ({ path, edits }))
     return { goal: s.task, tier: s.tier, interventions: s.level, attempts, files, ...(opts.diffStat ? { diffStat: opts.diffStat } : {}), ...(opts.extra ? { extra: opts.extra } : {}) }
   } catch {
