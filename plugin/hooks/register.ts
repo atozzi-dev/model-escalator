@@ -1696,7 +1696,7 @@ async function surfacesOf($: EngineInterface): Promise<readonly string[] | undef
   }
 }
 
-const NO_SURFACE_TAIL = 'Claude Code in a terminal (the VS Code integrated terminal works too); /escalator and /escalator stats work everywhere.'
+const NO_SURFACE_TAIL = 'Claude Code in a terminal (the VS Code integrated terminal works too) or in the desktop app; /escalator and /escalator stats work everywhere.'
 const NO_SURFACE_MAP = 'No surface in this session draws panels (for example the VS Code extension, or claude -p). ' +
   'Run /escalator map in ' + NO_SURFACE_TAIL
 const NO_SURFACE_PANEL = 'No surface in this session draws panels (for example the VS Code extension, or claude -p). ' +
@@ -1712,7 +1712,7 @@ async function openMap($: EngineInterface): Promise<string> {
     if (!opened.isPlaced) return `Agent network pane is waiting: ${opened.reason}`
     const surfaces = await surfacesOf($)
     if (surfaces === undefined) {
-      return 'Agent network opened. It shows every agent with its model, what it is doing and its cost; the animated map needs a client that draws mod panes as SVG.'
+      return 'Agent network opened. It shows every agent with its model, what it is doing and its cost; the animated map needs the desktop app or another client that draws mod panes.'
     }
     if (surfaces.length === 0) return NO_SURFACE_MAP
     if (surfaces.every((s) => s === 'terminal')) {

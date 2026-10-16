@@ -141,7 +141,7 @@ These are the subcommands listed by `/escalator help`:
 
 ### The agent map and the stats panel
 
-`/escalator map` draws the lead, every worker and the senior model, each with its model, what it is doing, its difficulty level and its cost, and the escalations and consults between them. In Claude Code in a terminal it is a coloured text tree with a spinner on working agents; on a client that draws mod panes as SVG it is an animated SVG (as of Claude Code 2.1.296 the VS Code extension and the desktop app do not draw mod panes, see Limitations). The command says which surface it used, or that the session has none. Selecting an agent with the buttons under the drawing shows its detail (category, tiers, state, difficulty, cost, interventions, last failed attempts), with Consult now and Swap now buttons in active mode.
+`/escalator map` draws the lead, every worker and the senior model, each with its model, what it is doing, its difficulty level and its cost, and the escalations and consults between them. In Claude Code in a terminal it is a coloured text tree with a spinner on working agents; in the desktop app (Claude Code 2.1.300 or later) it is an animated SVG; the VS Code extension does not draw mod panes as of 2.1.296, so use its integrated terminal (see Limitations). The command says which surface it used, or that the session has none. Selecting an agent with the buttons under the drawing shows its detail (category, tiers, state, difficulty, cost, interventions, last failed attempts), with Consult now and Swap now buttons in active mode.
 
 ![Example agent map: the lead on Opus, three workers on Haiku, Sonnet and Opus, a consult to the senior model and a swap from Haiku to Sonnet](docs/agent-map.svg)
 
@@ -258,7 +258,7 @@ The repository includes seven A/B eval cases, comparing the escalation ladder wi
 - **Models your organisation does not allow.** A refused swap target is not tried again in the session, the agent moves to the human level and you get a notice. A refused senior model is skipped for consults.
 - **Bedrock, Vertex and gateways.** The mod learns each tier's id from the requests it sees and prefers the shape of the lead's id; for a tier it never saw it uses the first-party id. If swaps report a model as not available, set `modelIds`.
 - **Supervisor notes are tagged, not hidden.** A note carries a per-session tag (`[supervisor:xxxxxx]`) so an agent can tell it from text in tool output. Text that claims to be a note without that tag is not one.
-- **Panes outside the terminal.** As of Claude Code 2.1.296 the VS Code extension and the desktop app run sessions without a surface for mod panes: `/escalator map` and `/escalator panel` say so instead of opening a pane nobody sees. Use Claude Code in a terminal (the VS Code integrated terminal works). The mod itself, `/escalator`, `/escalator stats` and the other text commands work everywhere.
+- **Panes outside the terminal.** The desktop app draws mod panes as of Claude Code 2.1.300. The VS Code extension did not as of 2.1.296: there `/escalator map` and `/escalator panel` say so instead of opening a pane nobody sees. Use Claude Code in a terminal (the VS Code integrated terminal works) or the desktop app. The mod itself, `/escalator`, `/escalator stats` and the other text commands work everywhere.
 - **Savings are estimates.** They come from list prices and the token counts the requests report; they are not a bill.
 
 ## Contributing and security

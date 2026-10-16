@@ -132,14 +132,14 @@ test('/escalator panel falls back to the plain opened message when surfaces fail
   expect(await runCommand($, 'panel')).toContain('Escalator panel opened')
 })
 
-test('the no-surface panel message names only a terminal, not the desktop app', async ($, on) => {
+test('the no-surface panel message suggests a terminal or the desktop app', async ($, on) => {
   const h = wire(on)
   h.surfaces = []
   await $.session.start({ cwd: '/work' } as never)
   const text = await runCommand($, 'panel')
   expect(text).toContain('in a terminal')
   expect(text).toContain('VS Code integrated terminal')
-  expect(text).not.toContain('desktop app')
+  expect(text).toContain('desktop app')
 })
 
 test('a pane that cannot open says so', async ($, on) => {
