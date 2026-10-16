@@ -787,12 +787,16 @@ export const register: Register = (on, options) => {
         mode, baseline, ledger, stats, plan: await readPlan($), now: await clockNow($), halfLifeMs: halfLifeMs(),
         paused: [...agents.values()].filter((a) => a.paused).map((a) => `${agentLabel(a)} (${a.category}, ${a.tier})`),
       })
-      const text = (c: ViewCell) => Text({ ...(c.bold ? { bold: true } : {}), ...(c.dim ? { dimColor: true } : {}), wrap: 'truncate-end', children: c.text })
+      const text = (c: ViewCell, wrap: 'wrap' | 'truncate-end' = 'truncate-end') =>
+        Text({ ...(c.bold ? { bold: true } : {}), ...(c.dim ? { dimColor: true } : {}), wrap, children: c.text })
       const terminal = e.surface === 'terminal'
       const cols = Number((e.props as { bodyColumns?: unknown } | undefined)?.bodyColumns)
       const width = Number.isFinite(cols) && cols >= 1 ? Math.floor(cols) : TEXT_WIDTH
-      // The terminal pads the text itself; the other surfaces give each column a width in characters.
+      // The terminal pads (numbers on the right) and wraps the text itself; the other surfaces give each column a
+      // width in characters, push numbers to the right of it and wrap a long line.
       const shown = terminal ? fitView(view, width) : view
+      const cell = (c: ViewCell, w: number) =>
+        Box({ width: w, flexDirection: 'row', ...(c.align === 'right' ? { justifyContent: 'flex-end' } : {}), children: [text(c)] })
       const out = Box({
         flexDirection: 'column', gap: 1,
         children: shown.sections.map((s) => {
@@ -803,7 +807,7 @@ export const register: Register = (on, options) => {
               Text({ bold: true, children: s.title }),
               ...s.rows.map((r) => Box({
                 flexDirection: 'row', gap: 2,
-                children: r.map((c, k) => (terminal || r.length === 1 ? text(c) : Box({ width: widths[k] ?? 0, children: text(c) }))),
+                children: r.map((c, k) => (terminal ? text(c) : r.length === 1 ? text(c, 'wrap') : cell(c, widths[k] ?? 0))),
               })),
             ],
           })
