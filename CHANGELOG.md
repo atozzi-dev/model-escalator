@@ -4,6 +4,10 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Changed
+
+- README: the status line points to the changelog for the version and says that the savings are not yet measured with the A/B evals.
+
 ## [1.2.0] - 2026-10-16
 
 ### Added
