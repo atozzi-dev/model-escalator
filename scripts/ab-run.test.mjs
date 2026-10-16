@@ -26,6 +26,13 @@ import {
   buildResultJson,
   isBlockedBash,
   turnCounter,
+  defaultConfigDir,
+  chooseIsolation,
+  storeFileNames,
+  moveStoreAside,
+  restoreStore,
+  clearStore,
+  DISABLE_INSTALLED_SETTINGS,
 } from './ab-run.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -560,4 +567,106 @@ test('ab-compare reads a file written in the runner shape', () => {
   const r = spawnSync(process.execPath, [join(here, 'ab-compare.mjs'), file, file], { encoding: 'utf8' });
   assert.match(r.stdout, /alpha/);
   assert.match(r.stdout, /100\.0/);
+});
+
+// --- learning-store isolation -----------------------------------------------------------------
+
+test('defaultConfigDir: CLAUDE_CONFIG_DIR wins, else ~/.claude', () => {
+  assert.equal(defaultConfigDir({ env: { CLAUDE_CONFIG_DIR: '/cfg' }, home: '/home/u' }), '/cfg');
+  assert.equal(defaultConfigDir({ env: {}, home: '/home/u' }), join('/home/u', '.claude'));
+});
+
+test('chooseIsolation: auto picks a private config dir only when a token is available', () => {
+  assert.deepEqual(chooseIsolation({ requested: 'auto', env: { CLAUDE_CODE_OAUTH_TOKEN: 'x' } }), { mode: 'config-dir' });
+  assert.deepEqual(chooseIsolation({ requested: 'auto', env: {} }), { mode: 'store-swap' });
+  assert.deepEqual(chooseIsolation({ requested: 'auto', env: { CLAUDE_CODE_OAUTH_TOKEN: '' } }), { mode: 'store-swap' });
+  assert.deepEqual(chooseIsolation({ requested: 'store-swap', env: { CLAUDE_CODE_OAUTH_TOKEN: 'x' } }), { mode: 'store-swap' });
+});
+
+test('chooseIsolation: config-dir without a token fails with a hint, never echoing a value', () => {
+  const r = chooseIsolation({ requested: 'config-dir', env: {} });
+  assert.equal(r.mode, undefined);
+  assert.match(r.error, /CLAUDE_CODE_OAUTH_TOKEN/);
+  assert.match(r.error, /setup-token/);
+  assert.throws(() => chooseIsolation({ requested: 'bogus', env: {} }), /isolation/);
+});
+
+test('buildEnv points CLAUDE_CONFIG_DIR at the private dir and keeps the token from the environment', () => {
+  const { env, diff } = buildEnv({
+    base: { PATH: '/usr/bin', CLAUDE_CODE_OAUTH_TOKEN: 'secret-token', CLAUDE_CONFIG_DIR: '/real' },
+    arm: 'active', platform: 'linux', bashPath: 'bash', configDir: '/tmp/private',
+  });
+  assert.equal(env.CLAUDE_CONFIG_DIR, '/tmp/private');
+  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, 'secret-token');
+  assert.equal(diff.set.CLAUDE_CONFIG_DIR, '/tmp/private');
+  assert.equal(JSON.stringify(diff).includes('secret-token'), false);
+});
+
+function fakeFs(files) {
+  const dirOf = (p) => p.slice(0, p.lastIndexOf('/'));
+  return {
+    files,
+    existsSync: (p) => files.has(p) || [...files].some((f) => f.startsWith(p + '/')),
+    readdirSync: (d) => [...files].filter((f) => dirOf(f) === d).map((f) => f.slice(d.length + 1)),
+    mkdirSync: () => {},
+    renameSync: (a, b) => { if (!files.has(a)) throw new Error('ENOENT ' + a); files.delete(a); files.add(b); },
+    rmSync: (p) => { files.delete(p); },
+  };
+}
+
+test('storeFileNames keeps only the mod learning stores', () => {
+  assert.deepEqual(
+    storeFileNames(['model-escalator_inline-601199656486.json', 'other.json', 'model-escalator_inline-1.json.tmp', 'model-escalator_model-escalator-ab12.json']),
+    ['model-escalator_inline-601199656486.json', 'model-escalator_model-escalator-ab12.json'],
+  );
+});
+
+test('buildClaudeArgs disables the installed copy of the mod with inline settings', () => {
+  const args = buildClaudeArgs({ pluginDir: '/tmp/p', model: 'opus', allowedTools: ['Read'] });
+  const i = args.indexOf('--settings');
+  assert.ok(i >= 0);
+  assert.deepEqual(JSON.parse(args[i + 1]), { enabledPlugins: { 'model-escalator@model-escalator': false } });
+  assert.equal(DISABLE_INSTALLED_SETTINGS, args[i + 1]);
+});
+
+test('moveStoreAside then restoreStore brings the original back and drops what the runs wrote', () => {
+  const dir = '/c/plugins/store';
+  const fs = fakeFs(new Set([`${dir}/model-escalator_inline-1.json`, `${dir}/unrelated.json`]));
+  const aside = moveStoreAside({ storeDir: dir, backupDir: `${dir}/.bak`, fs });
+  assert.equal(aside.moved.length, 1);
+  assert.equal(fs.files.has(`${dir}/model-escalator_inline-1.json`), false);
+  assert.equal(fs.files.has(`${dir}/unrelated.json`), true);
+  fs.files.add(`${dir}/model-escalator_inline-1.json`); // a run wrote a fresh store
+  fs.files.add(`${dir}/model-escalator_inline-2.json`);
+  const failed = restoreStore({ aside, storeDir: dir, fs });
+  assert.deepEqual(failed, []);
+  assert.equal(fs.files.has(`${dir}/model-escalator_inline-1.json`), true);
+  assert.equal(fs.files.has(`${dir}/.bak/model-escalator_inline-1.json`), false);
+  assert.equal(fs.files.has(`${dir}/model-escalator_inline-2.json`), false);
+  assert.equal(fs.files.has(`${dir}/unrelated.json`), true);
+});
+
+test('moveStoreAside with no existing store is a no-op and restore is safe', () => {
+  const dir = '/c/plugins/store';
+  const fs = fakeFs(new Set());
+  const aside = moveStoreAside({ storeDir: dir, backupDir: `${dir}/.bak`, fs });
+  assert.deepEqual(aside.moved, []);
+  assert.deepEqual(restoreStore({ aside, storeDir: dir, fs }), []);
+});
+
+test('restoreStore keeps going and reports files it could not restore', () => {
+  const dir = '/c/plugins/store';
+  const fs = fakeFs(new Set([`${dir}/model-escalator_inline-1.json`, `${dir}/model-escalator_inline-2.json`]));
+  const aside = moveStoreAside({ storeDir: dir, backupDir: `${dir}/.bak`, fs });
+  fs.files.delete(`${dir}/.bak/model-escalator_inline-1.json`); // lost
+  const failed = restoreStore({ aside, storeDir: dir, fs });
+  assert.equal(failed.length, 1);
+  assert.equal(fs.files.has(`${dir}/model-escalator_inline-2.json`), true);
+});
+
+test('clearStore removes only learning stores between runs', () => {
+  const dir = '/c/plugins/store';
+  const fs = fakeFs(new Set([`${dir}/model-escalator_inline-9.json`, `${dir}/keep.json`]));
+  clearStore({ storeDir: dir, fs });
+  assert.deepEqual([...fs.files], [`${dir}/keep.json`]);
 });

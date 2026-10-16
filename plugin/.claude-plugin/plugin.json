@@ -1,6 +1,6 @@
 {
   "name": "model-escalator",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Run cheap models in parallel and escalate only when they get stuck: nudge, senior consult, hot model swap. Measures savings and learns the right model per task.",
   "author": { "name": "Alessandro Tozzi", "email": "261738626+atozzi-dev@users.noreply.github.com" },
   "repository": "https://github.com/atozzi-dev/model-escalator",

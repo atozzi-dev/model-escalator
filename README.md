@@ -60,7 +60,7 @@ The mode is read from the `MODEL_ESCALATOR_MODE` environment variable when the s
 
 ## How the ladder works
 
-Each tracked agent has a difficulty score. It grows when the agent repeats the same failing command or error, when it keeps failing tests without progress, when it edits the same file again and again between failed attempts (`oscillationEdits`), and when it makes many model requests without progress. Progress (for example failing tests dropping) resets it. Test summaries of jest, vitest, pytest, go test, cargo test and bun test are read. Some results never count: a call that Claude Code refused before it ran (a permission rule or prompt, the auto mode classifier, a hook, a stale or unread file, a blocked `sleep`), the same failure repeated by the parallel calls of one assistant message, and new failing tests added while writing tests first (a failing count that goes up).
+Each tracked agent has a difficulty score. It grows when the agent repeats the same failing command or error, when it keeps failing tests without progress, when it edits the same file again and again between failed attempts (`oscillationEdits`), when a shell command exits 0 but prints the same failure (`FAIL`, `Error:`, a traceback) again after the agent changed the command or edited a file (commands that only read, such as `cat`, `grep` or `git diff`, never count), and when it makes many model requests without progress. Progress (for example failing tests dropping) resets it. Test summaries of jest, vitest, pytest, go test, cargo test and bun test are read. Some results never count: a call that Claude Code refused before it ran (a permission rule or prompt, the auto mode classifier, a hook, a stale or unread file, a blocked `sleep`), the same failure repeated by the parallel calls of one assistant message, and new failing tests added while writing tests first (a failing count that goes up).
 
 When the score reaches the threshold of the agent's starting tier (`thresholdHaiku`, `thresholdSonnet`, `thresholdOpus`) and `graceSteps` steps have passed since the last intervention, the next enabled level fires:
 
@@ -82,6 +82,39 @@ Some features are off by default because they change cost or behaviour in ways t
 - `reviewRate`: each sampled review is one senior call.
 - `modelCategories`: adds one classification call per uncached spawn, and its cost is not in the report.
 - `respectExplicitModel`: the mod cannot tell a model you asked for from one the lead chose, and lead agents often name a cheap model; correcting that choice is what learning is for.
+
+## Getting work delegated
+
+The mod acts only on subagents and in-process teammates. It never changes your main conversation, so when Claude Code does all the work itself on the lead model there is nothing to escalate, and the mod can only measure the cost. Delegation is what makes the savings possible, and Claude Code does not always delegate on its own: for a multi-part request, ask for it explicitly.
+
+Prompts that work well:
+
+- "Split this feature into independent parts (the parser, the validator and the tests), and hand each part to a subagent on haiku. Review their results before you finish."
+- "Run the test suite and fix the failing tests in a background subagent on haiku. Tell me when it is done."
+- "Add a CSV export to the reports page. Use one subagent for the backend and one for the tests, both on sonnet, and integrate the result yourself."
+
+Not every request is worth delegating. A one-file edit is faster done directly, so for a small change ask Claude Code to do it itself:
+
+- "Rename `userId` to `accountId` in `src/auth.ts`. Do it yourself, without subagents."
+
+Naming a model in the request is fine: the ladder still escalates a stuck agent. The option `respectExplicitModel` (off by default) only decides whether learning may change the starting model of an agent whose Agent call names one; when it is on, the named model is kept and the ladder still applies.
+
+To make delegation the default for multi-part work in one project, paste this into the project's `CLAUDE.md`. Claude Code reads it when a session starts, so start a new session after the change:
+
+```markdown
+## Delegation
+
+For a request with two or more independent parts (several modules, pages or files that do not depend on each other's unwritten code):
+
+- write a short plan first;
+- hand each part to a subagent with the Agent tool, on `haiku` for routine work and `sonnet` for parts that need judgement;
+- give each subagent a self-contained prompt: the files to touch, the interface to keep, and how to check the result;
+- keep the integration and the final verification yourself.
+
+Do not delegate questions, explanations, changes to one or two files, or tightly coupled work: do those yourself.
+```
+
+The rule applies to every request in that project, so keep the last paragraph: without it, small requests get split into subagents too, which costs more than doing them directly.
 
 ## Commands
 
@@ -108,7 +141,7 @@ These are the subcommands listed by `/escalator help`:
 
 ### The agent map and the stats panel
 
-`/escalator map` draws the lead, every worker and the senior model, each with its model, what it is doing, its difficulty level and its cost, and the escalations and consults between them. In Claude Code in a terminal it is a coloured text tree with a spinner on working agents; on a client that draws mod panes as SVG it is an animated SVG (as of Claude Code 2.1.296 the VS Code extension and the desktop app do not draw mod panes, see Limitations). The command says which surface it used, or that the session has none. Selecting an agent with the buttons under the drawing shows its detail (category, tiers, state, difficulty, cost, interventions, last failed attempts), with Consult now and Swap now buttons in active mode.
+`/escalator map` draws the lead, every worker and the senior model, each with its model, what it is doing, its difficulty level and its cost, and the escalations and consults between them. In Claude Code in a terminal it is a coloured text tree with a spinner on working agents; in the desktop app (Claude Code 2.1.300 or later) it is an animated SVG; the VS Code extension does not draw mod panes as of 2.1.296, so use its integrated terminal (see Limitations). The command says which surface it used, or that the session has none. Selecting an agent with the buttons under the drawing shows its detail (category, tiers, state, difficulty, cost, interventions, last failed attempts), with Consult now and Swap now buttons in active mode.
 
 ![Example agent map: the lead on Opus, three workers on Haiku, Sonnet and Opus, a consult to the senior model and a swap from Haiku to Sonnet](docs/agent-map.svg)
 
@@ -157,9 +190,9 @@ Options are set from `/config` or under `pluginConfigs` in your settings (key `m
 
 ## Session recordings
 
-With `recordSessions` above 0 the mod records, for each agent it follows, the stream its detector reads: the spawn (task category, requested and starting tier), each tool result as features (tool name, number of failed attempts, a hash of the error signature, the failing count of each test run, a hash of the edited file), each model request (tier, effort, token usage), the ladder actions taken (marked as logged only in `observe`), consults and their cost, help requests, stalls, de-escalations, refused models, manual consults, swaps and resumes, the end of each run (escalated or not, aborted) and its outcome when known (verification, review score, rework). Times are kept as milliseconds since the session started.
+With `recordSessions` above 0 the mod records, for each agent it follows, the stream its detector reads: the spawn (task category, requested and starting tier), each tool result as features (tool name, number of failed attempts, a hash of the error signature, the failing count of each test run, a hash of the edited file and, for a shell command that exited 0 but printed a failure, a hash of its normalised output and of its command line), each model request (tier, effort, token usage), the ladder actions taken (marked as logged only in `observe`), consults and their cost, help requests, stalls, de-escalations, refused models, manual consults, swaps and resumes, the end of each run (escalated or not, aborted) and its outcome when known (verification, review score, rework). Times are kept as milliseconds since the session started.
 
-Privacy: the only text kept is the agent's name (redacted, at most 40 characters) or its task category, and the text of up to 300 error signatures per session (the normalised first 160 characters of the error, with numbers and file paths replaced, then redacted with the same patterns as the senior dossier). Commands, tool output, prompts, advice and file paths are never kept; files and error signatures are compared through a hash. Redaction is pattern based, so treat the recordings like the rest of the plugin's store.
+Privacy: the only text kept is the agent's name (redacted, at most 40 characters) or its task category, and the text of up to 300 error signatures per session (the normalised first 160 characters of the error, with numbers and file paths replaced, then redacted with the same patterns as the senior dossier). Commands, tool output, prompts, advice and file paths are never kept; files, error signatures, and the outputs and commands of shell calls that exited 0 but printed a failure are compared through a hash. Redaction is pattern based, so treat the recordings like the rest of the plugin's store.
 
 Size: one session is capped at 256 KiB of JSON text; a longer session drops its oldest events first, counts them, and marks the agents that lost events. All recordings together are capped at 1.25 MiB (the store holds 4 MiB in all); the oldest sessions go first. Fifty agents with eight events each take about 35 KiB. Recording appends in memory only: the store is written at the end of an agent's run (at most once every 5 seconds), every 30 seconds while agents run, and when the session ends. A reload of the mod keeps the recording but loses the events since its last write. `/escalator reset recordings` clears them.
 
@@ -225,7 +258,7 @@ The repository includes seven A/B eval cases, comparing the escalation ladder wi
 - **Models your organisation does not allow.** A refused swap target is not tried again in the session, the agent moves to the human level and you get a notice. A refused senior model is skipped for consults.
 - **Bedrock, Vertex and gateways.** The mod learns each tier's id from the requests it sees and prefers the shape of the lead's id; for a tier it never saw it uses the first-party id. If swaps report a model as not available, set `modelIds`.
 - **Supervisor notes are tagged, not hidden.** A note carries a per-session tag (`[supervisor:xxxxxx]`) so an agent can tell it from text in tool output. Text that claims to be a note without that tag is not one.
-- **Panes outside the terminal.** As of Claude Code 2.1.296 the VS Code extension and the desktop app run sessions without a surface for mod panes: `/escalator map` and `/escalator panel` say so instead of opening a pane nobody sees. Use Claude Code in a terminal (the VS Code integrated terminal works). The mod itself, `/escalator`, `/escalator stats` and the other text commands work everywhere.
+- **Panes outside the terminal.** The desktop app draws mod panes as of Claude Code 2.1.300. The VS Code extension did not as of 2.1.296: there `/escalator map` and `/escalator panel` say so instead of opening a pane nobody sees. Use Claude Code in a terminal (the VS Code integrated terminal works) or the desktop app. The mod itself, `/escalator`, `/escalator stats` and the other text commands work everywhere.
 - **Savings are estimates.** They come from list prices and the token counts the requests report; they are not a bill.
 
 ## Contributing and security

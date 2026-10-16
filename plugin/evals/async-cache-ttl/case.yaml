@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: async-cache-ttl
+description: Hard. Async cache with TTL, stale-while-revalidate, de-duplicated loads and LRU eviction; eight ordering and lifetime bugs spread over three modules.
+tags: [hard, bugfix, async]
+context:
+  scaffold_script: scaffold.sh

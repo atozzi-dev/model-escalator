@@ -144,6 +144,49 @@ test('inputFromState maps a typical agent state', async () => {
   expect(buildDossier(input)).toContain('Make the build green')
 })
 
+// A shell call that exited 0 but whose output reports a failure: the senior sees that output, not a bare "ok".
+const SOFT = 'FAIL: answer.txt does not match the expected digest'
+
+test('a soft failure reaches the dossier with its output, redacted and capped like an error', async () => {
+  let s = newAgent('a1', 'code', 'haiku', 'Guess the word')
+  const secret = `${SOFT}\ntoken=abcd1234efgh5678\n${'noise line\n'.repeat(400)}last line`
+  s = observe(s, { tool: 'Bash', ok: true, text: secret, summary: 'bash check.sh | tail -1' }).state
+  s = observe(s, { tool: 'Bash', ok: true, text: 'a.txt', summary: 'ls' }).state
+  const input = inputFromState(s)
+  expect(input.attempts[0]).toMatchObject({ tool: 'Bash', summary: 'bash check.sh | tail -1', ok: true, soft: true })
+  expect(input.attempts[0]!.error).toContain(SOFT)
+  expect(input.attempts[1]).toEqual({ tool: 'Bash', summary: 'ls', ok: true })
+  const out = buildDossier(input)
+  expect(out).toContain('- Bash: bash check.sh | tail -1 -> ok, but the output reports a failure')
+  expect(out).toContain(`    ${SOFT}`)
+  expect(out).not.toContain('abcd1234efgh5678')
+  expect(out).toContain('lines cut')
+  expect(out).toContain('- Bash: ls -> ok')
+})
+
+test('soft failures and errors share the ring of full texts, matched from the end', async () => {
+  const s = { ...newAgent('a', 'x', 'sonnet', 't'),
+    log: ['Bash: npm test -> ERR short', 'Bash: bash check.sh | tail -1 -> ok (the output reports a failure)', 'Bash: ls -> ok', 'Bash: make -> ERR other'],
+    recentErrors: ['full error one', 'FAIL: soft output', 'full error two'] }
+  const input = inputFromState(s)
+  expect(input.attempts.map((a) => a.error)).toEqual(['full error one', 'FAIL: soft output', undefined, 'full error two'])
+  expect(input.attempts.map((a) => a.ok)).toEqual([false, true, true, false])
+  // Without its full text a soft failure still says what happened.
+  const bare = inputFromState({ ...s, recentErrors: [] })
+  expect(bare.attempts[1]).toEqual({ tool: 'Bash', summary: 'bash check.sh | tail -1', ok: true, soft: true })
+  expect(buildDossier(bare)).toContain('-> ok, but the output reports a failure')
+})
+
+test('the same soft failure repeated is shown once with its count', async () => {
+  const out = buildDossier(base({ attempts: [
+    { tool: 'Bash', summary: 'echo a > x && bash check.sh | tail -1', ok: true, soft: true, error: SOFT },
+    { tool: 'Bash', summary: 'echo b > x && bash check.sh | tail -1', ok: true, soft: true, error: SOFT },
+    { tool: 'Bash', summary: 'echo c > x && bash check.sh | tail -1', ok: true, soft: true, error: SOFT },
+  ] }))
+  expect(out).toContain('(same output ×3)')
+  expect(out.split(SOFT).length - 1).toBe(1)
+})
+
 test('inputFromState prefers full error texts when the state carries them', async () => {
   const s = { ...newAgent('a', 'x', 'sonnet', 't'), log: ['Bash: npm test -> ERR short', 'Bash: ls -> ok'], recentErrors: ['the full error text\nline two'] }
   const input = inputFromState(s)

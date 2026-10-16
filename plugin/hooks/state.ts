@@ -1,4 +1,4 @@
-import { clipLabel, EFFORTS, MAX_AGENT_NAME, MAX_ERROR_TEXT, MAX_RECENT_ERRORS, MAX_TASK_TITLE, type AgentState, type ObservedModels, type Tier } from './detector'
+import { clipLabel, EFFORTS, MAX_AGENT_NAME, MAX_ERROR_TEXT, MAX_OUTPUTS, MAX_RECENT_ERRORS, MAX_TASK_TITLE, type AgentState, type ObservedModels, type Tier } from './detector'
 import { GRAPH_LIMITS, LEAD_ID, type GraphEdge, type GraphEvent, type GraphNode, type GraphState } from './graph'
 import type { LayoutMemory } from './layout'
 import type { Ledger } from './savings'
@@ -70,6 +70,12 @@ export function parseSnapshot(v: unknown): Snapshot | undefined {
       const m = a[k]
       if (!(isObj(m) && Object.values(m).every((n) => typeof n === 'number' && Number.isInteger(n) && n >= 0))) delete live[k]
     }
+    // The failure outputs seen: a map of { c: command hash, e: whole edit count }, cut to the latest MAX_OUTPUTS;
+    // a malformed one is dropped (the next such output starts a fresh map).
+    const o = a.outputs
+    if (isObj(o) && Object.values(o).every((x) => isObj(x) && typeof x.c === 'string' && typeof x.e === 'number' && Number.isInteger(x.e) && x.e >= 0)) {
+      live.outputs = Object.fromEntries(Object.entries(o).slice(-MAX_OUTPUTS).map(([k, x]) => [k, { c: (x as { c: string }).c, e: (x as { e: number }).e }]))
+    } else delete live.outputs
     // The model requests started and the message of the last call: whole, non-negative numbers; the signatures counted
     // in that message: strings. Anything else is dropped (the next call starts a fresh message).
     const whole = (n: unknown): boolean => typeof n === 'number' && Number.isInteger(n) && n >= 0

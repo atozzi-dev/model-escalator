@@ -436,3 +436,23 @@ test('/escalator map falls back to the plain opened message when surfaces fails'
   expect(h.opened.length).toBe(1)
   expect(text).toContain('Agent network opened')
 })
+
+test('the no-surface message suggests a terminal or the desktop app', async ($, on) => {
+  const h = wire(on)
+  h.surfaces = []
+  await $.session.start({ cwd: '/work' } as never)
+  const text = await runCommand($, 'map')
+  expect(text).toContain('in a terminal')
+  expect(text).toContain('VS Code integrated terminal')
+  expect(text).toContain('desktop app')
+  expect(text).not.toContain('desktop or VS Code')
+})
+
+test('the map fallback suggests the desktop app and does not name the VS Code extension', async ($, on) => {
+  const h = wire(on)
+  h.surfacesFail = true
+  await $.session.start({ cwd: '/work' } as never)
+  const text = await runCommand($, 'map')
+  expect(text).toContain('desktop app')
+  expect(text).not.toContain('VS Code')
+})

@@ -129,6 +129,74 @@ export function parseTestRuns(text: string): TestRun[] {
   }
 }
 
+// A 53-bit string hash (cyrb53), base 36: equal inputs give equal keys, and a collision within one session is
+// practically impossible. Used for what is only ever compared: error signatures, file paths, outputs, commands.
+export function hashKey(text: string): string {
+  let h1 = 0xdeadbeef
+  let h2 = 0x41c6ce57
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i)
+    h1 = Math.imul(h1 ^ c, 2654435761)
+    h2 = Math.imul(h2 ^ c, 1597334677)
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909)
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909)
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36)
+}
+
+// Lines that report a failure in the output's own words, for commands that exit 0 anyway (a pipe into `tail`, `|| true`,
+// a script that always exits 0). Each pattern names a failure, not a topic: "error handling" or "fail-safe" do not match.
+const FAILURE_LINES: readonly RegExp[] = [
+  /\bFAIL(?:ED|URE|S)?\b/,                                  // FAIL, FAILED, FAILURE (upper case: a verdict, not prose)
+  /\b[Ff]ailed\b/,                                          // "Build failed", "Failed to compile"
+  /(?:^|\s)(?:error|Error|ERROR)(?:\[[\w-]+\]| TS\d+)?:/,   // "error:", "Error:", "error[E0308]:", "error TS2322:"
+  /\b[A-Z][A-Za-z]*Error:/,                                 // TypeError:, AssertionError:, ValueError:
+  /^Traceback \(most recent call last\)/,
+  /^\s*[✗✘✕]\s/,
+  /^not ok \d/,                                             // TAP
+  /^panic:/,                                                // go
+]
+// A line that only says nothing failed.
+const NO_FAILURE = /\b(?:0|no|zero|without)\s+(?:fail|error)/i
+
+// True when the output reports a failure on some line. Pure; never throws.
+export function softFailure(text: string): boolean {
+  try {
+    if (typeof text !== 'string' || text === '') return false
+    return clip(text).replace(ANSI, '').split(/\r?\n/).some((l) => !NO_FAILURE.test(l) && FAILURE_LINES.some((p) => p.test(l)))
+  } catch {
+    return false
+  }
+}
+
+// Outputs are read up to this many characters from each end: the verdict is at the start or at the end.
+const OUTPUT_EDGE = 16_000
+const clip = (t: string): string => (t.length <= 2 * OUTPUT_EDGE ? t : t.slice(0, OUTPUT_EDGE) + '\n' + t.slice(-OUTPUT_EDGE))
+
+// The output without what changes between two identical runs: colours, dates and clock times, durations, hex ids,
+// temporary folders, process ids and ports, long numbers (epoch times, sizes), spacing. Small numbers stay: "got 5" and "got 6" differ.
+export function normalizeOutput(text: string): string {
+  if (typeof text !== 'string') return ''
+  return clip(text)
+    .replace(ANSI, '')
+    .replace(/\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?/g, '<time>')
+    .replace(/\b\d{1,2}:\d{2}:\d{2}(?:[.,]\d+)?\b/g, '<time>')
+    .replace(/\b\d+(?:[.,]\d+)?\s?(?:ms|µs|us|ns|s|sec|secs|seconds|m|min|mins|minutes)\b/g, '<dur>')
+    .replace(/\b0x[0-9a-f]+\b/gi, '<hex>')
+    .replace(/\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,}\b/gi, '<hex>')
+    .replace(/(?:\/tmp|\/var\/folders|\/private\/var\/folders)\/[^\s'"`:;,)]*/g, '<tmp>')
+    .replace(/\b[A-Za-z]:[\\/](?:[^\s\\/]+[\\/])*?(?:Temp|tmp)[\\/][^\s'"`:;,)]*/gi, '<tmp>')
+    .replace(/\b(pid|port)[\s=:#]*\d+/gi, '$1 <n>')
+    .replace(/\b\d{5,}\b/g, '<n>')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+// The fingerprint of an output: a short hash of its normalised text. The text itself is never kept.
+export function outputPrint(text: string): string {
+  return hashKey(normalizeOutput(text))
+}
+
 // Markers such as "exit=1", "exit code 2", "exit code: 3", in order. "exit status N" (printed by
 // go test itself) is deliberately not a marker: it belongs to the command's own output.
 export function exitCodes(text: string): number[] {

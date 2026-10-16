@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: semver-range
+description: Hard. Semantic version parsing and range matching (caret, tilde, partials, hyphen, alternatives, prerelease rule) split over three modules; many interacting edge cases.
+tags: [hard, bugfix, parser]
+context:
+  scaffold_script: scaffold.sh

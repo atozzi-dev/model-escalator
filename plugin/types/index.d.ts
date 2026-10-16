@@ -24,6 +24,7 @@ declare module 'claude-code' {
           messageTools?: number
           message?: number
           messageSigs?: string[]
+          outputs?: Record<string, { c: string; e: number }>
           log: string[]
           tokens: number
           lastEventAt?: number

@@ -1,7 +1,7 @@
 // Pure logic: no $ calls, so it is unit-testable in isolation.
 
 import { DEFAULT_CONFIG, type Config } from './config'
-import { exitCodes, parseTestRuns } from './testparse'
+import { exitCodes, hashKey, outputPrint, parseTestRuns, softFailure } from './testparse'
 
 export type Tier = 'haiku' | 'sonnet' | 'opus'
 export const LADDER: readonly Tier[] = ['haiku', 'sonnet', 'opus']
@@ -40,7 +40,10 @@ export type AgentState = {
   messageCalls?: number                 // tool calls started since the latest request began
   messageTools?: number                 // tool calls the latest request asked for, once it ended
   message?: number                      // the assistant message of the agent's last tool call that had one
-  messageSigs?: string[]                // error signatures already counted in that message
+  messageSigs?: string[]                // error signatures (and output prints, "o:" first) already counted in that message
+  // Failure outputs of shell calls that exited 0, by output print since the last progress: the command hash and the
+  // number of edits at the latest sighting. Absent until the first such output.
+  outputs?: Record<string, { c: string; e: number }>
   log: string[]
   tokens: number
   // Liveness, for stall detection. All optional: snapshots saved before they existed lack them.
@@ -236,8 +239,73 @@ export type Observation = { tool: string; ok: boolean; text: string; summary: st
 // What the score reads from one tool result, without its text: the failed attempts in it, the signature of its
 // error (empty when nothing failed), the failing count of each test run in it, the edited file (normalised; only
 // for an edit tool) and the assistant message it belongs to. `env` marks a call the environment refused before it
-// did anything. The recorder keeps these, so a replay scores exactly what the live detector scored.
-export type Features = { attempts: number; sig: string; counts: number[]; edit?: string; env?: true; group?: number }
+// did anything. `out` and `cmd` (hashes) mark a shell call that exited 0 with no failed attempt and no test summary, but
+// whose output reports a failure in its own words: its output print and its command. The recorder keeps these, so a
+// replay scores exactly what the live detector scored.
+export type Features = { attempts: number; sig: string; counts: number[]; edit?: string; env?: true; group?: number; out?: string; cmd?: string }
+
+// How the agent's log marks a soft failure after "ok": the call exited 0, its output reports a failure. The dossier
+// reads it back to show that output to the senior.
+export const SOFT_FAILURE_MARK = '(the output reports a failure)'
+
+// Tools whose result is the output of a command the agent chose.
+const SHELL_TOOLS = ['Bash', 'PowerShell']
+
+// What a repeated failure output adds to the score. Half of a repeated error: the verdict is read from words, not
+// from an exit code, so it takes six repeats to reach Haiku's threshold on its own.
+export const REPEAT_OUTPUT_WEIGHT = 0.5
+// Failure outputs remembered per agent (the latest ones).
+export const MAX_OUTPUTS = 20
+
+// Programs that only show or search what exists. Run first in a command, they read: their output naming a failure
+// (a source file, a log, a diff) is no attempt of the agent's, however often it comes back.
+const READERS = new Set(['cat', 'head', 'tail', 'less', 'more', 'grep', 'egrep', 'fgrep', 'rg', 'ag', 'awk', 'find', 'ls', 'wc', 'diff',
+  'jq', 'type', 'get-content', 'select-string'])
+const GIT_READS = new Set(['log', 'show', 'diff', 'status', 'blame', 'grep'])
+// git's own options that take a value as the next word.
+const GIT_VALUE_OPTIONS = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace'])
+
+// Shell words, quotes kept together; runs of | ; & are one word each.
+const words = (cmd: string): string[] => cmd.match(/"[^"]*"|'[^']*'|[|;&]+|[^\s|;&]+/g) ?? []
+const isOperator = (w: string): boolean => /^[|;&]+$/.test(w)
+
+// True when the command's first program only reads: a viewer or a search from READERS, `sed -n` (without -i), or a
+// read-only git subcommand. `cd dir &&` (or `;`) prefixes and leading VAR=value assignments are skipped; what the
+// first program is piped into does not matter (`bash check.sh | tail -1` runs a check, `cat log | grep FAIL` reads).
+// Pure; never throws.
+export function readOnlyCommand(cmd: string): boolean {
+  try {
+    if (typeof cmd !== 'string') return false
+    let w = words(cmd)
+    for (;;) {
+      if (w[0] === 'cd' && w.length >= 3 && (w[2] === '&&' || w[2] === ';')) { w = w.slice(3); continue }
+      if (w[0] !== undefined && /^[A-Za-z_]\w*=/.test(w[0])) { w = w.slice(1); continue }
+      break
+    }
+    const first = w.findIndex(isOperator)
+    const args = (first < 0 ? w : w.slice(0, first)).map((x) => x.replace(/^["']|["']$/g, ''))
+    const program = (args[0] ?? '').split(/[\\/]/).pop()!.toLowerCase().replace(/\.exe$/, '')
+    if (READERS.has(program)) return true
+    if (program === 'sed') {
+      const quiet = args.slice(1).some((a) => /^-[A-Za-z]*n[A-Za-z]*$/.test(a) || a === '--quiet' || a === '--silent')
+      const inPlace = args.slice(1).some((a) => /^-[A-Za-z]*i/.test(a) || a.startsWith('--in-place'))
+      return quiet && !inPlace
+    }
+    if (program === 'git') {
+      let i = 1
+      while (i < args.length && args[i]!.startsWith('-')) i += GIT_VALUE_OPTIONS.has(args[i]!) ? 2 : 1
+      return GIT_READS.has(args[i] ?? '')
+    }
+    return false
+  } catch {
+    return false
+  }
+}
+
+// One key per command line: the same command with other spacing is the same command.
+export function normalizeCommand(cmd: string): string {
+  return typeof cmd === 'string' ? cmd.replace(/\s+/g, ' ').trim() : ''
+}
 
 // Refusals by Claude Code itself (a permission rule or prompt, the auto mode classifier, a safety check, the worktree
 // guard, a hook, a stale or unread file, a standalone sleep, the mod's own pause): the tool never ran, so the result
@@ -284,6 +352,13 @@ export function features(ob: Observation): Features {
   const f: Features = { attempts, sig: attempts > 0 ? normalizeError(ob.text) : '', counts }
   if (EDIT_TOOLS.includes(ob.tool) && ob.summary) f.edit = normalizePath(ob.summary)
   if (typeof ob.group === 'number' && Number.isFinite(ob.group)) f.group = ob.group
+  // A command that exits 0 can still fail (piped into `tail`, `|| true`, a script that always exits 0): when nothing
+  // else read a verdict in it and its output reports a failure, keep its print to see whether it comes back. A command
+  // that only reads (cat, grep, git diff, ...) tries nothing: a failure it shows is not the agent's attempt.
+  if (ob.ok && attempts === 0 && counts.length === 0 && SHELL_TOOLS.includes(ob.tool) && !readOnlyCommand(ob.summary) && softFailure(ob.text)) {
+    f.out = outputPrint(ob.text)
+    f.cmd = hashKey(normalizeCommand(ob.summary))
+  }
   return f
 }
 
@@ -312,6 +387,30 @@ export function startCall<T extends AgentState>(s: T): { state: T; group?: numbe
 }
 
 const failedSoFar = (s: AgentState): number => Object.values(s.errorCounts).reduce((n, c) => n + c, 0)
+const editsSoFar = (s: AgentState): number => Object.values(s.editCounts).reduce((n, c) => n + c, 0)
+
+// Same output repeated: a shell call exited 0 but its output reports a failure, and that very output (`out`, its print)
+// came back for a new attempt: another command, or the same one after an edit. The agent changed something and got
+// the same failure, so it is not making progress even though nothing exited non-zero. The same command with no edit in
+// between is a re-read (polling a log, checking a status) and adds nothing; so does a repeat within one assistant
+// message (parallel calls). Mutates `s`, a copy owned by decide.
+function seeOutput(s: AgentState, out: string, cmd: string, group: number | undefined): void {
+  if (group !== undefined) {
+    const key = `o:${out}`
+    if ((s.messageSigs ?? []).includes(key)) return
+    s.messageSigs = [...(s.messageSigs ?? []), key].slice(-20)
+  }
+  const edits = editsSoFar(s)
+  const seen = s.outputs?.[out]
+  if (seen && (seen.c !== cmd || edits > seen.e)) s.score += REPEAT_OUTPUT_WEIGHT
+  // The latest sighting goes last, so the oldest outputs are the first forgotten.
+  const outputs = Object.entries(s.outputs ?? {}).filter(([k]) => k !== out)
+  outputs.push([out, { c: cmd, e: edits }])
+  s.outputs = Object.fromEntries(outputs.slice(-MAX_OUTPUTS))
+}
+
+// Progress, a resume or a de-escalation forgets the failure outputs seen (only on an agent that has any).
+const noOutputs = (s: AgentState): Pick<AgentState, 'outputs'> => (s.outputs !== undefined ? { outputs: {} } : {})
 
 // What progress (or a fresh ladder) forgets of the agent's edits.
 const noEdits = (): Pick<AgentState, 'editCounts' | 'editMarks' | 'retryEdits'> => ({ editCounts: {}, editMarks: {}, retryEdits: {} })
@@ -324,11 +423,15 @@ type Decision = { state: AgentState; action?: Action; consultSkipped?: boolean; 
 // `f` is the call's features when the caller already read them (the recorder does).
 export function observe(prev: AgentState, ob: Observation, cfg: Config = DEFAULT_CONFIG, consultOpen = true, blocked: readonly Tier[] = [], f: Features = features(ob)): Decision {
   const out = decide(prev, f, cfg, consultOpen, blocked)
-  const log = [...prev.log, `${ob.tool}: ${ob.summary.slice(0, 120)} -> ${f.env ? 'refused by the environment' : f.attempts === 0 ? 'ok' : 'ERR ' + f.sig.slice(0, 100)}`]
+  const verdict = f.env ? 'refused by the environment'
+    : f.attempts > 0 ? 'ERR ' + f.sig.slice(0, 100)
+      : f.out !== undefined ? `ok ${SOFT_FAILURE_MARK}` : 'ok'
+  const log = [...prev.log, `${ob.tool}: ${ob.summary.slice(0, 120)} -> ${verdict}`]
   if (log.length > cfg.logSize) log.splice(0, log.length - cfg.logSize)
   out.state.log = log
-  // One ring entry per failed log line (same rule as the "ERR" mark above), so the dossier can match them from the end.
-  if (f.attempts > 0) out.state.recentErrors = [...(prev.recentErrors ?? []), cutError(String(ob.text ?? ''))].slice(-MAX_RECENT_ERRORS)
+  // One ring entry per failed log line (same rule as the "ERR" mark above) and per soft failure (marked
+  // SOFT_FAILURE_MARK), so the dossier can match them from the end.
+  if (f.attempts > 0 || f.out !== undefined) out.state.recentErrors = [...(prev.recentErrors ?? []), cutError(String(ob.text ?? ''))].slice(-MAX_RECENT_ERRORS)
   return out
 }
 
@@ -359,6 +462,8 @@ export function decide(prev: AgentState, f: Features, cfg: Config = DEFAULT_CONF
     s.score += n >= 2 ? 1 : 0.25
   }
 
+  if (f.out !== undefined) seeOutput(s, f.out, f.cmd ?? '', f.group)
+
   // Oscillation: the same file edited again and again without progress, whatever the errors say. Only an edit made
   // after a failed attempt (since the previous edit of that file) counts: a run of edits with no failure is work.
   if (f.edit !== undefined) {
@@ -377,7 +482,7 @@ export function decide(prev: AgentState, f: Features, cfg: Config = DEFAULT_CONF
   for (const failing of repeat ? [] : f.counts) {
     if (failing === 0 || (s.lastFailing !== undefined && failing < s.lastFailing)) {
       progress = true
-      Object.assign(s, { score: 0, errorCounts: {}, ...noEdits() })
+      Object.assign(s, { score: 0, errorCounts: {}, ...noEdits(), ...noOutputs(s) })
     } else if (s.lastFailing !== undefined) {
       if (failing === s.lastFailing) s.score += 1
       progress = false
@@ -386,7 +491,7 @@ export function decide(prev: AgentState, f: Features, cfg: Config = DEFAULT_CONF
   }
 
   if (progress) {
-    Object.assign(s, { score: 0, stepsSinceProgress: 0, errorCounts: {}, ...noEdits() })
+    Object.assign(s, { score: 0, stepsSinceProgress: 0, errorCounts: {}, ...noEdits(), ...noOutputs(s) })
     return { state: s, progress: true }
   }
 
@@ -486,7 +591,7 @@ export function pauseAgent(s: AgentState): AgentState {
 // grace window). With `now` it also counts as active then, so the pause itself is never read as silence.
 export function resumeAgent(s: AgentState, now?: number): AgentState {
   const { paused: _paused, lastFailing: _lastFailing, ...rest } = s
-  const fresh: AgentState = { ...rest, score: 0, level: 0, stepsSinceAction: 0, stepsSinceProgress: 0, errorCounts: {}, ...noEdits(), stalled: false }
+  const fresh: AgentState = { ...rest, score: 0, level: 0, stepsSinceAction: 0, stepsSinceProgress: 0, errorCounts: {}, ...noEdits(), ...noOutputs(s), stalled: false }
   return now === undefined ? fresh : { ...fresh, lastEventAt: now }
 }
 
@@ -504,7 +609,7 @@ export function noteProgress(s: AgentState, cfg: Config = DEFAULT_CONFIG, simula
   if (n < cfg.deescalateAfter) return { state: { ...s, progressSignals: n } }
   const back = LADDER[Math.max(tierRank(s.startTier), tierRank(s.tier) - 1)]!
   const state: AgentState = { ...s, tier: simulated ? s.tier : back, progressSignals: 0, deescalated: true,
-    score: 0, level: swapAt, stepsSinceAction: 0, errorCounts: {}, ...noEdits() }
+    score: 0, level: swapAt, stepsSinceAction: 0, errorCounts: {}, ...noEdits(), ...noOutputs(s) }
   return { state, decided: true, tier: simulated ? undefined : back }
 }
 
