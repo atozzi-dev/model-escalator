@@ -4,6 +4,8 @@
   "description": "Run cheap models in parallel and escalate only when they get stuck: nudge, senior consult, hot model swap. Measures savings and learns the right model per task.",
   "author": { "name": "Alessandro Tozzi", "email": "261738626+atozzi-dev@users.noreply.github.com" },
   "repository": "https://github.com/atozzi-dev/model-escalator",
+  "homepage": "https://github.com/atozzi-dev/model-escalator#readme",
+  "keywords": ["subagents", "model-selection", "escalation", "cost", "agent-teams"],
   "license": "MIT",
   "types": "./types/index.d.ts",
   "userConfig": {
