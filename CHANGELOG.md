@@ -4,6 +4,10 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Changed
+
+- The agent map and the statistics panel are easier to read in a side pane: the map is a vertical tree that fits the pane width, with full names (always in the tooltip), larger text, what each agent is doing instead of a generic "thinks", a footer legend and edges routed around the cards; the panel right-aligns numbers and wraps long lines instead of cutting them.
+
 ## [1.1.0] - 2026-10-16
 
 ### Added
