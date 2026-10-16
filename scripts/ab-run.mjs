@@ -14,9 +14,9 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import {
-  cpSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync,
+  cpSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -363,8 +363,81 @@ const REMOVED_VARS = [
   'EVAL_MODEL_ESCALATOR_BASELINE',
 ];
 
-/** Environment of a run. Never touches the config dir (the user's login stays). */
-export function buildEnv({ base, arm, baseline, platform, bashPath }) {
+/** Where Claude Code keeps its config: CLAUDE_CONFIG_DIR, else ~/.claude. */
+export function defaultConfigDir({ env, home }) {
+  return env.CLAUDE_CONFIG_DIR || join(home, '.claude');
+}
+
+/**
+ * Pick how the runs are kept away from the user's learning store.
+ * - config-dir: every run gets a private CLAUDE_CONFIG_DIR (so a private store) and logs in with the
+ *   CLAUDE_CODE_OAUTH_TOKEN already present in the environment (the script never reads or writes it).
+ * - store-swap: the user's store files are moved aside for the whole session and restored at the end;
+ *   they are cleared before every run so runs do not share learning.
+ * `auto` takes config-dir when a token is set, store-swap otherwise.
+ */
+export function chooseIsolation({ requested, env }) {
+  const hasToken = typeof env.CLAUDE_CODE_OAUTH_TOKEN === 'string' && env.CLAUDE_CODE_OAUTH_TOKEN !== '';
+  if (requested === 'auto') return { mode: hasToken ? 'config-dir' : 'store-swap' };
+  if (requested === 'store-swap') return { mode: 'store-swap' };
+  if (requested === 'config-dir') {
+    if (hasToken) return { mode: 'config-dir' };
+    return {
+      error:
+        '--isolation config-dir needs CLAUDE_CODE_OAUTH_TOKEN in the environment (a private config folder has no login). ' +
+        'Create a long-lived token once with `claude setup-token`, set it in this terminal ' +
+        '(PowerShell: $env:CLAUDE_CODE_OAUTH_TOKEN = "<token>"), or use --isolation store-swap.',
+    };
+  }
+  throw new Error(`unknown isolation mode: ${requested} (use auto, config-dir or store-swap)`);
+}
+
+/** The mod's learning stores are `<config>/plugins/store/model-escalator_inline-<hash>.json`. */
+export function storeFileNames(names) {
+  return names.filter((n) => /^model-escalator_inline-.+\.json$/.test(n));
+}
+
+/** Move the learning stores into `backupDir` (same folder tree, so the rename stays on one volume). */
+export function moveStoreAside({ storeDir, backupDir, fs }) {
+  const moved = [];
+  if (!fs.existsSync(storeDir)) return { moved, backupDir };
+  const names = storeFileNames(fs.readdirSync(storeDir));
+  if (!names.length) return { moved, backupDir };
+  fs.mkdirSync(backupDir, { recursive: true });
+  for (const n of names) {
+    const from = `${storeDir}/${n}`;
+    const to = `${backupDir}/${n}`;
+    fs.renameSync(from, to);
+    moved.push({ from, to });
+  }
+  return { moved, backupDir };
+}
+
+/** Delete the learning stores the runs wrote. */
+export function clearStore({ storeDir, fs }) {
+  if (!fs.existsSync(storeDir)) return;
+  for (const n of storeFileNames(fs.readdirSync(storeDir))) fs.rmSync(`${storeDir}/${n}`, { force: true });
+}
+
+/** Put the original stores back (dropping what the runs wrote). Returns the files that could not be restored. */
+export function restoreStore({ aside, storeDir, fs }) {
+  const failed = [];
+  clearStore({ storeDir, fs });
+  for (const m of aside.moved) {
+    try {
+      fs.renameSync(m.to, m.from);
+    } catch (e) {
+      failed.push({ ...m, error: String(e?.message ?? e) });
+    }
+  }
+  if (!failed.length && aside.moved.length) {
+    try { fs.rmSync(aside.backupDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+  return failed;
+}
+
+/** Environment of a run. With `configDir` the run gets a private config folder; the token stays in `base`. */
+export function buildEnv({ base, arm, baseline, platform, bashPath, configDir }) {
   const env = { ...base };
   const removed = [];
   for (const k of REMOVED_VARS) {
@@ -375,6 +448,7 @@ export function buildEnv({ base, arm, baseline, platform, bashPath }) {
   }
   const set = { MODEL_ESCALATOR_MODE: arm, CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1' };
   if (baseline) set.MODEL_ESCALATOR_BASELINE = baseline;
+  if (configDir) set.CLAUDE_CONFIG_DIR = configDir;
   Object.assign(env, set);
   let pathPrefix = null;
   if (platform === 'win32' && bashPath) {
@@ -484,6 +558,10 @@ options:
   --max-cost-usd <x>        stop starting runs once agent + judge cost reaches x; marks the file partial
   --permission-mode <mode>  optional claude --permission-mode (default: none, tools are granted explicitly)
   --json <file>             where to write the result (default: <results folder>/<arm>.json)
+  --isolation <mode>        auto (default), config-dir or store-swap: keep the runs away from your learning store
+                            config-dir: private CLAUDE_CONFIG_DIR per run, login via CLAUDE_CODE_OAUTH_TOKEN (env, from
+                            \`claude setup-token\`); store-swap: your store files are moved aside for the session and
+                            restored at the end (do not run two arms at the same time in this mode)
   --keep-temp               keep the temporary workspaces and plugin copies
   --dry-run                 scaffold one case, print the command and environment, grade the untouched
                             workspace and exit without calling claude
@@ -497,7 +575,7 @@ Runs cost real money; use --max-cost-usd.
 class UsageError extends Error {}
 
 function parseArgs(argv) {
-  const o = { runs: 1, judgeModel: 'haiku', keepTemp: false, dryRun: false, help: false };
+  const o = { isolation: 'auto', runs: 1, judgeModel: 'haiku', keepTemp: false, dryRun: false, help: false };
   const need = (i, name) => {
     const v = argv[i + 1];
     if (v === undefined || v.startsWith('--')) throw new UsageError(`${name} needs a value`);
@@ -516,6 +594,7 @@ function parseArgs(argv) {
       case '--max-cost-usd': o.maxCostUsd = Number(need(i, a)); i++; break;
       case '--permission-mode': o.permissionMode = need(i, a); i++; break;
       case '--json': o.json = need(i, a); i++; break;
+      case '--isolation': o.isolation = need(i, a); i++; break;
       case '--keep-temp': o.keepTemp = true; break;
       case '--dry-run': o.dryRun = true; break;
       case '--help': case '-h': o.help = true; break;
@@ -524,6 +603,7 @@ function parseArgs(argv) {
   }
   if (o.help) return o;
   if (o.arm !== 'baseline' && o.arm !== 'active') throw new UsageError('--arm must be baseline or active');
+  if (!['auto', 'config-dir', 'store-swap'].includes(o.isolation)) throw new UsageError('--isolation must be auto, config-dir or store-swap');
   if (!Number.isInteger(o.runs) || o.runs < 1) throw new UsageError('--runs must be a positive integer');
   if (o.maxCostUsd !== undefined && !(o.maxCostUsd > 0)) throw new UsageError('--max-cost-usd must be a positive number');
   return o;
@@ -732,13 +812,15 @@ export function turnCounter(maxTurns) {
   };
 }
 
-async function runOnce({ c, n, opts, model, bashPath, claude, resultsDir, judgeEnv }) {
+async function runOnce({ c, n, opts, model, bashPath, claude, resultsDir, judgeEnv, isolation }) {
   const startedAt = new Date().toISOString();
   const t0 = Date.now();
   const ws = mkdtempSync(join(tmpdir(), 'ab-run-ws-'));
   const copy = mkdtempSync(join(tmpdir(), 'ab-run-plugin-'));
   const tracePath = join(resultsDir, `${c.name}-${opts.arm}-${n}.jsonl`);
-  const { env } = buildEnv({ base: process.env, arm: opts.arm, baseline: opts.baseline, platform: process.platform, bashPath });
+  const cfg = isolation.mode === 'config-dir' ? mkdtempSync(join(tmpdir(), 'ab-run-cfg-')) : null;
+  if (isolation.mode === 'store-swap') clearStore({ storeDir: isolation.storeDir, fs: nodeFs });
+  const { env } = buildEnv({ base: process.env, arm: opts.arm, baseline: opts.baseline, platform: process.platform, bashPath, configDir: cfg });
   const base = {
     startedAt, tracePath, turns: 0, judgeCostUsd: 0,
   };
@@ -791,8 +873,11 @@ async function runOnce({ c, n, opts, model, bashPath, claude, resultsDir, judgeE
       removeDir(ws);
       removeDir(copy);
     }
+    if (cfg) removeDir(cfg); // always: it holds this run's private learning store and session files
   }
 }
+
+const nodeFs = { existsSync, readdirSync, mkdirSync, renameSync, rmSync };
 
 const fmtCost = (x) => (typeof x === 'number' ? `$${x.toFixed(4)}` : 'cost n/a');
 
@@ -812,11 +897,14 @@ function prepare(opts) {
   const all = loadCases();
   const cases = selectCases(all, opts);
   if (!cases.length) throw new UsageError('no case matches the filters');
-  return { bashPath, claude, cases };
+  const iso = chooseIsolation({ requested: opts.isolation, env: process.env });
+  if (iso.error) throw new UsageError(iso.error);
+  const isolation = { mode: iso.mode, storeDir: join(defaultConfigDir({ env: process.env, home: homedir() }), 'plugins', 'store').replaceAll('\\', '/') };
+  return { bashPath, claude, cases, isolation };
 }
 
 async function dryRun(opts) {
-  const { bashPath, claude, cases } = prepare(opts);
+  const { bashPath, claude, cases, isolation } = prepare(opts);
   const c = cases[0];
   const model = opts.model ?? c.promptModel ?? 'opus';
   const { env, diff } = buildEnv({ base: process.env, arm: opts.arm, baseline: opts.baseline, platform: process.platform, bashPath });
@@ -828,6 +916,7 @@ async function dryRun(opts) {
     const args = buildClaudeArgs({ pluginDir: '<temp copy of plugin/>', model, allowedTools: tools, permissionMode: opts.permissionMode });
     console.log(`case:      ${c.name} (arm ${opts.arm}, model ${model})`);
     console.log(`bash:      ${bashPath}`);
+    console.log(`isolation: ${isolation.mode}${isolation.mode === 'store-swap' ? ` (store folder ${isolation.storeDir})` : ' (private CLAUDE_CONFIG_DIR per run, token from the environment, not shown)'}`);
     console.log(`workspace: ${ws} (scaffolded; this is also the agent's cwd)`);
     console.log(`command:   ${[claude.cmd, ...args].map(quoteForDisplay).join(' ')}`);
     console.log(`stdin:     the prompt body of prompt.md (${c.prompt.length} characters)`);
@@ -872,7 +961,40 @@ async function main(argv) {
       await dryRun(opts);
       return 0;
     }
-    const { bashPath, claude, cases } = prepare(opts);
+    const { bashPath, claude, cases, isolation } = prepare(opts);
+    let aside = null;
+    const restore = () => {
+      if (!aside) return;
+      const a = aside;
+      aside = null;
+      const failed = restoreStore({ aside: a, storeDir: isolation.storeDir, fs: nodeFs });
+      if (failed.length) process.stderr.write(`ab-run: could not restore ${failed.map((f) => f.from).join(', ')}; the originals are in ${a.backupDir}
+`);
+    };
+    if (isolation.mode === 'store-swap') {
+      aside = moveStoreAside({ storeDir: isolation.storeDir, backupDir: `${isolation.storeDir}/.ab-run-backup-${process.pid}`, fs: nodeFs });
+      process.stderr.write(`ab-run: store-swap: ${aside.moved.length} learning store file(s) moved aside, restored at the end. Do not start the other arm at the same time.
+`);
+      process.on('exit', restore);
+      for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { restore(); process.exit(130); });
+    }
+    try {
+      return await runAll({ opts, bashPath, claude, cases, isolation });
+    } finally {
+      restore();
+    }
+  } catch (e) {
+    if (e instanceof UsageError) {
+      process.stderr.write(`ab-run: ${e.message}
+`);
+      return 2;
+    }
+    throw e;
+  }
+}
+
+async function runAll({ opts, bashPath, claude, cases, isolation }) {
+  {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const resultsDir = join(evalsDir, 'results', `${stamp}-ab-run`);
     mkdirSync(resultsDir, { recursive: true });
@@ -905,7 +1027,7 @@ async function main(argv) {
           break outer;
         }
         const model = opts.model ?? c.promptModel ?? 'opus';
-        const run = await runOnce({ c, n, opts, model, bashPath, claude, resultsDir, judgeEnv });
+        const run = await runOnce({ c, n, opts, model, bashPath, claude, resultsDir, judgeEnv, isolation });
         runs.push(run);
         spent += (run.costUsd ?? 0) + (run.judgeCostUsd ?? 0);
         entry.aggregates.score = mean(runs.map((r) => r.score));
@@ -921,12 +1043,6 @@ async function main(argv) {
     write();
     console.log(`result: ${outFile}${partial ? ' (partial: cost ceiling reached)' : ''}`);
     return 0;
-  } catch (e) {
-    if (e instanceof UsageError) {
-      process.stderr.write(`ab-run: ${e.message}\n`);
-      return 2;
-    }
-    throw e;
   }
 }
 
