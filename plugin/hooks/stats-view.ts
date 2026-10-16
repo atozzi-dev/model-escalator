@@ -3,7 +3,9 @@
 import { costPerAccepted, HALF_LIFE_MS, type Stats } from './learning'
 import { savings, type Ledger } from './savings'
 
-export type ViewCell = { text: string; bold?: boolean; dim?: boolean }
+// align: numbers are right-aligned. short: a narrower text used when the column has to give way. clip: 'middle'
+// cuts a name in its middle, keeping the end that tells similar names apart ("gen…:bugfix").
+export type ViewCell = { text: string; bold?: boolean; dim?: boolean; align?: 'right'; short?: string; clip?: 'middle' }
 export type ViewSection = { id: 'session' | 'plan' | 'categories' | 'learned'; title: string; rows: ViewCell[][] }
 export type StatsView = { sections: ViewSection[] }
 
@@ -27,7 +29,15 @@ const pct = (x: number, base: number): number => (base > 0 ? Math.round((x / bas
 
 const label = (text: string): ViewCell => ({ text, dim: true })
 const plain = (text: string): ViewCell => ({ text })
-const head = (...texts: string[]): ViewCell[] => texts.map((text) => ({ text, bold: true }))
+const name = (text: string): ViewCell => ({ text, clip: 'middle' })
+const right = (text: string, short?: string): ViewCell => ({ text, align: 'right', ...(short !== undefined ? { short } : {}) })
+// A table header: the first column names the rows (left), the others hold numbers (right).
+const head = (first: string, ...rest: (string | [string, string])[]): ViewCell[] => [
+  { text: first, bold: true, dim: true },
+  ...rest.map((t): ViewCell => (Array.isArray(t)
+    ? { text: t[0], short: t[1], bold: true, dim: true, align: 'right' }
+    : { text: t, bold: true, dim: true, align: 'right' })),
+]
 
 function sessionRows(i: StatsInput): ViewCell[][] {
   const l = i.ledger
@@ -56,9 +66,9 @@ function categoryRows(l: Ledger, top: number): ViewCell[][] {
     .map(([name, r]) => ({ name, actual: num(r.actual), high: num(r.baselineHigh), low: num(r.baselineLow), agents: num(r.agents), esc: num(r.escalated) }))
     .sort((a, b) => b.actual - a.actual || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
   if (rows.length === 0) return [[label('No category data yet.')]]
-  const out: ViewCell[][] = [head('Category', 'Cost', 'Saved', 'Esc')]
+  const out: ViewCell[][] = [head('Category', 'Cost', 'Saved', ['Escalated', 'Esc'])]
   for (const r of rows.slice(0, top)) {
-    out.push([plain(r.name), plain(usd(r.actual)), plain(`${pct(r.low - r.actual, r.low)}% to ${pct(r.high - r.actual, r.high)}%`), plain(`${r.esc}/${r.agents}`)])
+    out.push([name(r.name), right(usd(r.actual)), right(`${pct(r.low - r.actual, r.low)}% to ${pct(r.high - r.actual, r.high)}%`), right(`${r.esc}/${r.agents}`)])
   }
   if (rows.length > top) out.push([label(`+${rows.length - top} more`)])
   return out
@@ -86,13 +96,13 @@ function learnedRows(i: StatsInput, top: number): ViewCell[][] {
   }
   if (rows.length === 0) return [[label('No learned stats yet.')]]
   rows.sort((a, b) => b.runs - a.runs || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-  const out: ViewCell[][] = [head('Category', 'Runs', 'Not acc.', '$/accepted', 'Review', 'Rework')]
+  const out: ViewCell[][] = [head('Category', 'Runs', 'Not acc.', ['$/accepted', '$/acc.'], 'Review', 'Rework')]
   for (const r of rows.slice(0, top)) {
     out.push([
-      plain(r.name), plain(num1(r.runs)), plain(`${Math.round((r.na / r.runs) * 100)}%`),
-      plain(r.best ? `${usd(r.best.e)} ${r.best.tier}` : '-'),
-      plain(r.reviews > 0 ? `${num1(r.score / r.reviews)} (${num1(r.reviews)})` : '-'),
-      plain(num1(r.rework)),
+      name(r.name), right(num1(r.runs)), right(`${Math.round((r.na / r.runs) * 100)}%`),
+      r.best ? right(`${usd(r.best.e)} ${r.best.tier}`, usd(r.best.e)) : right('-'),
+      right(r.reviews > 0 ? `${num1(r.score / r.reviews)} (${num1(r.reviews)})` : '-'),
+      right(num1(r.rework)),
     ])
   }
   if (rows.length > top) out.push([label(`+${rows.length - top} more`)])
@@ -113,44 +123,97 @@ export function buildStatsView(i: StatsInput): StatsView {
 
 const GAP = 2
 const MIN_COL = 6
+const NAME_MIN = 10
+const HEAD_MIN = 4
 
 // Shortens `text` to `max` characters, ending with an ellipsis when it was cut.
 const clip = (text: string, max: number): string => (text.length <= max ? text : max <= 1 ? text.slice(0, Math.max(0, max)) : text.slice(0, max - 1) + '…')
 
-// The width of each column of a table: the longest text in it, over the rows that have more than one cell.
-export function columnWidths(rows: ViewCell[][]): number[] {
-  const table = rows.filter((r) => r.length > 1)
-  const cols = Math.max(0, ...table.map((r) => r.length))
-  return Array.from({ length: cols }, (_, c) => Math.max(0, ...table.map((r) => r[c]?.text.length ?? 0)))
+// Shortens a name in its middle: the part after the last ':' is kept whole when it leaves room for a start,
+// otherwise the last two thirds are kept.
+function clipMiddle(text: string, max: number): string {
+  if (text.length <= max) return text
+  if (max <= 4) return clip(text, max)
+  const colon = text.lastIndexOf(':')
+  const tail = colon > 0 && text.length - colon <= max - 2 ? text.length - colon : Math.floor(((max - 1) * 2) / 3)
+  return text.slice(0, max - 1 - tail) + '…' + text.slice(text.length - tail)
 }
 
-// Pads the cells of every multi-cell row of a section to the column widths and makes each row fit in `width`
-// characters (cells joined by two spaces). The widest column gives way first; single-cell rows are only clipped.
+// Breaks `text` into lines of at most `max` characters at spaces; continuation lines are indented by two
+// spaces. A word longer than a line is cut.
+function wrapText(text: string, max: number): string[] {
+  if (text.length <= max) return [text]
+  const lines: string[] = []
+  let line = ''
+  for (const word of text.split(' ')) {
+    const indent = lines.length > 0 ? '  ' : ''
+    const next = line ? `${line} ${word}` : indent + word
+    if (next.length <= max) { line = next; continue }
+    if (line) lines.push(line)
+    line = clip((lines.length > 0 ? '  ' : '') + word, max)
+  }
+  if (line) lines.push(line)
+  return lines
+}
+
+// The width of each column of a table: the longest text in it, over the rows that have more than one cell.
+// With `short`, the width when every cell that has a shorter text uses it.
+export function columnWidths(rows: ViewCell[][], short = false): number[] {
+  const table = rows.filter((r) => r.length > 1)
+  const cols = Math.max(0, ...table.map((r) => r.length))
+  const len = (c: ViewCell | undefined): number => (c === undefined ? 0 : short && c.short !== undefined ? c.short.length : c.text.length)
+  return Array.from({ length: cols }, (_, c) => Math.max(0, ...table.map((r) => len(r[c]))))
+}
+
+function fitCell(c: ViewCell, width: number): ViewCell {
+  const source = c.text.length > width && c.short !== undefined ? c.short : c.text
+  const text = c.clip === 'middle' ? clipMiddle(source, width) : clip(source, width)
+  return { ...c, text: c.align === 'right' ? text.padStart(width) : text.padEnd(width) }
+}
+
+// Pads the cells of every multi-cell row of a section to the column widths (numbers on the right) and makes
+// each row fit in `width` characters (cells joined by two spaces). Columns with a shorter form use it first,
+// then the widest column gives way. A single-cell row wraps onto more rows.
 export function fitView(view: StatsView, width: number): StatsView {
   const w = Number.isFinite(width) && width >= 1 ? Math.floor(width) : 80
   return {
     sections: view.sections.map((s) => {
-      const widths = columnWidths(s.rows)
+      let widths = columnWidths(s.rows)
       const cols = widths.length
       const room = w - GAP * Math.max(0, cols - 1)
-      // Shrink the widest column, one character at a time, until the table fits.
-      while (widths.reduce((a, b) => a + b, 0) > room) {
+      const sum = (ws: number[]): number => ws.reduce((a, b) => a + b, 0)
+      if (sum(widths) > room) widths = columnWidths(s.rows, true)
+      // Then names give way, down to NAME_MIN; then headers wider than their values; last the widest column,
+      // one character at a time, until the table fits.
+      const names = widths.map((_, k) => s.rows.some((r) => r.length > 1 && r[k]?.clip === 'middle'))
+      for (let k = 0; k < cols && sum(widths) > room; k++) {
+        if (names[k]) widths[k] = Math.max(Math.min(widths[k]!, NAME_MIN), widths[k]! - (sum(widths) - room))
+      }
+      const data = columnWidths(s.rows.filter((r) => !r.every((c) => c.bold)), true)
+      while (sum(widths) > room) {
+        let k = -1
+        for (let c = 0; c < cols; c++) if (widths[c]! > (data[c] ?? 0) && widths[c]! > HEAD_MIN && (k < 0 || widths[c]! > widths[k]!)) k = c
+        if (k < 0) break
+        widths[k]!--
+      }
+      while (sum(widths) > room) {
         let k = 0
         for (let c = 1; c < widths.length; c++) if (widths[c]! > widths[k]!) k = c
         if (widths[k]! <= MIN_COL) break
         widths[k]!--
       }
-      const rows = s.rows.map((r): ViewCell[] => {
-        if (r.length <= 1) return r.map((c) => ({ ...c, text: clip(c.text, w) }))
-        const cells = r.map((c, k) => ({ ...c, text: clip(c.text, widths[k] ?? MIN_COL).padEnd(widths[k] ?? 0) }))
+      const rows = s.rows.flatMap((r): ViewCell[][] => {
+        if (r.length === 0) return [r]
+        if (r.length === 1) return wrapText(r[0]!.text, w).map((text) => [{ ...r[0]!, text }])
+        const cells = r.map((c, k) => fitCell(c, widths[k] ?? MIN_COL))
         // Even at the minimum widths the row may be wider than the room: cut the last cells.
         let over = cells.reduce((n, c) => n + c.text.length, 0) + GAP * (cells.length - 1) - w
         for (let k = cells.length - 1; k >= 0 && over > 0; k--) {
           const cut = Math.min(over, cells[k]!.text.length)
-          cells[k] = { ...cells[k]!, text: clip(cells[k]!.text.trimEnd(), cells[k]!.text.length - cut) }
+          cells[k] = { ...cells[k]!, text: clip(cells[k]!.text.trim(), cells[k]!.text.length - cut) }
           over -= cut
         }
-        return cells
+        return [cells]
       })
       return { ...s, rows }
     }),

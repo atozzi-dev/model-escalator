@@ -37,12 +37,12 @@ function expectInside(l: Layout): void {
   }
 }
 
-test('an empty graph lays out the lead alone, centred at the top', () => {
+test('an empty graph lays out the lead alone, at the top left', () => {
   const l = layoutGraph(base())
   expect(l.nodes.map((n) => n.id)).toEqual(['lead'])
   const lead = at(l, 'lead')!
   expect(lead.kind).toBe('lead')
-  expect(Math.abs(lead.cx - l.width / 2)).toBeLessThan(0.001)
+  expect(lead.x).toBe(LAYOUT.margin)
   expect(lead.y).toBe(LAYOUT.margin)
   expect(l.edges).toEqual([])
   expectInside(l)
@@ -72,7 +72,43 @@ test('the first worker sits under the lead', () => {
   const l = layoutGraph(run(spawnAll(ids(1))))
   const w = at(l, 'w0')!
   const lead = at(l, 'lead')!
-  expect(Math.abs(w.cx - lead.cx)).toBeLessThan(LAYOUT.nodeW)
+  expect(w.y).toBeGreaterThan(lead.y + lead.h)
+  expect(w.x).toBeGreaterThan(lead.x)
+  expect(w.x).toBeLessThan(lead.x + lead.w)
+})
+
+test('the canvas fits a side pane: at most 480 wide, whatever the number of workers', () => {
+  for (const n of [0, 1, 4, 30, 40]) {
+    let g = run(spawnAll(ids(n)))
+    g = reduce(g, { type: 'consult', at: 99, agentId: 'w0', phase: 'start' })
+    const l = layoutGraph(g)
+    expect(l.width).toBeLessThanOrEqual(480)
+    expectInside(l)
+  }
+})
+
+test('workers stack in one column under the lead, one per row, in slot order', () => {
+  const l = layoutGraph(run(spawnAll(ids(6))))
+  const workers = l.nodes.filter((n) => n.kind === 'worker')
+  const lead = at(l, 'lead')!
+  for (const w of workers) expect(w.x).toBe(workers[0]!.x)
+  for (let i = 1; i < workers.length; i++) expect(workers[i]!.y).toBeGreaterThanOrEqual(workers[i - 1]!.y + workers[i - 1]!.h)
+  // indented under the lead, leaving a gutter for the tree's trunk, and wider than the lead for long names
+  expect(workers[0]!.x).toBeGreaterThan(lead.x + 16)
+  expect(workers[0]!.w).toBeGreaterThan(lead.w)
+})
+
+test('the "+N done" and "+N more" groups sit under the last row', () => {
+  let g = run(spawnAll(ids(34)))
+  g = run(ids(3).map((id) => done(id, 100)), g)
+  g = run(spawnAll(ids(3, 40)), g)
+  const l = layoutGraph(g)
+  const bottom = Math.max(...l.nodes.filter((n) => n.kind === 'worker').map((n) => n.y + n.h))
+  const groups = l.nodes.filter((n) => n.kind === 'group')
+  expect(groups.length).toBe(2)
+  for (const grp of groups) expect(grp.y).toBeGreaterThanOrEqual(bottom)
+  expectNoOverlap(l)
+  expectInside(l)
 })
 
 test('adding a worker does not move the existing ones', () => {
@@ -259,10 +295,43 @@ test('edge endpoints sit on the boxes they connect', () => {
   const s = l.edges.find((e) => e.kind === 'spawn' && e.to === 'w0')!
   const lead = at(l, 'lead')!
   const w0 = at(l, 'w0')!
-  expect(s.x1).toBe(lead.cx)
   expect(s.y1).toBe(lead.y + lead.h)
-  expect(s.x2).toBe(w0.cx)
-  expect(s.y2).toBe(w0.y)
+  expect(s.x2).toBe(w0.x)
+  expect(s.y2).toBe(w0.cy)
+})
+
+// Every routed edge is a polyline of horizontal and vertical segments from (x1, y1) to (x2, y2) that never runs
+// through the inside of a box.
+test('edges are routed around the boxes, in straight segments', () => {
+  let g = run(spawnAll(ids(8)))
+  g = run([
+    { type: 'message', at: 30, from: 'w2', to: 'w5' },
+    { type: 'message', at: 31, from: 'w6', to: 'lead' },
+    { type: 'message', at: 32, from: 'lead', to: 'w4' },
+    { type: 'notice', at: 33, agentId: 'w3' },
+    { type: 'consult', at: 34, agentId: 'w7', phase: 'start' },
+    { type: 'consult', at: 35, agentId: 'w1', phase: 'start' },
+  ], g)
+  const l = layoutGraph(g)
+  expect(l.edges.length).toBe(14)
+  const inside = (n: LayoutNode, x: number, y: number) => x > n.x + 0.5 && x < n.x + n.w - 0.5 && y > n.y + 0.5 && y < n.y + n.h - 0.5
+  for (const e of l.edges) {
+    const pts = e.points
+    expect(pts.length).toBeGreaterThanOrEqual(2)
+    expect(pts[0]).toEqual([e.x1, e.y1])
+    expect(pts[pts.length - 1]).toEqual([e.x2, e.y2])
+    for (let i = 1; i < pts.length; i++) {
+      const [ax, ay] = pts[i - 1]!
+      const [bx, by] = pts[i]!
+      expect(ax === bx || ay === by).toBe(true)
+      // sample the segment and check no point falls inside any box
+      for (let k = 0; k <= 20; k++) {
+        const x = ax + ((bx - ax) * k) / 20
+        const y = ay + ((by - ay) * k) / 20
+        for (const n of l.nodes) if (inside(n, x, y)) throw new Error(`${e.id} runs through ${n.id}`)
+      }
+    }
+  }
 })
 
 test('the same input gives the same output', () => {

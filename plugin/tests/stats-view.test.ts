@@ -62,7 +62,7 @@ test('the plan section appears with the plan lines when there is a plan block', 
 
 test('categories are sorted by real cost with savings and escalations, and limited to the top rows', () => {
   const rows = texts(buildStatsView(input()), 'categories')
-  expect(rows[0]).toEqual(['Category', 'Cost', 'Saved', 'Esc'])
+  expect(rows[0]).toEqual(['Category', 'Cost', 'Saved', 'Escalated'])
   expect(rows[1]).toEqual(['general-purpose:bugfix', '$1.00', '50% to 67%', '1/2'])
   expect(rows[2]).toEqual(['general-purpose:docs', '$0.50', '0% to 50%', '0/1'])
   const many = ledger()
@@ -104,4 +104,55 @@ test('fitView keeps every row within the width and truncates with an ellipsis', 
   expect(new Set(first).size).toBe(1)
   // A narrow width shortens text rather than overflowing.
   expect(fitView(v, 30).sections.flatMap((s) => s.rows.flat()).some((c) => c.text.endsWith('…'))).toBe(true)
+})
+
+test('numbers are right-aligned in the tables, names and labels left-aligned', () => {
+  const v = buildStatsView(input({ now: 0 }))
+  for (const id of ['categories', 'learned']) {
+    for (const r of section(v, id)!.rows.filter((r) => r.length > 1)) {
+      expect(r[0]!.align).toBeUndefined()
+      for (const c of r.slice(1)) expect(c.align).toBe('right')
+    }
+  }
+  for (const r of section(v, 'session')!.rows) for (const c of r) expect(c.align).toBeUndefined()
+})
+
+test('table headers are set apart from the rows', () => {
+  const v = buildStatsView(input({ now: 0 }))
+  for (const id of ['categories', 'learned']) {
+    const [header, first] = section(v, id)!.rows
+    for (const c of header!) expect([c.bold, c.dim]).toEqual([true, true])
+    for (const c of first!) expect(c.bold).toBeUndefined()
+  }
+})
+
+test('fitView pads right-aligned cells on the left, so the digits line up', () => {
+  const fit = fitView(buildStatsView(input({ now: 0 })), 100)
+  const esc = section(fit, 'categories')!.rows.map((r) => r[3]!.text)
+  expect(new Set(esc.map((t) => t.length)).size).toBe(1)
+  expect(esc[0]).toBe('Escalated')
+  expect(esc[1]).toBe('      1/2')
+  expect(esc[2]).toBe('      0/1')
+})
+
+test('fitView wraps a long single-cell row onto more rows instead of cutting it', () => {
+  const plan = 'Plan usage (as Claude Code reports it):\n  seven_day: 7% used\nEstimate: the ladder saved about 50% to 63% of this session\'s usage (API-price estimate, not a reading of the plan limits).'
+  const fit = fitView(buildStatsView(input({ plan })), 40)
+  const rows = section(fit, 'plan')!.rows
+  expect(rows.length).toBeGreaterThan(3)
+  for (const r of rows) {
+    expect(r.length).toBe(1)
+    expect(r[0]!.text.length).toBeLessThanOrEqual(40)
+    expect(r[0]!.text.endsWith('…')).toBe(false)
+  }
+  const words = rows.map((r) => r[0]!.text.trim()).join(' ')
+  expect(words).toContain('not a reading of the plan limits).')
+})
+
+test('fitView cuts a category name in the middle, keeping the part that tells categories apart', () => {
+  const fit = fitView(buildStatsView(input({ now: 0 })), 50)
+  const names = section(fit, 'learned')!.rows.slice(1).map((r) => r[0]!.text.trim())
+  expect(names.some((n) => n.includes('…'))).toBe(true)
+  expect(names.some((n) => n.endsWith(':bugfix'))).toBe(true)
+  expect(names.some((n) => n.endsWith(':docs'))).toBe(true)
 })

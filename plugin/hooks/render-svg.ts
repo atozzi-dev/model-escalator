@@ -16,6 +16,12 @@
 // opts.recentMs keep flowing too. Pure CSS keyframes; prefers-reduced-motion stops all of them and keeps the
 // static highlight (halo, dashed edge, thicker border).
 //
+// Fit. The drawing is as wide as the layout (a side pane's width) and declares max-width:100% with height:auto,
+// so a narrower pane scales it down with its proportions instead of scrolling. Worker cards are full-width rows
+// with room for a typical name; a name cut on a card ends with an ellipsis and the node's tooltip always carries
+// it whole (every detail level but 'bare'). Activity words that say nothing ("thinks", "starts", "idle") are
+// left out of the card. The legend is a short footer under the drawing.
+//
 // Size. The `Svg` element takes at most SVG_MAX characters. Past opts.budget (SVG_BUDGET by default) the
 // renderer degrades step by step: one-line tooltips, then no animations, then no tooltips, then the lead
 // alone with a note. The layout bounds the drawing (30 workers, the lead, the senior, two groups), so with 50
@@ -82,7 +88,8 @@ const f = (v: unknown): string => {
   const r = Math.round(finite(v) * 10) / 10
   return Object.is(r, -0) ? '0' : String(r)
 }
-const trimZeros = (s: string): string => s.replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '')
+// Cents always show (0.2 -> 0.20); a third decimal only when it carries something (0.012, but 0.07).
+const trimZeros = (s: string): string => s.replace(/(\.\d\d)0$/, '$1')
 
 function money(v: unknown): string {
   const c = finite(v)
@@ -152,6 +159,7 @@ type EdgeView = {
   y1: number
   x2: number
   y2: number
+  points: [number, number][]
   count: number
   flow: 'on' | 'once' | 'off'
 }
@@ -168,10 +176,24 @@ type Model = {
 
 type Ev = { seq: number; kind: string; nodes: string[]; fromTier?: Tier; toTier?: Tier }
 
-const DEFAULT_W = 2 * LAYOUT.margin + LAYOUT.columns * LAYOUT.nodeW + (LAYOUT.columns - 1) * LAYOUT.gapX
+const DEFAULT_W = LAYOUT.width
+const MAX_POINTS = 8
 
 function defaultLead(): Record<string, unknown> {
-  return { id: LEAD_ID, kind: 'lead', x: (DEFAULT_W - LAYOUT.nodeW) / 2, y: LAYOUT.margin, w: LAYOUT.nodeW, h: LAYOUT.nodeH }
+  return { id: LEAD_ID, kind: 'lead', x: LAYOUT.margin, y: LAYOUT.margin, w: LAYOUT.topW, h: LAYOUT.nodeH }
+}
+
+// The route of a layout edge: its points when they are a short list of finite pairs, else the two ends.
+function routeOf(e: Record<string, unknown>): [number, number][] {
+  const ends: [number, number][] = [[finite(e.x1), finite(e.y1)], [finite(e.x2), finite(e.y2)]]
+  const raw = list(e.points)
+  if (raw.length < 2 || raw.length > MAX_POINTS) return ends
+  const pts: [number, number][] = []
+  for (const p of raw) {
+    if (!Array.isArray(p) || p.length !== 2 || !p.every((v) => typeof v === 'number' && Number.isFinite(v))) return ends
+    pts.push([p[0] as number, p[1] as number])
+  }
+  return pts
 }
 
 function buildModel(graph: unknown, layout: unknown, opts: RenderOptions): Model {
@@ -277,7 +299,7 @@ function buildModel(graph: unknown, layout: unknown, opts: RenderOptions): Model
     const inProgress = kind === 'consult' && from.status === 'waiting' && to.kind === 'senior' && to.status === 'active'
     const recent = freshPairs.has(`${kind}|${e.from}|${e.to}`) || (now !== undefined && now - finite(e.at) <= recentMs)
     edges.push({
-      kind, from: e.from, to: e.to, x1: finite(e.x1), y1: finite(e.y1), x2: finite(e.x2), y2: finite(e.y2),
+      kind, from: e.from, to: e.to, x1: finite(e.x1), y1: finite(e.y1), x2: finite(e.x2), y2: finite(e.y2), points: routeOf(e),
       count: Math.max(1, Math.floor(finite(e.count, 1))), flow: inProgress ? 'on' : recent ? 'once' : 'off',
     })
   }
@@ -291,12 +313,14 @@ function buildModel(graph: unknown, layout: unknown, opts: RenderOptions): Model
 
 // ----------------------------------------------------------------------------------------------------- css
 
+// Text colours meet WCAG AA on their background in both themes (badges: white or near-black on the tier colour);
+// lines and borders keep at least 3:1 against the background.
 const LIGHT = {
-  bg: '#f8fafc', card: '#ffffff', fg: '#0f172a', muted: '#475569', line: '#94a3b8', group: '#e2e8f0', on: '#ffffff',
-  haiku: '#0d9488', sonnet: '#2563eb', opus: '#7c3aed', lead: '#c2410c', senior: '#db2777', stuck: '#dc2626', paused: '#b45309',
+  bg: '#f8fafc', card: '#ffffff', fg: '#0f172a', muted: '#475569', line: '#64748b', rule: '#cbd5e1', group: '#eef2f6', on: '#ffffff',
+  haiku: '#0f766e', sonnet: '#2563eb', opus: '#7c3aed', lead: '#c2410c', senior: '#be185d', stuck: '#dc2626', paused: '#b45309',
 }
 const DARK: typeof LIGHT = {
-  bg: '#0b1120', card: '#111827', fg: '#e5e7eb', muted: '#9ca3af', line: '#64748b', group: '#1e293b', on: '#0b1120',
+  bg: '#0b1120', card: '#151e2e', fg: '#e5e7eb', muted: '#a3acb9', line: '#7b8798', rule: '#334155', group: '#1a2435', on: '#0b1120',
   haiku: '#2dd4bf', sonnet: '#60a5fa', opus: '#a78bfa', lead: '#fb923c', senior: '#f472b6', stuck: '#f87171', paused: '#fbbf24',
 }
 const vars = (p: typeof LIGHT): string => Object.entries(p).map(([k, v]) => `--${k}:${v}`).join(';')
@@ -307,16 +331,18 @@ const STATIC_CSS = [
   '.k-lead{--c:var(--lead)}.k-senior{--c:var(--senior)}.t-haiku{--c:var(--haiku)}.t-sonnet{--c:var(--sonnet)}.t-opus{--c:var(--opus)}',
   '.f-haiku{fill:var(--haiku)}.f-sonnet{fill:var(--sonnet)}.f-opus{fill:var(--opus)}.f-lead{fill:var(--lead)}.f-senior{fill:var(--senior)}',
   '.card{fill:var(--card);stroke:var(--c);stroke-width:1.5}.bar{fill:var(--c)}',
-  '.lbl{font-size:12px;font-weight:600}.act{font-size:11px;fill:var(--muted)}.stt,.cost,.lvt{font-size:10px}.stt{fill:var(--muted)}',
-  '.mid{text-anchor:middle}.end{text-anchor:end}.tbt{font-size:9px;font-weight:700;fill:var(--on)}.lv{fill:none;stroke:var(--muted)}',
+  '.lbl{font-size:13.5px;font-weight:600}.stt{font-size:12px;fill:var(--muted)}.sw{font-weight:600}',
+  '.cost{font-size:12px;font-variant-numeric:tabular-nums}.lvt{font-size:11px;fill:var(--muted)}',
+  '.mid{text-anchor:middle}.end{text-anchor:end}.tbt{font-size:10.5px;font-weight:700;fill:var(--on)}.lv{fill:none;stroke:var(--line)}',
   '.sd{fill:var(--muted)}.st-active .sd{fill:var(--c)}.st-stuck .sd{fill:var(--stuck)}.st-paused .sd{fill:var(--paused)}',
-  '.st-done{opacity:.55}.st-waiting .card,.group .card{stroke-dasharray:4 3}.group .card{fill:var(--group);stroke:var(--line)}',
-  '.glbl{font-size:12px;fill:var(--muted)}.a-flash .card{stroke-width:3}',
-  '.mkc-stall,.mkc-human{fill:var(--stuck)}.mkc-pause{fill:var(--paused)}.mkt{font-size:9px;font-weight:700;fill:var(--on)}',
-  '.edge{fill:none}.e-spawn{stroke:var(--line)}.e-message{stroke:var(--muted);stroke-dasharray:5 4}',
+  '.st-stuck .sw{fill:var(--stuck)}.st-paused .sw{fill:var(--paused)}',
+  '.st-done{opacity:.6}.st-waiting .card,.group .card{stroke-dasharray:4 3}.group .card{fill:var(--group);stroke:var(--line)}',
+  '.glbl{font-size:12.5px;font-weight:600;fill:var(--muted)}.a-flash .card{stroke-width:3}',
+  '.mkc-stall,.mkc-human{fill:var(--stuck)}.mkc-pause{fill:var(--paused)}.mkt{font-size:10px;font-weight:700;fill:var(--on)}',
+  '.edge{fill:none;stroke-linecap:round;stroke-linejoin:round}.e-spawn{stroke:var(--line)}.e-message{stroke:var(--muted);stroke-dasharray:5 4}',
   '.e-consult{stroke:var(--senior);stroke-dasharray:5 4}.e-notice{stroke:var(--lead);stroke-dasharray:2 3}.flow,.flow1{stroke-dasharray:6 4}',
   '.ah-spawn{fill:var(--line)}.ah-message{fill:var(--muted)}.ah-consult{fill:var(--senior)}.ah-notice{fill:var(--lead)}',
-  '.legend text,.note{font-size:10px;fill:var(--muted)}.legend .mkt{font-size:8px;fill:var(--on)}.le{stroke-width:2}',
+  '.legend text,.note{font-size:11px;fill:var(--muted)}.legend .mkt{font-size:10px;fill:var(--on)}.le{stroke-width:2}.rule{stroke:var(--rule)}',
 ].join('')
 
 const MOTION_CSS = [
@@ -343,55 +369,115 @@ function css(theme: Theme, motion: boolean): string {
 const DEFS = '<defs>' + EDGE_KINDS.map((k) =>
   `<marker id="ah-${k}" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" markerUnits="userSpaceOnUse" orient="auto"><path class="ah-${k}" d="M0 0L8 4L0 8z"/></marker>`).join('') + '</defs>'
 
-function legend(): string {
-  const roles: [string, string][] = [['f-haiku', 'haiku'], ['f-sonnet', 'sonnet'], ['f-opus', 'opus'], ['f-lead', 'lead'], ['f-senior', 'senior']]
-  const marks: [string, string, string][] = [['mkc-stall', '!', 'stalled'], ['mkc-human', '?', 'needs a human'], ['mkc-pause', 'II', 'paused']]
-  let s = `<g class="legend" transform="translate(${LAYOUT.margin} ${LAYOUT.margin + 8})">`
-  roles.forEach(([cls, word], i) => {
-    s += `<rect class="${cls}" x="${i * 84}" y="-8" width="10" height="10" rx="2"/><text x="${i * 84 + 14}" y="1">${word}</text>`
+// Average advance of a character, in px, for the sizes used on the cards: enough to decide where to cut a text.
+const CHAR_LABEL = 7.6
+const CHAR_SMALL = 6.6
+
+// The footer: three short lines (colours, edges, markers); an item that would not fit goes to the next line.
+const LEGEND_LINE = 18
+const LEGEND_TOP = 26      // from the bottom of the drawing to the first line's baseline
+const LEGEND_LINES = 3
+
+function legend(width: number, y: number): string {
+  type Item = { w: number; draw: (x: number, y: number) => string }
+  const word = (s: string): number => s.length * CHAR_SMALL
+  const swatch = (cls: string, text: string): Item => ({
+    w: 14 + word(text), draw: (x, y) => `<rect class="${cls}" x="${x}" y="${y - 9}" width="10" height="10" rx="2"/><text x="${x + 14}" y="${y}">${text}</text>`,
   })
-  EDGE_KINDS.forEach((k, i) => {
-    s += `<path class="le e-${k}" d="M${i * 84} 16h18"/><text x="${i * 84 + 22}" y="19">${k}</text>`
+  const edge = (k: EdgeKind): Item => ({
+    w: 22 + word(k), draw: (x, y) => `<path class="le e-${k}" d="M${x} ${y - 4}h18"/><text x="${x + 22}" y="${y}">${k}</text>`,
   })
-  marks.forEach(([cls, glyph, word], i) => {
-    s += `<circle class="${cls}" cx="${i * 100 + 5}" cy="34" r="6"/><text class="mkt mid" x="${i * 100 + 5}" y="37">${glyph}</text><text x="${i * 100 + 15}" y="37">${word}</text>`
+  const mark = (cls: string, glyph: string, text: string): Item => ({
+    w: 16 + word(text), draw: (x, y) => `<circle class="${cls}" cx="${x + 6}" cy="${y - 4}" r="6.5"/><text class="mkt mid" x="${x + 6}" y="${y - 0.5}">${glyph}</text><text x="${x + 16}" y="${y}">${text}</text>`,
   })
-  s += `<rect class="lv" x="300" y="27" width="20" height="12" rx="3"/><text class="mid" x="310" y="36.5">L2</text><text x="324" y="37">ladder level</text>`
+  const level: Item = {
+    w: 28 + word('ladder level'), draw: (x, y) => `<rect class="lv" x="${x}" y="${y - 12}" width="24" height="15" rx="3"/><text class="mid" x="${x + 12}" y="${y}">L2</text><text x="${x + 28}" y="${y}">ladder level</text>`,
+  }
+  const lines: Item[][] = [
+    [swatch('f-haiku', 'haiku'), swatch('f-sonnet', 'sonnet'), swatch('f-opus', 'opus'), swatch('f-lead', 'lead'), swatch('f-senior', 'senior')],
+    EDGE_KINDS.map(edge),
+    [mark('mkc-stall', '!', 'stalled'), mark('mkc-human', '?', 'needs a human'), mark('mkc-pause', 'II', 'paused'), level],
+  ]
+  const room = width - 2 * LAYOUT.margin
+  let s = `<line class="rule" x1="${LAYOUT.margin}" y1="${f(y - LEGEND_TOP + 10)}" x2="${f(width - LAYOUT.margin)}" y2="${f(y - LEGEND_TOP + 10)}"/>`
+  s += `<g class="legend" transform="translate(${LAYOUT.margin} ${f(y)})">`
+  let row = 0
+  for (const items of lines) {
+    let x = 0
+    for (const it of items) {
+      if (x > 0 && x + it.w > room) { row++; x = 0 }
+      s += it.draw(Math.round(x), row * LEGEND_LINE)
+      x += it.w + 14
+    }
+    row++
+  }
   return s + '</g>'
 }
 
+// A rounded polyline through the route's points; a two-point route that is not straight becomes a curve.
 function edgePath(e: EdgeView): string {
-  const { x1, y1, x2, y2 } = e
-  if (Math.abs(y2 - y1) >= 20) {
-    const my = (y1 + y2) / 2
-    return `M${f(x1)} ${f(y1)}C${f(x1)} ${f(my)} ${f(x2)} ${f(my)} ${f(x2)} ${f(y2)}`
+  const p = e.points
+  const [x1, y1] = p[0]!
+  const [x2, y2] = p[p.length - 1]!
+  if (p.length === 2 && x1 !== x2 && y1 !== y2) {
+    if (Math.abs(y2 - y1) >= 20) {
+      const my = (y1 + y2) / 2
+      return `M${f(x1)} ${f(y1)}C${f(x1)} ${f(my)} ${f(x2)} ${f(my)} ${f(x2)} ${f(y2)}`
+    }
+    const mx = (x1 + x2) / 2
+    return `M${f(x1)} ${f(y1)}C${f(mx)} ${f(y1)} ${f(mx)} ${f(y2)} ${f(x2)} ${f(y2)}`
   }
-  const mx = (x1 + x2) / 2
-  return `M${f(x1)} ${f(y1)}C${f(mx)} ${f(y1)} ${f(mx)} ${f(y2)} ${f(x2)} ${f(y2)}`
+  let d = `M${f(x1)} ${f(y1)}`
+  for (let i = 1; i < p.length - 1; i++) {
+    const [ax, ay] = p[i - 1]!
+    const [cx, cy] = p[i]!
+    const [bx, by] = p[i + 1]!
+    const lin = Math.hypot(cx - ax, cy - ay)
+    const lout = Math.hypot(bx - cx, by - cy)
+    const r = Math.min(6, lin / 2, lout / 2)
+    if (!(r > 0)) { d += `L${f(cx)} ${f(cy)}`; continue }
+    const sx = cx - ((cx - ax) / lin) * r
+    const sy = cy - ((cy - ay) / lin) * r
+    const ex = cx + ((bx - cx) / lout) * r
+    const ey = cy + ((by - cy) / lout) * r
+    d += `L${f(sx)} ${f(sy)}Q${f(cx)} ${f(cy)} ${f(ex)} ${f(ey)}`
+  }
+  return d + `L${f(x2)} ${f(y2)}`
 }
 
 function drawEdge(e: EdgeView, labels: Map<string, string>, detail: Detail, motion: boolean): string {
   const flow = e.flow === 'on' ? ' flow' : e.flow === 'once' && motion ? ' flow1' : ''
-  const width = f(1.5 + Math.min(2.5, Math.log2(e.count)))
+  const width = f(1.5 + Math.min(1.5, Math.log2(e.count) * 0.75))
   const times = e.count > 1 ? ` ×${e.count}` : ''
-  const title = detail === 'full' ? `${e.kind}: ${t(labels.get(e.from), 24)} → ${t(labels.get(e.to), 24)}${times}`
+  const title = detail === 'full' ? `${e.kind}: ${t(labels.get(e.from), 40)} → ${t(labels.get(e.to), 40)}${times}`
     : detail === 'bare' ? '' : `${e.kind}${times}`
   const body = title ? `><title>${title}</title></path>` : '/>'
   return `<path class="edge e-${e.kind}${flow}" d="${edgePath(e)}" stroke-width="${width}" marker-end="url(#ah-${e.kind})"${body}`
 }
+
+// The word for a status on the card and in the tooltip (the terminal tree says the same).
+function statusWord(n: NodeView): string {
+  if (n.status === 'active') return 'working'
+  if (n.status === 'waiting' && n.kind === 'senior') return 'idle'
+  return n.status
+}
+
+// Activity words that only restate the status are not worth a place on the card.
+const GENERIC_ACTIONS = new Set(['', 'thinks', 'starts', 'idle', 'waits', 'done'])
+const shownAction = (n: NodeView): string => (GENERIC_ACTIONS.has(cleanText(n.action).trim()) ? '' : n.action)
 
 function tooltip(n: NodeView, detail: Detail, labels: Map<string, string>): string {
   if (detail === 'bare' || detail === 'lead') return ''
   if (n.kind === 'group') {
     const head = `+${n.count ?? 0} ${n.group ?? 'done'}`
     if (detail !== 'full' || !n.members?.length) return `<title>${head}</title>`
-    return `<title>${head}: ${t(n.members.map((m) => clip(labels.get(m) ?? m, 24)).join(', '), 400)}</title>`
+    return `<title>${head}: ${t(n.members.map((m) => clip(labels.get(m) ?? m, 40)).join(', '), 600)}</title>`
   }
-  if (detail !== 'full') return `<title>${t(n.label, 24)} (${n.tier}, ${n.status})</title>`
+  if (detail !== 'full') return `<title>${t(n.label, 40)} (${n.tier}, ${statusWord(n)})</title>`
   const lines = [
     `${t(n.label, 40)} (${n.kind})`,
     `model ${t(n.model || n.tier, 100)}`,
-    `status ${n.status}: ${t(n.action, 60)}`,
+    `status ${statusWord(n)}: ${t(n.action, 60)}`,
     `level L${n.level} · score ${f(n.score)} · cost ${escapeXml(money(n.cost))}`,
     `interventions ${n.interventions} · consults ${n.consults}`,
   ]
@@ -399,13 +485,17 @@ function tooltip(n: NodeView, detail: Detail, labels: Map<string, string>): stri
   return `<title>${lines.join('\n')}</title>`
 }
 
+// Card layout (w x h, origin at the card's top left):
+//   line 1: name ................................ [tier]
+//   line 2: (dot) action, or status · action .. [L2]  $0.096
+// The level badge is drawn on workers only; the lead and the senior have no ladder.
 function drawNode(n: NodeView, detail: Detail, motion: boolean, labels: Map<string, string>): string {
   const { w, h } = n
   const open = (cls: string) => `<g id="${domId(n.id)}" class="${cls}" transform="translate(${f(n.x)} ${f(n.y)})">`
   if (n.kind === 'group') {
     return open('node group') + tooltip(n, detail, labels) +
       `<rect class="card" width="${f(w)}" height="${f(h)}" rx="8"/>` +
-      `<text class="glbl mid" x="${f(w / 2)}" y="${f(h / 2 + 4)}">+${n.count ?? 0} ${n.group ?? 'done'}</text></g>`
+      `<text class="glbl mid" x="${f(w / 2)}" y="${f(h / 2 + 4.5)}">+${n.count ?? 0} ${n.group ?? 'done'}</text></g>`
   }
   const tone = n.kind === 'worker' ? `t-${n.tier}` : `k-${n.kind}`
   const anim = motion
@@ -413,21 +503,35 @@ function drawNode(n: NodeView, detail: Detail, motion: boolean, labels: Map<stri
     : (n.flash ? ' a-flash' : '')
   let s = open(`node ${n.kind} ${tone} st-${n.status}${anim}`) + tooltip(n, detail, labels)
   if (motion && n.status === 'active') s += `<rect class="halo" x="-4" y="-4" width="${f(w + 8)}" height="${f(h + 8)}" rx="12"/>`
-  if (motion && n.ping) s += `<rect class="ring" x="-7" y="-7" width="${f(w + 14)}" height="${f(h + 14)}" rx="14"/>`
+  if (motion && n.ping) s += `<rect class="ring" x="-6" y="-6" width="${f(w + 12)}" height="${f(h + 12)}" rx="13"/>`
   s += `<rect class="card" width="${f(w)}" height="${f(h)}" rx="8"/><rect class="bar" x="1.5" y="8" width="3" height="${f(h - 16)}" rx="1.5"/>`
   if (motion && n.flash) s += `<rect class="fl" width="${f(w)}" height="${f(h)}" rx="8"/>`
   if (motion && n.swapFrom) {
     s += `<g class="swapfrom t-${n.swapFrom}"><rect class="ol" width="${f(w)}" height="${f(h)}" rx="8"/><rect class="bar" x="1.5" y="8" width="3" height="${f(h - 16)}" rx="1.5"/></g>`
   }
-  s += `<text class="lbl" x="12" y="18">${t(n.label, 15)}</text>`
-  s += `<rect class="f-${n.tier}" x="${f(w - 50)}" y="7" width="44" height="15" rx="7.5"/><text class="tbt mid" x="${f(w - 28)}" y="17.5">${n.tier}</text>`
-  s += `<text class="act" x="12" y="36">${t(n.action, 26)}</text>`
-  s += `<circle class="sd" cx="15" cy="${f(h - 11)}" r="3"/><text class="stt" x="22" y="${f(h - 8)}">${n.status}</text>`
-  s += `<rect class="lv" x="${f(w - 84)}" y="${f(h - 18)}" width="22" height="13" rx="3"/><text class="lvt mid" x="${f(w - 73)}" y="${f(h - 8)}">L${n.level}</text>`
-  s += `<text class="cost end" x="${f(w - 8)}" y="${f(h - 8)}">${escapeXml(money(n.cost))}</text>`
+  const pill = 50
+  const nameRoom = w - 14 - pill - 14
+  s += `<text class="lbl" x="14" y="21">${t(n.label, Math.max(4, Math.floor(nameRoom / CHAR_LABEL)))}</text>`
+  s += `<rect class="f-${n.tier}" x="${f(w - pill - 8)}" y="8" width="${pill}" height="17" rx="8.5"/><text class="tbt mid" x="${f(w - pill / 2 - 8)}" y="20.5">${n.tier}</text>`
+  const ladder = n.kind === 'worker'
+  const right = ladder ? 96 : 58
+  // A working agent shows what it does (the dot says it works); any other status leads with its word.
+  const action = shownAction(n)
+  const chars = Math.floor((w - 25 - right) / CHAR_SMALL)
+  let line: string
+  if (n.status === 'active' && action) {
+    line = `<tspan class="act">${t(action, chars)}</tspan>`
+  } else {
+    const word = statusWord(n)
+    const room = chars - word.length - 3
+    line = `<tspan class="sw">${word}</tspan>` + (action && room >= 4 ? `<tspan class="sep"> · </tspan><tspan class="act">${t(action, room)}</tspan>` : '')
+  }
+  s += `<circle class="sd" cx="17" cy="${f(h - 15)}" r="3.5"/><text class="stt" x="25" y="${f(h - 11)}">${line}</text>`
+  if (ladder) s += `<rect class="lv" x="${f(w - 90)}" y="${f(h - 24)}" width="24" height="16" rx="3"/><text class="lvt mid" x="${f(w - 78)}" y="${f(h - 11.5)}">L${n.level}</text>`
+  s += `<text class="cost end" x="${f(w - 10)}" y="${f(h - 11)}">${escapeXml(money(n.cost))}</text>`
   if (n.mark) {
     const glyph = n.mark === 'stall' ? '!' : n.mark === 'human' ? '?' : 'II'
-    s += `<g class="mk mk-${n.mark}${motion && n.markNew ? ' a-pop' : ''}"><circle class="mkc-${n.mark}" r="8"/><text class="mkt mid" y="3">${glyph}</text></g>`
+    s += `<g class="mk mk-${n.mark}${motion && n.markNew ? ' a-pop' : ''}"><circle class="mkc-${n.mark}" r="8"/><text class="mkt mid" y="3.5">${glyph}</text></g>`
   }
   return s + '</g>'
 }
@@ -435,21 +539,20 @@ function drawNode(n: NodeView, detail: Detail, motion: boolean, labels: Map<stri
 function draw(m: Model, detail: Detail): string {
   const motion = detail === 'full' || detail === 'short'
   const nodes = detail === 'lead' ? m.nodes.filter((n) => n.id === LEAD_ID) : m.nodes
-  const height = detail === 'lead' ? Math.max(...nodes.map((n) => n.y + n.h), 60) + 2 * LAYOUT.margin : m.height
+  const bottom = Math.max(...nodes.map((n) => n.y + n.h), LAYOUT.margin + LAYOUT.nodeH)
+  const legendY = bottom + LEGEND_TOP
+  const height = detail === 'lead' ? bottom + 2 * LAYOUT.margin + 8
+    : Math.max(m.height, legendY + (LEGEND_LINES - 1) * LEGEND_LINE + 6 + LAYOUT.margin)
   const labels = new Map(m.nodes.map((n) => [n.id, n.label]))
   const senior = m.nodes.some((n) => n.id === SENIOR_ID) ? ', a senior' : ''
   const summary = `Agent network: ${m.workers} worker${m.workers === 1 ? '' : 's'}${senior}`
-  let s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${m.width} ${height}" width="${m.width}" height="${height}" role="img" aria-label="${summary}" data-detail="${detail}">`
+  let s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${m.width} ${height}" width="${m.width}" height="${height}" style="max-width:100%;height:auto" role="img" aria-label="${summary}" data-detail="${detail}">`
   s += `<title>${summary}</title><style>${css(m.theme, motion)}</style>${DEFS}`
   s += `<rect class="bg" width="${m.width}" height="${height}"/>`
-  if (detail !== 'lead') s += legend()
   if (detail !== 'lead') s += '<g class="edges">' + m.edges.map((e) => drawEdge(e, labels, detail, motion)).join('') + '</g>'
   s += '<g class="nodes">' + nodes.map((n) => drawNode(n, detail, motion, labels)).join('') + '</g>'
-  if (detail === 'lead') {
-    const lead = nodes[0]
-    const y = lead ? lead.y + lead.h + 16 : 100
-    s += `<text class="note" x="${LAYOUT.margin}" y="${f(y)}">${m.workers} agents: too many details to draw here</text>`
-  }
+  if (detail !== 'lead') s += legend(m.width, legendY)
+  if (detail === 'lead') s += `<text class="note" x="${LAYOUT.margin}" y="${f(bottom + 20)}">${m.workers} agents: too many details to draw here</text>`
   return s + '</svg>'
 }
 

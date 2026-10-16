@@ -72,9 +72,99 @@ test('the svg declares its namespace, viewBox and size', () => {
   const l = layoutGraph(g)
   const svg = renderSvg(g, l)
   expect(svg).toContain('xmlns="http://www.w3.org/2000/svg"')
-  expect(svg).toContain(`viewBox="0 0 ${l.width} ${l.height}"`)
+  const box = svg.match(/viewBox="0 0 (\d+) (\d+)"/)
+  expect(Number(box?.[1])).toBe(l.width)
+  expect(Number(box?.[2])).toBeGreaterThanOrEqual(l.height)
   expect(svg).toContain(`width="${l.width}"`)
+  expect(svg).toContain(`height="${box?.[2]}"`)
   expectWellFormed(svg)
+})
+
+// The pane is a side panel, often 400 to 800 px wide: the drawing must not need a horizontal scroll and must
+// shrink, keeping its proportions, when the pane is narrower than the drawing.
+test('the drawing fits a side pane and scales down instead of scrolling', () => {
+  for (const n of [0, 4, 30]) {
+    const g = run(Array.from({ length: n }, (_, i) => spawn('w' + i, i + 1)))
+    const svg = draw(g)
+    expect(Number(svg.match(/<svg [^>]*\swidth="(\d+)"/)?.[1])).toBeLessThanOrEqual(480)
+    const root = svg.slice(0, svg.indexOf('>'))
+    expect(root).toContain('max-width:100%')
+    expect(root).toContain('height:auto')
+  }
+})
+
+test('the legend is a compact footer under the drawing', () => {
+  const g = sample()
+  const l = layoutGraph(g)
+  const svg = renderSvg(g, l)
+  const y = Number(svg.match(/<g class="legend" transform="translate\([\d.]+ ([\d.]+)\)"/)?.[1])
+  const bottom = Math.max(...l.nodes.map((n) => n.y + n.h))
+  expect(y).toBeGreaterThan(bottom)
+  const height = Number(svg.match(/viewBox="0 0 \d+ (\d+)"/)?.[1])
+  expect(height - bottom).toBeLessThanOrEqual(90)
+})
+
+test('a long name is drawn in full on a worker card, and the tooltip always carries the whole name', () => {
+  const typical = 'schema-migration-and-backfill'
+  const longest = 'refactor-the-authentication-module-today'
+  const g = run([spawn('w1', 1, 'claude-haiku-5-5', typical), spawn('w2', 2, 'claude-opus-5-5', longest)])
+  const full = draw(g, { lastSeq: g.seq })
+  expect(full).toContain(`>${typical}<`)
+  expect(full).toContain(`<title>${longest}`)
+  const short = draw(g, { lastSeq: g.seq, budget: full.length - 1 })
+  expect(short).not.toContain('data-detail="full"')
+  expect(short).toContain(`<title>${longest}`)
+  // a name cut on the card ends with an ellipsis
+  for (const m of short.matchAll(/class="lbl"[^>]*>([^<]*)</g)) {
+    const text = m[1] ?? ''
+    if (text !== typical && text !== longest && text !== 'lead') expect(text.endsWith('…')).toBe(true)
+  }
+})
+
+test('generic activity words are left out of the cards, real actions stay', () => {
+  const g = run([
+    spawn('w1', 1, 'claude-haiku-5-5', 'parser'),
+    spawn('w2', 2, 'claude-sonnet-5-5', 'api tests'),
+    { type: 'step', at: 3, agentId: 'w1', model: 'claude-haiku-5-5', cost: 0.01 },
+    { type: 'tool-start', at: 4, agentId: 'w2', tool: 'Read', summary: 'src/app.ts' },
+  ])
+  const svg = draw(g, { lastSeq: g.seq })
+  const shown = svg.replace(/<title>[^<]*<\/title>/g, '')
+  expect(shown).not.toContain('>thinks<')
+  expect(shown).not.toContain('>starts<')
+  expect(shown).toContain('>reads app.ts<')
+  expect(shown).toContain('>working<')
+})
+
+test('costs always show cents, and a third decimal only when it carries something', () => {
+  const g = run([
+    spawn('w1', 1), spawn('w2', 2), spawn('w3', 3),
+    { type: 'step', at: 4, agentId: 'w1', model: 'claude-haiku-5-5', cost: 0.2 },
+    { type: 'step', at: 4, agentId: 'w2', model: 'claude-haiku-5-5', cost: 0.07 },
+    { type: 'step', at: 4, agentId: 'w3', model: 'claude-haiku-5-5', cost: 0.0123 },
+  ])
+  const svg = draw(g, { lastSeq: g.seq })
+  for (const s of ['>$0.20<', '>$0.07<', '>$0.012<']) expect(svg).toContain(s)
+})
+
+test('text is large enough to read in a side pane', () => {
+  const svg = draw(sample())
+  const sizes = [...svg.matchAll(/font-size:([\d.]+)px/g)].map((m) => Number(m[1]))
+  expect(sizes.length).toBeGreaterThan(0)
+  for (const s of sizes) expect(s).toBeGreaterThanOrEqual(10)
+  expect(Number(svg.match(/\.lbl\{font-size:([\d.]+)px/)?.[1])).toBeGreaterThanOrEqual(13)
+})
+
+test('edges follow the routes of the layout', () => {
+  const g = sample()
+  const l = layoutGraph(g)
+  const svg = renderSvg(g, l, { lastSeq: g.seq })
+  const paths = [...svg.matchAll(/class="edge [^"]*" d="([^"]*)"/g)].map((m) => m[1] ?? '')
+  expect(paths.length).toBe(l.edges.length)
+  for (const e of l.edges) {
+    const d = paths.find((p) => p.startsWith(`M${e.x1} ${e.y1}`) && p.endsWith(`${e.x2} ${e.y2}`))
+    expect(d).toBeDefined()
+  }
 })
 
 test('a sample graph is well-formed and draws every visible node and edge', () => {

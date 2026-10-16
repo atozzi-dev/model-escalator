@@ -192,6 +192,30 @@ test('desktop, vscode and mobile draw the same content with Box and Text, no Svg
   }
 })
 
+test('on the other surfaces numbers sit at the right of fixed-width cells and long lines wrap', async ($, on) => {
+  const h = wire(on)
+  h.rateLimits = [{ kind: 'five_hour', percentUsed: 23.5, resetsAt: '2026-10-12T15:00:00Z' }]
+  await script($, h)
+  const ui = await mount($, 'desktop')
+  const boxes: any[] = []
+  const texts: any[] = []
+  const visit = (n: any) => {
+    if (n === null || typeof n !== 'object') return
+    if (n.type === 'Box') boxes.push(n)
+    if (n.type === 'Text') texts.push(n)
+    for (const c of n.children ?? []) visit(c)
+  }
+  visit(await ui.drawn())
+  const right = boxes.filter((b) => b.props?.justifyContent === 'flex-end' && typeof b.props?.width === 'number')
+  expect(right.length).toBeGreaterThan(0)
+  expect(right.some((b) => walk(b).join('') === '3.5 (2)')).toBe(true)
+  // the category names stay on the left
+  expect(right.some((b) => walk(b).join('').startsWith('general-purpose:'))).toBe(false)
+  const estimate = texts.find((t) => /^(Estimate:|No saving)/.test(String(t.children.join(''))))
+  expect(estimate?.props?.wrap).toBe('wrap')
+  await ui.unmount()
+})
+
 test('the plan section is absent without plan data and present with it', async ($, on) => {
   const h = wire(on)
   await script($, h)

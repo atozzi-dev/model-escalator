@@ -19,7 +19,7 @@ function wire(on: any, data: Record<string, unknown> = {}, env: Record<string, s
 const run = async ($: any, args: string): Promise<string> =>
   ((await $.command.run({ command: 'escalator', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as never)) as { text: string }).text
 
-const SUBCOMMANDS = ['report', 'stats', 'reset', 'reset history', 'config', 'resume', 'history', 'map', 'help']
+const SUBCOMMANDS = ['report', 'stats', 'reset', 'reset history', 'config', 'resume', 'history', 'export', 'map', 'help']
 
 function session(i: number) {
   const ledger = { ...emptyLedger(), actual: 1 + i, baselineHigh: 3 + i, baselineLow: 2 + i, agentSteps: 4, interventions: { nudge: 2, swap: 1 } }

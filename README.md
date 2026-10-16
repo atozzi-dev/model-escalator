@@ -126,6 +126,7 @@ These are the subcommands listed by `/escalator help`:
 | `/escalator stats` | What the mod has learned per task category, the review scores of sampled runs, and this session's savings per category |
 | `/escalator config` | The effective configuration and the environment mode, with the variable each value came from |
 | `/escalator history [n]` | The last `n` recorded sessions (default 10, at most 50) |
+| `/escalator export [session\|learned\|history\|all]` | This session's costs, the learned statistics or the session history as CSV tables (default `session`), printed as text to paste into a spreadsheet; reads the plugin store only |
 | `/escalator map` | Open the live network of agents |
 | `/escalator panel [close]` | Open (or close) a panel with the session, plan usage, savings per category and learned statistics |
 | `/escalator consult <id>` | Ask the senior model about an agent now; the advice reaches it on its next tool call. Active mode only |
@@ -145,7 +146,7 @@ These are the subcommands listed by `/escalator help`:
 
 ![Example agent map: the lead on Opus, three workers on Haiku, Sonnet and Opus, a consult to the senior model and a swap from Haiku to Sonnet](docs/agent-map.svg)
 
-The example is a fictional session drawn by the mod's own renderer (`plugin/hooks/render-svg.ts`). `/escalator panel` shows the same figures as text and boxes, refreshed about once a second while the panel is open.
+The example is a fictional session drawn by the mod's own renderer (`plugin/hooks/render-svg.ts`). The map is a vertical tree sized for a side pane: it scales down in a narrower pane, and hovering an agent shows its full name, model and figures. `/escalator panel` shows the same figures as text and boxes, with numbers aligned in columns, refreshed about once a second while the panel is open.
 
 ## Configuration
 
