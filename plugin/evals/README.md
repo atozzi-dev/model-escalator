@@ -53,7 +53,17 @@ node scripts/ab-run.mjs --arm active   --model opus --runs 3 --max-cost-usd 60 -
 node scripts/ab-compare.mjs plugin/evals/results/baseline.json plugin/evals/results/active.json --tolerance 5
 ```
 
-Filters work as above (`--case paginate-off-by-one`, `--tag easy`, `--runs 1`); `--judge-model` picks the judge (default Haiku); `--baseline <model>` sets `MODEL_ESCALATOR_BASELINE`. Each run gets a fresh copy of `plugin/` (so the mod starts with an empty store, as in the official runs), `MODEL_ESCALATOR_MODE` set to the arm, `CLAUDE_CODE_PLUGIN_DIRS` removed and `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`. Your login and config folder are used as they are. The stream-json trace of every run is kept in `plugin/evals/results/<timestamp>-ab-run/`. `--dry-run` scaffolds one case, prints the exact command and environment and grades the untouched workspace without calling `claude`. `--max-cost-usd` stops starting new runs once the arm's agent and judge cost reaches it, and marks the file `partial`.
+Filters work as above (`--case paginate-off-by-one`, `--tag easy`, `--runs 1`); `--judge-model` picks the judge (default Haiku); `--baseline <model>` sets `MODEL_ESCALATOR_BASELINE`. Each run gets a fresh copy of `plugin/`, `MODEL_ESCALATOR_MODE` set to the arm, `CLAUDE_CODE_PLUGIN_DIRS` removed and `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`.
+
+#### Learning-store isolation (`--isolation`)
+
+A copy of the mod loaded with `--plugin-dir` writes its learning store to `<config folder>/plugins/store/model-escalator_inline-<hash>.json`, and the hash does not depend on the folder. Without isolation every `active` run would read what the previous ones learned (so the A/B would not measure the cold ladder) and would write into your real store. `--isolation` keeps the runs away from it:
+
+- `config-dir`: each run gets a private `CLAUDE_CONFIG_DIR` (a temp folder, removed after the run), so it starts with an empty store and leaves nothing behind. A private folder has no login, so the run authenticates with `CLAUDE_CODE_OAUTH_TOKEN`, which the script takes from your environment and passes on; it never reads, prints or stores it. Create the token once with `claude setup-token` and set it in the terminal that runs the A/B (PowerShell: `$env:CLAUDE_CODE_OAUTH_TOKEN = "<token>"`). Without the variable this mode stops with a message.
+- `store-swap` (fallback, no token needed): your store files are moved into a `.ab-run-backup-<pid>` folder next to them for the whole session, cleared before every run, and put back at the end, also on a failure or Ctrl+C (SIGINT/SIGTERM); if a file cannot be restored the script says where the original is. Because it works on your real folder, never run two arms at the same time in this mode, and avoid using Claude Code on the same account meanwhile.
+- `auto` (default): `config-dir` when `CLAUDE_CODE_OAUTH_TOKEN` is set, otherwise `store-swap`.
+
+The token is a subscription credential: use a terminal you trust, and note that the agents' unconfined shell can read the environment of their session. `--dry-run` prints the mode chosen and the store folder. The stream-json trace of every run is kept in `plugin/evals/results/<timestamp>-ab-run/`. `--dry-run` scaffolds one case, prints the exact command and environment and grades the untouched workspace without calling `claude`. `--max-cost-usd` stops starting new runs once the arm's agent and judge cost reaches it, and marks the file `partial`.
 
 **Warning: the agents' shell is not confined.** Without the sandbox they run with your user rights, like in a normal Claude Code session; only the working folder is a fresh temp folder. Run it on a machine and account where that is acceptable.
 
@@ -70,8 +80,13 @@ Differences from the official runner: the lead gets the case's `allowed_tools` p
 | `todo-tags-feature` | medium | Feature across three modules (parser, store, formatter) that the lead can delegate in parallel; precise word-boundary rules for `#tags`. | 35 |
 | `business-days-tz` | hard | Date arithmetic mixing UTC parsing with local getters: correct in some time zones, wrong in others and around DST changes; start-exclusive counting. Acceptance tests run in three time zones. A cheap model tends to fix one zone and break another. | 45 |
 | `config-parser-edges` | hard | INI-like parser with quoting, escapes, inline comments that need preceding whitespace, continuation lines, merged sections and 1-based error lines. Many interacting edge cases: the classic place where a cheap model loops. | 45 |
+| `async-cache-ttl` | hard | Async cache over three modules (TTL, stale-while-revalidate, de-duplicated loads, LRU). Eight bugs in ordering and lifetime: TTL boundary and clock start, failed loads that stay registered, a cancelled load that still stores its value, recency not refreshed. The visible tests show only five of them. | 45 |
+| `invoice-rounding` | hard | Invoice arithmetic in integer cents over four modules: float traps in amount and rate parsing, exact halves away from zero (also for returns), `-0`, largest-remainder coupon split, per-line versus per-invoice tax rounding. The visible tests do not mention halves, `-0` or the coupon ties. | 45 |
+| `semver-range` | hard | Version parsing and range matching over three modules: caret/tilde/partials, hyphen ranges, `\|\|`, spaces after operators, and the prerelease rule. Fixing one range form tends to break another. | 45 |
 
 Timeouts are 600 s (easy), 900 s (medium) and 1200 s (hard) per run.
+
+The three newest cases were added because, in the first reduced run, Haiku solved the older ones alone and the ladder never stepped in. They are built so that the visible tests reveal only part of the problem, the rest being in the doc comments and in a larger hidden acceptance suite, with the bugs spread over several files whose fixes interact. Whether Haiku really stalls on them is measured, not assumed: look at the escalations in the `active` arm.
 
 ### How a case is built
 
@@ -127,13 +142,32 @@ The ladder is acceptable when, case by case and on the whole suite, the active s
 
 ## Cost of one full A/B run
 
-Rough estimate with the list prices (USD per million tokens: Opus 4/20, Haiku 0.10/0.50, cache read 0.20 and 0.01) and an Opus lead:
+The reduced run of 2026-10-12 (7 cases, 1 run per arm, Opus lead, `scripts/ab-run.mjs`) measured, per run, about 0.8 USD for `baseline` (0.5 to 1.4) and about 0.4 USD for `active` (0.26 to 0.47), judge included. The three hard cases cost more in both arms and in `active` also pay for consults and swaps, so assume 1.2 to 1.8 USD per `baseline` run and 0.6 to 1.0 USD per `active` run on them.
 
-- baseline: about 2 to 3 USD per run (lead about 0.8, two or three Opus subagents about 0.5 each), so 7 cases × 3 runs ≈ 45 to 60 USD;
-- active: about 1 to 1.5 USD per run (same lead, Haiku subagents, a few consults and swaps on the hard cases), so ≈ 20 to 30 USD;
-- judge: a few cents for the whole suite.
+- `baseline`: the 7 older cases ≈ 6.5 USD per pass of the suite, × 3 runs ≈ 20 USD, plus the 3 new ones at ~1.5 × 3 runs ≈ 13 USD: about 30 to 40 USD;
+- `active`: about 15 to 20 USD for 10 cases × 3 runs;
+- judge: a few cents per run, 1 to 2 USD in all.
 
-One full A/B run (7 cases × 2 arms × 3 runs) costs roughly 65 to 90 USD; the turn caps and timeouts bound the worst case at about twice that. `--max-cost-usd 60` per arm stops a run that drifts. On a subscription the dollar figures are indicative.
+One full A/B run (10 cases × 2 arms × 3 runs = 60 runs) costs roughly **45 to 60 USD**; the turn caps and timeouts bound the worst case at about twice that. `--max-cost-usd 35` per arm stops an arm that drifts (it marks the file `partial`). On a subscription the dollar figures are indicative.
+
+Suggested order, from the repository root, in the same terminal (PowerShell):
+
+```powershell
+# 0. no cost: check isolation and the case wiring
+node scripts/ab-run.mjs --arm active --case semver-range --dry-run
+
+# 1. cheap smoke test (about 1 to 2 USD): one hard case, one run per arm, one arm after the other
+node scripts/ab-run.mjs --arm baseline --case async-cache-ttl --model opus --runs 1 --max-cost-usd 5 --json plugin/evals/results/smoke-baseline.json
+node scripts/ab-run.mjs --arm active   --case async-cache-ttl --model opus --runs 1 --max-cost-usd 5 --json plugin/evals/results/smoke-active.json
+node scripts/ab-compare.mjs plugin/evals/results/smoke-baseline.json plugin/evals/results/smoke-active.json --tolerance 5
+
+# 2. full run: 10 cases x 2 arms x 3 runs (arms one after the other when --isolation is store-swap)
+node scripts/ab-run.mjs --arm baseline --model opus --runs 3 --max-cost-usd 35 --json plugin/evals/results/baseline.json
+node scripts/ab-run.mjs --arm active   --model opus --runs 3 --max-cost-usd 35 --json plugin/evals/results/active.json
+node scripts/ab-compare.mjs plugin/evals/results/baseline.json plugin/evals/results/active.json --tolerance 5 --markdown ab-report.md
+```
+
+With `CLAUDE_CODE_OAUTH_TOKEN` set (see above) the two arms may run in two terminals at the same time; without it, run them one after the other.
 
 ## Checking a case without spending
 
