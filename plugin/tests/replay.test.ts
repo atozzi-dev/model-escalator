@@ -78,7 +78,9 @@ async function recordSession($: any, h: Harness, rounds = 24): Promise<Recording
 const ladder = (hits: AgentResult['actual']) => hits.filter((x) => ['nudge', 'consult', 'effort', 'swap', 'human'].includes(x.act))
 const byLabel = (agents: AgentResult[], label: string) => agents.find((a) => a.label === label)!
 
-test('replaying a recorded active session with its own options reproduces every recorded action', { options: { recordSessions: 5 } }, async ($, on) => {
+// Records a whole session through the engine (about 60 hook calls) before replaying it: already cut to the turns the
+// stuck agent needs to reach the human level, it still takes 4-5 s on a loaded machine, so it gets its own timeout.
+test('replaying a recorded active session with its own options reproduces every recorded action', { options: { recordSessions: 5 }, timeoutMs: 15000 }, async ($, on) => {
   const h = wire(on)
   const rec = await recordSession($, h)
   const r = replaySession(rec, configOf(rec), true)
