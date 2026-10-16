@@ -8,6 +8,11 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 - README section on getting work delegated: example prompts, when not to delegate, and a `CLAUDE.md` snippet that makes delegation the default for multi-part work.
 - A/B evals: the runner keeps every run away from your learning store (a private config folder with `CLAUDE_CODE_OAUTH_TOKEN`, or the store moved aside) and keeps an installed copy of the mod out of the runs; three harder cases (`async-cache-ttl`, `invoice-rounding`, `semver-range`).
+- The detector notices a shell command that exits 0 but prints the same failure again after the agent changed the command or edited a file (for example a check piped through `tail`), and raises the difficulty score by half a point per repeat; commands that only read (`cat`, `grep`, `git diff`, ...) never count. Recordings keep a hash of such outputs, so `/escalator replay` scores them too.
+
+### Changed
+
+- The senior consult dossier shows the output of a command that exited 0 but reported a failure, instead of a bare "ok".
 
 ### Fixed
 
