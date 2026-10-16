@@ -7,6 +7,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 ### Added
 
 - README section on getting work delegated: example prompts, when not to delegate, and a `CLAUDE.md` snippet that makes delegation the default for multi-part work.
+- A/B evals: the runner keeps every run away from your learning store (a private config folder with `CLAUDE_CODE_OAUTH_TOKEN`, or the store moved aside) and keeps an installed copy of the mod out of the runs; three harder cases (`async-cache-ttl`, `invoice-rounding`, `semver-range`).
 
 ### Fixed
 
