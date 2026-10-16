@@ -4,6 +4,8 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-16
+
 ### Added
 
 - README section on getting work delegated: example prompts, when not to delegate, and a `CLAUDE.md` snippet that makes delegation the default for multi-part work.
