@@ -15,6 +15,7 @@ export type StatsInput = {
   baseline: string
   ledger: Ledger
   paused: string[]            // one label per paused agent
+  claudeCost?: number         // the session total Claude Code reports (USD), when it does
   plan: string                // the report's "Plan usage" block, '' when there is none
   stats: Stats                // learned statistics (global)
   advice?: Advice[]           // cheaper-model suggestions (advice.ts), none by default
@@ -58,6 +59,9 @@ function sessionRows(i: StatsInput): ViewCell[][] {
     [label(`All on ${i.baseline}`), plain(`${usd(num(l.baselineLow))} to ${usd(num(l.baselineHigh))}`)],
     [label('Savings'), plain(`${usd(s.low)} to ${usd(s.high)} (${s.lowPct}% to ${s.highPct}%)`)],
     ...splitRows(l),
+    ...(i.claudeCost !== undefined && Number.isFinite(i.claudeCost)
+      ? [[label('Claude Code'), plain(`${usd(i.claudeCost)} reported, the mod metered ${usd(num(l.actual))}`)]]
+      : []),
     [label('Interventions'), plain(iv || 'none')],
     [label('Paused'), plain(i.paused.length > 0 ? i.paused.join('; ') : 'none')],
   ]

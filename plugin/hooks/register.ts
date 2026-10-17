@@ -18,7 +18,7 @@ import { buildDetail, consultGate, findAgent, selectorChips, swapGate } from './
 import { buildStatsView, columnWidths, fitView, type ViewCell } from './stats-view'
 import { buildReviewPrompt, diffArgv, editedPath, formatReviews, isCheaper, parseReview, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun } from './review'
 import { parseSnapshot, type Snapshot, type TrackedAgent } from './state'
-import { addAgent, addConsult, addEscalation, addIntervention, addStep, asUsage, cost as stepCost, emptyLedger, planBlock, report, reportByCategory, savings, statusLine, type Ledger, type Usage } from './savings'
+import { addAgent, addConsult, addEscalation, addIntervention, addStep, asUsage, cost as stepCost, emptyLedger, planBlock, report, reportByCategory, savings, statusLine, claudeCostLine, claudeCostUsd, type Ledger, type Usage } from './savings'
 
 export const HELP_TOOL = 'mcp__model-escalator__ask_for_help'
 const STATS_KEY = 'stats'
@@ -208,7 +208,7 @@ function stopMapTimer(): void {
 async function statsSignature($: EngineInterface): Promise<string> {
   let learned: unknown
   try { learned = await $.store.get(STATS_KEY) } catch { learned = undefined }
-  return JSON.stringify([mode, baseline, ledger, [...agents.values()].filter((a) => a.paused).map((a) => a.id), learned, await currentAdvice($)])
+  return JSON.stringify([mode, baseline, ledger, [...agents.values()].filter((a) => a.paused).map((a) => a.id), learned, await currentAdvice($), await readClaudeCost($)])
 }
 
 // The cheaper-model suggestions for this session's project (advice.ts), strong first. [] in `off` mode and on any
@@ -823,10 +823,11 @@ export const register: Register = (on, options) => {
     // On a subscription the engine reports the plan windows; on API billing there are none and the block is left out.
     const plan = await readPlan($)
     const planText = plan ? '\n\n' + plan : ''
+    const reported = claudeCostLine(await readClaudeCost($), ledger)
     const pausedText = paused.length === 0 ? '' : '\n\nPaused (resume with /escalator resume <id>|all):\n' +
       paused.map((a) => `- ${agentLabel(a)} (${a.category}, ${a.tier})`).join('\n')
     const hint = await adviceHint($, await currentAdvice($))
-    return { text: `Mode: ${mode}\n` + report(ledger, baseline) + planText + pausedText + (hint ? '\n\n' + hint : '') +
+    return { text: `Mode: ${mode}\n` + report(ledger, baseline) + (reported ? '\n' + reported : '') + planText + pausedText + (hint ? '\n\n' + hint : '') +
       '\n\nMore:/escalator stats, /escalator map (live agent network), /escalator history, /escalator config, /escalator help' }
   })
 
@@ -879,8 +880,10 @@ export const register: Register = (on, options) => {
     try {
       const { Box, Text } = $.ui.resolve(e)
       const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
+      const claudeCost = await readClaudeCost($)
       const view = buildStatsView({
         mode, baseline, ledger, stats, plan: await readPlan($), now: await clockNow($), halfLifeMs: halfLifeMs(), advice: await currentAdvice($),
+        ...(claudeCost !== undefined ? { claudeCost } : {}),
         paused: [...agents.values()].filter((a) => a.paused).map((a) => `${agentLabel(a)} (${a.category}, ${a.tier})`),
       })
       const text = (c: ViewCell, wrap: 'wrap' | 'truncate-end' = 'truncate-end') =>
@@ -2039,6 +2042,11 @@ async function closeStatsPanel($: EngineInterface): Promise<string> {
   } catch {
     return 'Could not close the Escalator panel.'
   }
+}
+
+// The session total Claude Code reports (`$.session.usage().cost`, free), in USD; undefined when it reports none.
+async function readClaudeCost($: EngineInterface): Promise<number | undefined> {
+  try { return claudeCostUsd((await $.session.usage()).cost) } catch { return undefined }
 }
 
 // The report's "Plan usage" block: '' on API billing or when the engine cannot tell. Never throws.

@@ -248,3 +248,20 @@ export function report(l: Ledger, baseline: Tier): string {
     'Estimate at API list prices. On a subscription plan read the percentage as share of usage limits saved.',
   ].join('\n')
 }
+
+// What `$.session.usage().cost` holds, in USD: an object `{ usd }` in the published types, a plain number tolerated.
+// Undefined when absent or not a finite non-negative number.
+export function claudeCostUsd(c: unknown): number | undefined {
+  const x = c !== null && typeof c === 'object' && !Array.isArray(c) ? (c as { usd?: unknown }).usd : c
+  return typeof x === 'number' && Number.isFinite(x) && x >= 0 ? x : undefined
+}
+
+// The session total Claude Code reports next to what the mod metered ('' when Claude Code reports none). They differ
+// by the requests Claude Code makes on its own, which do not pass through `turn.step`.
+export function claudeCostLine(c: unknown, l: Ledger): string {
+  const x = claudeCostUsd(c)
+  if (x === undefined) return ''
+  const metered = typeof l.actual === 'number' && Number.isFinite(l.actual) ? l.actual : 0
+  return `Claude Code reports ${usd(x)} for this session; the mod metered ${usd(metered)} ` +
+    '(requests Claude Code makes on its own, such as prompt suggestions, do not pass through the mod)'
+}
