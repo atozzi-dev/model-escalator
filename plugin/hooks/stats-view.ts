@@ -1,7 +1,7 @@
 // The statistics panel as data: sections of rows of cells, no engine calls. `register.ts` maps it to Box and Text
 // elements per surface. Pure and total: malformed input degrades to fewer or empty rows, never throws.
 import { costPerAccepted, HALF_LIFE_MS, type Stats } from './learning'
-import { savings, type Ledger } from './savings'
+import { costSplit, savings, type Ledger } from './savings'
 import { ADVICE, type Advice } from './advice'
 
 // align: numbers are right-aligned. short: a narrower text used when the column has to give way. clip: 'middle'
@@ -41,6 +41,12 @@ const head = (first: string, ...rest: (string | [string, string])[]): ViewCell[]
     : { text: t, bold: true, dim: true, align: 'right' })),
 ]
 
+// The lead and the agents apart, when the ledger has the split.
+function splitRows(l: Ledger): ViewCell[][] {
+  const s = costSplit(l)
+  return s ? [[label('Lead'), plain(`${usd(s.lead)}, ${s.pct}% of the session`)], [label('Subagents'), plain(usd(s.agents))]] : []
+}
+
 function sessionRows(i: StatsInput): ViewCell[][] {
   const l = i.ledger
   const s = savings({ ...l, actual: num(l.actual), baselineHigh: num(l.baselineHigh), baselineLow: num(l.baselineLow) })
@@ -51,6 +57,7 @@ function sessionRows(i: StatsInput): ViewCell[][] {
     [label('Cost'), plain(`${usd(num(l.actual))} (consults ${num(l.consults)}, ${usd(num(l.consultCost))})`)],
     [label(`All on ${i.baseline}`), plain(`${usd(num(l.baselineLow))} to ${usd(num(l.baselineHigh))}`)],
     [label('Savings'), plain(`${usd(s.low)} to ${usd(s.high)} (${s.lowPct}% to ${s.highPct}%)`)],
+    ...splitRows(l),
     [label('Interventions'), plain(iv || 'none')],
     [label('Paused'), plain(i.paused.length > 0 ? i.paused.join('; ') : 'none')],
   ]

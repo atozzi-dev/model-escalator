@@ -27,7 +27,7 @@ Mods are not sandboxed: they run with your permissions. To see what the mod hook
 
 After installing, nothing needs configuring. The mod runs in `active` mode: it tracks every subagent and in-process teammate, leaves your lead model alone, and intervenes only on the agents it sees get stuck. Within a session:
 
-- `/escalator` shows the session cost, the estimated savings and the interventions so far; once per session it adds a one-line hint when a task category runs on a stronger model than it seems to need.
+- `/escalator` shows the session cost (the lead and the subagents apart), the estimated savings and the interventions so far; once per session it adds a one-line hint when a task category runs on a stronger model than it seems to need.
 - `/escalator map` opens the live map of agents (picture below).
 - `/escalator panel` opens a panel with the session at a glance and what the mod has learned; `/escalator stats` prints the learned statistics as text.
 

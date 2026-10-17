@@ -21,7 +21,7 @@
 // Only counters, costs, model and category names are exported: never prompts, commands, outputs or project paths
 // (the per-project table is the current project's, labelled `project`; its hashed key is not exported).
 import { costPerAccepted, HALF_LIFE_MS, type Cell, type Stats } from './learning'
-import { savings, type Ledger } from './savings'
+import { costSplit, savings, type Ledger } from './savings'
 import { LADDER } from './detector'
 
 export type ExportKind = 'session' | 'learned' | 'history' | 'all'
@@ -80,6 +80,8 @@ export function sessionCsv(ledger: Ledger | undefined): string {
   })).sort((a, b) => b.actual - a.actual || byName(a.name, b.name))
   const out: Field[][] = rows.map((r) => [r.name, r.agents, r.esc, r.steps, ...costCells(r.actual, r.low, r.high)])
   const sum = (k: 'agents' | 'esc') => rows.reduce((a, r) => a + r[k], 0)
+  const split = l ? costSplit(l) : undefined
+  if (split && split.lead > 0) out.push(['(lead)', undefined, undefined, undefined, ...costCells(split.lead, split.lead, split.lead)])
   out.push(['(total)', sum('agents'), sum('esc'), num(l?.agentSteps), ...costCells(num(l?.actual), num(l?.baselineLow), num(l?.baselineHigh))])
   return table(SESSION_HEADER, out)
 }

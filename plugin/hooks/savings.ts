@@ -56,6 +56,8 @@ export type Ledger = {
   consultCost: number
   interventions: Record<string, number>
   byCategory?: Record<string, CategoryRow>   // absent in ledgers saved by older versions
+  leadCost?: number       // part of `actual` spent by the main conversation (the lead); absent in older ledgers
+  agentCost?: number      // part of `actual` spent by subagents and teammates (consults are neither)
 }
 
 export function emptyLedger(): Ledger {
@@ -105,6 +107,8 @@ export function addStep(l: Ledger, u: Usage, tier: Tier, baseline: Tier, isAgent
     baselineHigh: l.baselineHigh + high,
     baselineLow: l.baselineLow + low,
     agentSteps: l.agentSteps + (isAgent ? 1 : 0),
+    leadCost: (l.leadCost ?? 0) + (isAgent ? 0 : c),
+    agentCost: (l.agentCost ?? 0) + (isAgent ? c : 0),
     byTier: { ...l.byTier, [tier]: { steps: row.steps + 1, cost: row.cost + c } },
     ...(byCategory ? { byCategory } : {}),
   }
@@ -212,6 +216,23 @@ export function planBlock(limits: unknown, l: Ledger): string {
   }
 }
 
+// Where the session cost went: the lead (main conversation) and the subagents and teammates. Empty for ledgers saved
+// before the split existed.
+export function costSplit(l: Ledger): { lead: number; agents: number; pct: number } | undefined {
+  const ok = (x: unknown): x is number => typeof x === 'number' && Number.isFinite(x) && x >= 0
+  if (!ok(l.leadCost) || !ok(l.agentCost)) return undefined
+  return { lead: l.leadCost, agents: l.agentCost, pct: l.actual > 0 ? Math.min(100, Math.round((l.leadCost / l.actual) * 100)) : 0 }
+}
+
+function splitLines(l: Ledger): string[] {
+  const s = costSplit(l)
+  if (!s) return []
+  return [
+    `Lead (main conversation): ${usd(s.lead)}, ${s.pct}% of the session. The mod does not change the lead's model; delegate work to subagents to let the ladder save (see README, Getting work delegated).`,
+    `Subagents and teammates: ${usd(s.agents)}`,
+  ]
+}
+
 export function report(l: Ledger, baseline: Tier): string {
   const s = savings(l)
   const tiers = (Object.entries(l.byTier) as [Tier, { steps: number; cost: number }][])
@@ -219,6 +240,7 @@ export function report(l: Ledger, baseline: Tier): string {
   const iv = Object.entries(l.interventions).map(([k, v]) => `${k} ${v}`).join(', ') || 'none'
   return [
     `Session cost: ${usd(l.actual)} (senior consults: ${l.consults}, ${usd(l.consultCost)})`,
+    ...splitLines(l),
     `Same work all on ${baseline}: ${usd(l.baselineLow)} (prudent) to ${usd(l.baselineHigh)} (same tokens)`,
     `Estimated savings: ${usd(s.low)} to ${usd(s.high)} (${s.lowPct}% to ${s.highPct}%)`,
     'By model:', ...tiers,

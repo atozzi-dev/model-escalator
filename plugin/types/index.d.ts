@@ -52,6 +52,8 @@ declare module 'claude-code' {
           consults: number
           consultCost: number
           interventions: Record<string, number>
+          leadCost?: number
+          agentCost?: number
           byCategory?: Record<string, { steps: number; actual: number; baselineHigh: number; baselineLow: number; agents: number; escalated: number }>
         }
         seenModels: Partial<Record<'haiku' | 'sonnet' | 'opus', string>>
