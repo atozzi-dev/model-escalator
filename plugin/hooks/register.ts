@@ -4,7 +4,7 @@ import { DEFAULT_CONFIG, describeConfig, parseConfig, splitCommand, type Config 
 import { LADDER, afterHelp, agentHead, beginRequest, endRequest, limitReached, restartSilence, sessionClosed, startCall, agentLabel, allowedMax, nextTier, canAskForHelp, classifyFailure, consultLimit, countStep, EFFORTS, endRun, escalated, features, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_LEAD_NOTICES, newAgent, noteProgress, normalizePath, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, spawnName, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type Features, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
 import { downshiftAdvice, formatAdvice, markHinted, pickHint, type Advice } from './advice'
 import { exportCsv } from './export'
-import { parseReplayArgs,replayReport } from './replay'
+import { parseReplayArgs, replayReport, sweep, sweepGrid, sweepReport } from './replay'
 import { addAgent as addRecAgent, indexOf as recIndexOf, mergeRecordings, parseRecordings, push as recPush, recordedOptions, relTime, resumeRecording, startRecording, stepEvent, toolEvent, type Live, type RecEvent, type RecordedMode, type Recording } from './recorder'
 import { buildDossier, inputFromState } from './dossier'
 import { cacheGet, cachePut, cacheKey, classifierInput, combineCategory, LABELS, parseCache } from './classify'
@@ -769,7 +769,7 @@ export const register: Register = (on, options) => {
       } catch { /* the tool is optional: the ladder works without it */ }
     }
     try {
-      await $.command.register({ name: 'escalator', description: 'Model escalator: savings report, stats panel and the live agent network', argumentHint: '[report|stats|config|history [n]|export [session|learned|history|all]|map|panel [close]|consult <id>|swap <id>|reset [history|recordings]|replay [option=value ...]|resume <id>|all|help]' })
+      await $.command.register({ name: 'escalator', description: 'Model escalator: savings report, stats panel and the live agent network', argumentHint: '[report|stats|config|history [n]|export [session|learned|history|all]|map|panel [close]|consult <id>|swap <id>|reset [history|recordings]|replay [option=value ...]|replay sweep option=values ...|resume <id>|all|help]' })
     } catch { /* name taken: the report stays reachable through the status line */ }
     return r
   })
@@ -828,7 +828,7 @@ export const register: Register = (on, options) => {
       paused.map((a) => `- ${agentLabel(a)} (${a.category}, ${a.tier})`).join('\n')
     const hint = await adviceHint($, await currentAdvice($))
     return { text: `Mode: ${mode}\n` + report(ledger, baseline) + (reported ? '\n' + reported : '') + planText + pausedText + (hint ? '\n\n' + hint : '') +
-      '\n\nMore:/escalator stats, /escalator map (live agent network), /escalator history, /escalator config, /escalator help' }
+      '\n\nMore: /escalator stats, /escalator map (live agent network), /escalator history, /escalator config, /escalator help' }
   })
 
   // The map pane. Desktop, VS Code and mobile draw an interactive Svg; the terminal a short text for now.
@@ -1731,6 +1731,7 @@ const COMMAND_HELP = [
   '/escalator swap <id>: move an agent one tier up, from its next request (the map\'s detail buttons do the same)',
   '/escalator resume <id>|all: resume agents paused at the human level',
   '/escalator replay [option=value ...]: replay the recorded sessions with other options (thresholds, graceSteps, levels, ...) and compare, without any model call',
+  '/escalator replay sweep option=values ...: replay the recorded sessions over a grid of options (ranges lo..hi or lo..hi:step, lists a,b,c, alternatives of levels separated by |; at most 200 combinations) and rank them by false positives and stuck agents caught',
   '/escalator reset: forget the learned stats (history and category cache are kept)',
   '/escalator reset history: clear the recorded session history',
   '/escalator reset recordings: clear the sessions recorded for replay (option recordSessions)',
@@ -1759,15 +1760,24 @@ async function configCommand($: any): Promise<string> {
 // with the options in force changed as asked, against what the ladder did. Read only. Never throws.
 async function replayCommand($: EngineInterface, args: string): Promise<string> {
   try {
+    // The stored recordings plus this session's live copy.
+    const load = async (): Promise<Recording[]> => {
+      let recs: Recording[] = []
+      try { recs = parseRecordings(await $.store.get(RECORDINGS_KEY)) } catch { /* nothing stored */ }
+      if (recording && recording.rec.events.some((ev) => ev.k !== 'boot')) {
+        const live = JSON.parse(JSON.stringify(recording.rec)) as Recording
+        recs = [...recs.filter((r) => r.id !== live.id), live]
+      }
+      return recs
+    }
+    if (args === 'sweep' || args.startsWith('sweep ')) {
+      const grid = sweepGrid(args.slice(5).trim(), config)
+      if ('error' in grid) return grid.error
+      return sweepReport(sweep(await load(), config, grid))
+    }
     const candidate = parseReplayArgs(args, config)
     if ('error' in candidate) return candidate.error
-    let recs: Recording[] = []
-    try { recs = parseRecordings(await $.store.get(RECORDINGS_KEY)) } catch { /* nothing stored */ }
-    if (recording && recording.rec.events.some((ev) => ev.k !== 'boot')) {
-      const live = JSON.parse(JSON.stringify(recording.rec)) as Recording
-      recs = [...recs.filter((r) => r.id !== live.id), live]
-    }
-    return replayReport(recs, config, candidate)
+    return replayReport(await load(), config, candidate)
   } catch {
     return 'Could not replay the recorded sessions.'
   }
