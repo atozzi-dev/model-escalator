@@ -4,8 +4,20 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-17
+
+### Added
+
+- Cheaper-model advice: `/escalator stats`, the statistics panel and a once-per-session line in `/escalator` suggest one tier down for task categories that never get stuck (at least 8 recent runs, almost no escalations or rejected runs, and no evidence that the cheaper tier fails them), with an estimated cost per run. Nothing changes on its own.
+- `/escalator` shows the lead's (main conversation) cost apart from subagents and teammates, in the report, the panel and `/escalator export session`: the mod never changes the lead's model, so this is the part only delegation can save.
+- `/escalator` and the panel show the session total Claude Code reports next to what the mod metered (requests Claude Code makes on its own do not pass through the mod).
+- `/escalator replay sweep option=values ...` replays the recorded sessions over a grid of options (ranges like `2..5`, lists like `3,4,6`, at most 200 combinations) and ranks them by possible false positives, weighted by level, and stuck agents caught.
+
 ### Changed
 
+- Task categories are picked from the agent type, the task description and the start of the prompt, with new `review` and `feature` labels, so far fewer runs end up in `other`. Stats already stored keep their old labels.
+- With `modelCategories` on, subagents no longer wait for the model label: they start on the keyword category, the label is applied in the background and cached, and the end of a run waits for it at most 3 seconds.
+- `/escalator stats`: "1 run" in the singular, steady decayed counts, and lines grouped by agent type with the most expensive first.
 - README: the status line points to the changelog for the version and says that the savings are not yet measured with the A/B evals.
 
 ## [1.2.0] - 2026-10-16
