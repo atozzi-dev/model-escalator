@@ -10,7 +10,7 @@ permissions:
 
 env:
   # Single source for the pinned engine version.
-  CLAUDE_CODE_VERSION: 2.1.295
+  CLAUDE_CODE_VERSION: 2.1.301
 
 jobs:
   test:
