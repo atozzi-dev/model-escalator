@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { ADVICE, downshiftAdvice, formatAdvice, hintLine, pickHint, type Advice } from '../hooks/advice'
 import type { Tier } from '../hooks/detector'
-import { HALF_LIFE_MS, record, recordReview, recordRework, type Stats } from '../hooks/learning'
+import { HALF_LIFE_MS, LEARN, record, recordReview, recordRework, type Stats } from '../hooks/learning'
 
 const T0 = 1_000_000_000
 
@@ -81,18 +81,47 @@ test('code work with a verifyCommand is measured by it', async () => {
 test('docs work is not measured by a verifyCommand, only by rework or reviews', async () => {
   const a = one(runs({}, 'writer:docs', 'opus', 20), { verify: true, reworkWindowMinutes: 0 })
   expect(a.quality).toBe('unmeasured')
-  expect(one(runs({}, 'writer:docs', 'opus', 20), { verify: true }).signal).toBe('rework-cheaper')
+  expect(one(runs({}, 'writer:docs', 'opus', 20), { verify: true }).quality).toBe('safety-net')
 })
 
-test('work that writes files is measured by rework, on the cheaper tier when the current one is not tracked', async () => {
+test('work that writes files with no run on the cheaper tier has only a safety net', async () => {
   for (const label of ['feature', 'bugfix', 'tests', 'refactor', 'docs', 'ui', 'data']) {
-    // opus at an opus baseline is not tracked for rework, sonnet runs would be
-    const a = one(runs({}, `w:${label}`, 'opus', 20), { baseline: 'opus' })
-    expect(a.quality).toBe('measured')
-    expect(a.signal).toBe('rework-cheaper')
-    expect(a.qualityNote).toBe('rework by the lead would show on sonnet')
-    expect(a.strength).toBe('strong')
+    // opus at an opus baseline is not tracked for rework, sonnet runs would be: a net, not a measure
+    const a = one(runs({}, `w:${label}`, 'opus', 20), { baseline: 'opus', reworkWindowMinutes: 30 })
+    expect(a.quality).toBe('safety-net')
+    expect(a.signal).toBe(undefined)
+    expect(a.strength).toBe('moderate')
+    expect(a.qualityNote).toBe(
+      'if sonnet does worse, edits by the lead within 30 minutes would show it and learning would move this category back up')
   }
+  expect(one(runs({}, 'w:feature', 'opus', 20), { reworkWindowMinutes: 10 }).qualityNote).toContain('within 10 minutes')
+})
+
+test('too few runs on the cheaper tier are still only a safety net', async () => {
+  let st = runs({}, 'w:feature', 'opus', 20)
+  st = runs(st, 'w:feature', 'sonnet', LEARN.minRuns - 1)
+  expect(one(st).quality).toBe('safety-net')
+})
+
+test('enough accepted runs on the cheaper tier make its rework a measured signal', async () => {
+  let st = runs({}, 'w:feature', 'opus', 20)
+  st = runs(st, 'w:feature', 'sonnet', LEARN.minRuns)
+  const a = one(st)
+  expect(a.quality).toBe('measured')
+  expect(a.signal).toBe('rework-cheaper')
+  expect(a.qualityNote).toBe(`no rework by the lead in ${LEARN.minRuns} sonnet runs`)
+  expect(a.strength).toBe('strong')
+  // with rework off those runs prove nothing about quality
+  expect(one(st, { reworkWindowMinutes: 0 }).quality).toBe('unmeasured')
+})
+
+test('rework seen on the cheaper tier is counted in the note', async () => {
+  let st = runs({}, 'w:feature', 'opus', 20)
+  st = runs(st, 'w:feature', 'sonnet', 10)
+  st = recordRework(st, 'w:feature', 'sonnet', { now: T0, runAccepted: true })
+  const a = one(st)
+  expect(a.signal).toBe('rework-cheaper')
+  expect(a.qualityNote).toBe('the lead reworked 1 of 10 sonnet runs')
 })
 
 test('rework counted on the current tier is named as such', async () => {
@@ -124,10 +153,13 @@ test('reviews come before verify and rework as the named signal', async () => {
   expect(b.signal).toBe('verify')
 })
 
-test('measured suggestions come before unmeasured ones of the same strength', async () => {
+test('measured, then safety-net, then unmeasured suggestions of the same strength', async () => {
   let st = runs({}, 'r:review', 'opus', 10, 5)
-  st = runs(st, 'w:feature', 'opus', 10, 0.1)
-  expect(downshiftAdvice(st, { now: T0 }).map((a) => a.category).join(',')).toBe('w:feature,r:review')
+  st = runs(st, 'w:feature', 'opus', 10, 1)
+  st = runs(st, 'v:bugfix', 'opus', 10, 0.1)
+  // v:bugfix is measured by reviews, w:feature only has the rework net
+  st = reviews(st, 'v:bugfix', 'opus', [5, 5, 5])
+  expect(downshiftAdvice(st, { now: T0 }).map((a) => a.category).join(',')).toBe('v:bugfix,w:feature,r:review')
 })
 
 // --- text ---
@@ -178,6 +210,26 @@ test('an unmeasured line for other work says what would measure it', async () =>
   expect(on).toContain('reviewRate is on')
   const w = formatAdvice([unmeasured({ category: 'w:feature', qualityNote: 'x' })]).lines[0]!
   expect(w).toContain('Set verifyCommand or turn on reviewRate')
+})
+
+const net = (over: Partial<Advice> = {}): Advice => sample({
+  strength: 'moderate', quality: 'safety-net', signal: undefined,
+  qualityNote: 'if sonnet does worse, edits by the lead within 30 minutes would show it and learning would move this category back up',
+  ...over,
+})
+
+test('a safety-net line says quality is not measured yet and what would catch a drop', async () => {
+  const out = formatAdvice([net()])
+  expect(out.lines[0]).toBe(
+    'coder:feature never got stuck in 18 runs on opus. On sonnet it would cost about $0.47 instead of $0.94 per run. ' +
+    'Quality is not measured yet (no sonnet runs to compare): if sonnet does worse, edits by the lead within 30 minutes ' +
+    'would show it and learning would move this category back up.')
+  expect(out.hint).toBe('')
+})
+
+test('a safety-net suggestion is never the hint, even when marked strong', async () => {
+  expect(pickHint([net({ strength: 'strong' })], {}, T0)).toBe(undefined)
+  expect(formatAdvice([net({ strength: 'strong' })]).hint).toBe('')
 })
 
 test('the stats block keeps the general caveat', async () => {

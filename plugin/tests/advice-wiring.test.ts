@@ -28,8 +28,10 @@ function wire(on: any, env: Record<string, string> = {}): void {
 const run = async ($: any, args: string) =>
   (await $.command.run({ command: 'escalator', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as never) as { text: string }).text
 
-// 18 runs of a category on opus that never got stuck, 0.94 USD each: a strong suggestion for sonnet.
-const EASY = { 'coder:feature': { opus: { runs: 18, escalated: 0, tokens: 1000, cost: 16.92, costRuns: 18 } } }
+// 18 runs of a category on opus that never got stuck, 0.94 USD each.
+const OPUS = { runs: 18, escalated: 0, tokens: 1000, cost: 16.92, costRuns: 18 }
+// With 5 accepted sonnet runs whose rework the mod watched: a strong, measured suggestion for sonnet.
+const EASY = { 'coder:feature': { opus: OPUS, sonnet: { runs: 5, escalated: 0, tokens: 100 } } }
 
 const advice = (over: Partial<Advice> = {}): Advice => ({
   category: 'reviewer:other', tier: 'opus', suggested: 'sonnet', scope: 'global', runs: 18, escalationRate: 0, notAcceptedRate: 0,
@@ -117,7 +119,7 @@ test('a hinted suggestion is not hinted again in a later session within a week',
   expect(await run($, '')).not.toContain('never got stuck in 18 runs')
 })
 
-test('a moderate suggestion is no hint', async ($, on) => {
+test('a moderate suggestion is no hint', { options: { verifyCommand: 'npm test' } }, async ($, on) => {
   wire(on)
   await $.session.start({ cwd: '/work' } as never)
   data.stats = { 'c:feature': { opus: { runs: 10, escalated: 0, tokens: 1 } } }
@@ -129,7 +131,7 @@ test('a moderate suggestion is no hint', async ($, on) => {
 // --- quality ---
 
 // The same evidence for read-only work: no reviews, tests or rework can tell whether sonnet would do as well.
-const READ_ONLY = { 'security-reviewer:review': EASY['coder:feature'] }
+const READ_ONLY = { 'security-reviewer:review': { opus: OPUS } }
 
 test('read-only work is listed in /escalator stats with its limit and never hinted', async ($, on) => {
   wire(on)
@@ -146,7 +148,18 @@ test('the stats name the signal that measures a suggestion', async ($, on) => {
   wire(on)
   await $.session.start({ cwd: '/work' } as never)
   data.stats = EASY
-  expect(await run($, 'stats')).toContain('quality: rework by the lead would show on sonnet')
+  expect(await run($, 'stats')).toContain('quality: no rework by the lead in 5 sonnet runs')
+  expect(await run($, '')).toContain('(no rework by the lead in 5 sonnet runs)')
+})
+
+test('code work never run on the cheaper model has only a safety net and no hint', async ($, on) => {
+  wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  data.stats = { 'coder:feature': { opus: OPUS } }
+  expect(await run($, '')).not.toContain('never got stuck')
+  const stats = await run($, 'stats')
+  expect(stats).toContain('Quality is not measured yet (no sonnet runs to compare)')
+  expect(stats).toContain('edits by the lead within 30 minutes would show it')
 })
 
 test('the verifyCommand option measures code work', { options: { verifyCommand: 'npm test', reworkWindowMinutes: 0 } }, async ($, on) => {
@@ -168,7 +181,7 @@ test('code work with rework off and no verifyCommand is unmeasured and no hint',
 test('reviewRate on changes the advice for other work', { options: { reviewRate: 0.5 } }, async ($, on) => {
   wire(on)
   await $.session.start({ cwd: '/work' } as never)
-  data.stats = { 'gp:other': EASY['coder:feature'] }
+  data.stats = { 'gp:other': { opus: OPUS } }
   expect(await run($, 'stats')).toContain('reviewRate is on')
 })
 
@@ -178,6 +191,15 @@ test('the view marks unmeasured advice and says what it means', () => {
   expect(rows.find((r) => r.startsWith('reviewer:review'))!).toContain('unmeasured')
   expect(rows.join('\n')).toContain('quality not measured')
   expect(rows.join('\n')).toContain('not a comparison with the cheaper model')
+  expect(rows.join('\n')).not.toContain('safety net')
+})
+
+test('the view marks safety-net advice and says what it means', () => {
+  const v = buildStatsView(input({ advice: [advice({ category: 'w:feature', strength: 'moderate', quality: 'safety-net', signal: undefined, qualityNote: 'x' })] }))
+  const rows = v.sections.find((s) => s.id === 'advice')!.rows.map((r) => r.map((c) => c.text).join(' '))
+  expect(rows.find((r) => r.startsWith('w:feature'))!).toContain('safety net')
+  expect(rows.join('\n')).toContain('safety net: quality not measured yet')
+  expect(rows.join('\n')).not.toContain('unmeasured:')
 })
 
 for (const mode of ['baseline', 'off']) test(`no hint in ${mode} mode`, async ($, on) => {

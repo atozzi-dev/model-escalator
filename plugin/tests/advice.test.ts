@@ -21,7 +21,7 @@ function runs(stats: Stats, category: string, tier: Tier, n: number, bad = 0, co
 
 test('a category that never got stuck in enough runs on opus gets a sonnet suggestion', async () => {
   const st = runs({}, 'coder:feature', 'opus', 18, 0, 0.94)
-  const list = downshiftAdvice(st, { now: T0 })
+  const list = downshiftAdvice(st, { now: T0, verify: true })
   expect(list.length).toBe(1)
   const a = list[0]!
   expect(a.category).toBe('coder:feature')
@@ -44,8 +44,8 @@ test('fewer than the minimum runs gives no advice', async () => {
 })
 
 test('the minimum run count gives a moderate suggestion, twice as many a strong one', async () => {
-  expect(downshiftAdvice(runs({}, 'c:feature', 'opus', 12), { now: T0 })[0]!.strength).toBe('moderate')
-  expect(downshiftAdvice(runs({}, 'c:feature', 'opus', ADVICE.strongRuns), { now: T0 })[0]!.strength).toBe('strong')
+  expect(downshiftAdvice(runs({}, 'c:feature', 'opus', 12), { now: T0, verify: true })[0]!.strength).toBe('moderate')
+  expect(downshiftAdvice(runs({}, 'c:feature', 'opus', ADVICE.strongRuns), { now: T0, verify: true })[0]!.strength).toBe('strong')
 })
 
 test('an escalation rate above the bar gives no advice', async () => {
@@ -225,7 +225,7 @@ test('strong suggestions come first, then the largest estimated saving', async (
   let st = runs({}, 'small:feature', 'opus', 20, 0, 0.1)
   st = runs(st, 'big:feature', 'opus', 20, 0, 1)
   st = runs(st, 'weak:feature', 'opus', 10, 0, 5)
-  const list = downshiftAdvice(st, { now: T0 })
+  const list = downshiftAdvice(st, { now: T0, verify: true })
   expect(list.map((a) => a.category).join(',')).toBe('big:feature,small:feature,weak:feature')
 })
 

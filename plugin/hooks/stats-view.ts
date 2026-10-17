@@ -131,8 +131,8 @@ const isAdvice = (a: unknown): a is Advice => {
 }
 
 // One row per suggestion: what changes, the evidence, and the cost of a run now and (estimated) on the cheaper model.
-// The last cell is the strength of a measured suggestion and "unmeasured" otherwise (a missing quality reads as
-// unmeasured), with a note under the table saying what that means; a last row keeps the general caveat.
+// The last cell is the strength of a measured suggestion, "safety net" or "unmeasured" otherwise (a missing quality
+// reads as unmeasured), with a note under the table saying what that means; a last row keeps the general caveat.
 function adviceRows(list: unknown, top: number): ViewCell[][] {
   const ok = Array.isArray(list) ? list.filter(isAdvice) : []
   if (ok.length === 0) return []
@@ -142,12 +142,15 @@ function adviceRows(list: unknown, top: number): ViewCell[][] {
   for (const a of shown) {
     out.push([
       name(a.category), plain(`${a.tier} -> ${a.suggested}`), right(num1(a.runs)), right(money(a.costNow)), right(money(a.costCheaper)),
-      { text: a.quality === 'measured' ? a.strength : 'unmeasured', dim: true },
+      { text: a.quality === 'measured' ? a.strength : a.quality === 'safety-net' ? 'safety net' : 'unmeasured', dim: true },
     ])
   }
   const more = ok.length - shown.length
   if (more > 0) out.push([label(`+${more} more`)])
-  if (shown.some((a) => a.quality !== 'measured')) {
+  if (shown.some((a) => a.quality === 'safety-net')) {
+    out.push([label('safety net: quality not measured yet; lead edits of the cheaper model\'s files would show a drop')])
+  }
+  if (shown.some((a) => a.quality !== 'measured' && a.quality !== 'safety-net')) {
     out.push([label('unmeasured: quality not measured, the mod cannot tell whether the cheaper model would do as well')])
   }
   out.push([label('From runs that did not get stuck, not a comparison with the cheaper model; costs are estimates')])

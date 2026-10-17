@@ -148,9 +148,9 @@ A suggestion only means the current model **did not get stuck** on that category
 
 - enough senior reviews of the category (`reviewRate`, at least 3 reviews, on either model);
 - your `verifyCommand`, for work that writes code;
-- rework by the lead, for work that writes files (features, fixes, tests, refactors, docs, UI, data), tracked on models below the lead's.
+- rework by the lead, for work that writes files (features, fixes, tests, refactors, docs, UI, data), counted on runs that started below the lead's model: on the current model, or on at least 5 runs the cheaper model already made on that category with few failures.
 
-Each suggestion names the signal it relies on (for example "your verifyCommand passed" or "no rework by the lead"). Read-only work (reviews, audits, research) leaves nothing to review, test or rework, and work of unknown kind without reviews has no signal either: those suggestions say plainly that the mod cannot tell whether the cheaper model would find the same issues, are never marked strong and never become the one-line hint in `/escalator`. A cheaper security reviewer that quietly misses problems would look like a success to the mod, so compare a few runs yourself before switching.
+Each suggestion names the signal it relies on (for example "your verifyCommand passed" or "no rework by the lead in 6 sonnet runs"). Work that writes files but has never run on the cheaper model has only a **safety net**: if the cheaper model does worse, edits by the lead within `reworkWindowMinutes` would show it and learning would move the category back up, but nothing has measured it yet. Those suggestions say so, are never marked strong and never become the hint. Read-only work (reviews, audits, research) leaves nothing to review, test or rework, and work of unknown kind without reviews has no signal either: those suggestions say plainly that the mod cannot tell whether the cheaper model would find the same issues, are never marked strong and never become the one-line hint in `/escalator`. A cheaper security reviewer that quietly misses problems would look like a success to the mod, so compare a few runs yourself before switching.
 
 ### The agent map and the stats panel
 
