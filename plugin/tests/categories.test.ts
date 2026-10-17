@@ -1,19 +1,19 @@
 import { expect, mock, test } from 'claude-code/testing'
 import { cacheKey } from '../hooks/classify'
 import { parseConfig } from '../hooks/config'
-import { resetState } from '../hooks/register'
+import { LABEL_WAIT_MS, resetState } from '../hooks/register'
 
 const ON = { modelCategories: true }
 let nextId = 0
 
-type Wired = { release: () => void; calls: { text: string; labels: readonly string[]; model?: string }[]; data: Record<string, unknown>; cats: string[]; logs: string[] }
+type Wired = { clock: ReturnType<typeof mock.clock>; release: () => void; calls: { text: string; labels: readonly string[]; model?: string }[]; data: Record<string, unknown>; cats: string[]; logs: string[] }
 
 // `answer` is what the fake classifier says; a function may throw to simulate a failed request.
 async function wire(on: any, $: any, answer: (text: string) => string | undefined, env: Record<string, string> = {}, seed: Record<string, unknown> = {}, hold = false): Promise<Wired> {
   let release: () => void = () => {}
   const gate = hold ? new Promise<void>((r) => { release = r }) : undefined
   resetState()
-  mock.clock(on, { now: 1_000_000_000_000 })
+  const clock = mock.clock(on, { now: 1_000_000_000_000 })
   mock.env(on, env)
   const data: Record<string, unknown> = { ...seed }
   on('store.get', (_$: unknown, e: any) => ({ value: data[e.key] }))
@@ -33,7 +33,7 @@ async function wire(on: any, $: any, answer: (text: string) => string | undefine
   on('ui.log', (_$: unknown, e: any) => { logs.push(String(e.message ?? e.text ?? '')); return { value: undefined } as never })
   for (const k of ['ui.toast', 'ui.status'] as const) on(k, () => ({ value: undefined }) as never)
   await $.session.start({ cwd: '/work' } as never)
-  return { release, calls, data, cats: [], logs }
+  return { clock, release, calls, data, cats: [], logs }
 }
 
 async function spawn($: any, description: string, prompt = 'please do the thing', extra: Record<string, unknown> = {}) {
@@ -172,6 +172,22 @@ test('a classifier that fails after the spawn leaves the keyword category', { op
   w.release()
   await $.turn.complete({ agentId: r.agentId, answer: 'done' } as never)
   expect(Object.keys(w.data.stats as object)).toEqual(['general-purpose:feature'])
+})
+
+test('a classifier that never answers does not hold the end of the run: the keyword category is recorded after the timeout', { options: ON }, async ($, on) => {
+  const w = await wire(on, $, () => 'docs', {}, {}, true) // the gate is never released before the run ends
+  const r = await spawn($, 'build the widget')
+  let done = false
+  const complete = $.turn.complete({ agentId: r.agentId, answer: 'done' } as never).then(() => { done = true })
+  await w.clock.advance(LABEL_WAIT_MS + 1)
+  await complete
+  expect(done).toBe(true)
+  expect(Object.keys(w.data.stats as object)).toEqual(['general-purpose:feature'])
+  // The label that arrives late only goes to the cache.
+  w.release()
+  await w.clock.advance(10)
+  expect(Object.keys(w.data.stats as object)).toEqual(['general-purpose:feature'])
+  expect(((w.data.categories as { entries: [string, string][] } | undefined)?.entries ?? [])[0]?.[1]).toBe('docs')
 })
 
 test('without the option the prompt still feeds the keyword category', async ($, on) => {

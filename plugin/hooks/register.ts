@@ -562,7 +562,8 @@ export function isFork(e: { fork?: boolean; subagentType?: string }): boolean {
 type CategoryPlan = { category: string; refine?: Promise<string | undefined> }
 
 // Refined labels in flight, by agent id: the outcome of a run waits for its own (see settleLabel).
-const labelPending = new Map<string, Promise<void>>()
+export const LABEL_WAIT_MS = 3000
+const labelPending = new Map<string, { done: Promise<void>; late: boolean }>()
 
 // 'other' from the model does not override a specific keyword category.
 function refined(type: string, label: string | undefined, fallback: string): string {
@@ -624,12 +625,22 @@ function applyLabel(id: string, category: string | undefined): void {
   } catch { /* the keyword category stays */ }
 }
 
-// Waits (once) for the agent's label before its run is recorded, so the run lands in the refined category.
-async function settleLabel(id: string | undefined): Promise<void> {
+// Waits (once) for the agent's label before its run is recorded, so the run lands in the refined category, but never
+// longer than LABEL_WAIT_MS: after that the run is recorded under the keyword category and a label that arrives later
+// only goes to the cache (it is not applied to the agent).
+async function settleLabel($: EngineInterface, id: string | undefined): Promise<void> {
   try {
-    const p = id === undefined ? undefined : labelPending.get(id)
+    const entry = id === undefined ? undefined : labelPending.get(id)
     if (id !== undefined) labelPending.delete(id)
-    if (p) await p
+    if (!entry) return
+    let timer: { cancel: () => void } | undefined
+    await Promise.race([
+      entry.done,
+      new Promise<void>((resolve) => {
+        try { timer = $.clock.after(LABEL_WAIT_MS, () => { entry.late = true; resolve() }) } catch { entry.late = true; resolve() }
+      }),
+    ])
+    timer?.cancel()
   } catch { /* nothing to wait for */ }
 }
 
@@ -918,7 +929,9 @@ export const register: Register = (on, options) => {
       ledger = addAgent(ledger, category)
       if (plan.refine) {
         const id = r.agentId
-        labelPending.set(id, plan.refine.then((c) => applyLabel(id, c)))
+        const entry = { done: Promise.resolve(), late: false }
+        entry.done = plan.refine.then((c) => { if (!entry.late) applyLabel(id, c) })
+        labelPending.set(id, entry)
       }
       const now = watching() || recordingOn() ? await clockNow($) : undefined
       if (watching()) mark(r.agentId, now)
@@ -1120,7 +1133,7 @@ export const register: Register = (on, options) => {
   // 4. End of an agent's run: learn from it and refresh the running report.
   on('turn.complete', async ($, e, next) => {
     const id = e.agentId
-    if (id !== undefined && labelPending.has(id)) await settleLabel(id)
+    if (id !== undefined && labelPending.has(id)) await settleLabel($, id)
     const a = id ? agents.get(id) : undefined
     feed($, { type: 'complete', ...(id ? { agentId: id } : {}) })
     if (id && a && mode !== 'off') {
