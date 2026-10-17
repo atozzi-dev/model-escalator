@@ -80,7 +80,7 @@ Some features are off by default because they change cost or behaviour in ways t
 - `deescalateAfter`: returning to a cheaper model rewrites the prompt cache and may bring the block back.
 - `explore`: deliberately runs some tasks on a model learning had ruled out; some tasks should not run on a weaker model.
 - `reviewRate`: each sampled review is one senior call.
-- `modelCategories`: adds one classification call per uncached spawn, and its cost is not in the report.
+- `modelCategories`: adds one background classification call per uncached spawn (the spawn does not wait for it), and its cost is not in the report.
 - `respectExplicitModel`: the mod cannot tell a model you asked for from one the lead chose, and lead agents often name a cheap model; correcting that choice is what learning is for.
 
 ## Getting work delegated
@@ -183,7 +183,7 @@ Options are set from `/config` or under `pluginConfigs` in your settings (key `m
 | `minReviewScore` | 3 | From 1 to 5: a sampled run reviewed below this score counts as not accepted for learning |
 | `explore` | 0 (off) | From 0 to 1: how often a task starts on a cheaper model that learning had ruled out, to check whether it became good enough. Never below the model the task asked for. `observe` only logs it |
 | `respectExplicitModel` | false | When on and the Agent call names a model, learning and exploration do not change the starting model. The ladder still applies |
-| `modelCategories` | false | Labels each new subagent task with one short call to a small model (Haiku) instead of keywords only. Cached; a failed call falls back to the keywords |
+| `modelCategories` | false | Refines the task category of each new subagent with one short call to a small model (Haiku) on top of the keyword category (agent type, description and the start of the prompt). The agent starts at once on the keyword category; the label is cached and used for recording the run and for later spawns. A failed call keeps the keywords |
 | `reworkWindowMinutes` | 30 | Minutes after a cheaper run during which an edit by the lead to a file that run wrote counts as rework: the run is moved to not accepted once. `0` turns it off. Only edits made through Claude Code are seen |
 | `recordSessions` | 0 (off) | Records what the mod observed in each session and keeps the last N sessions (at most 50), so `/escalator replay` can try other options on them. Works in every mode except `off`, `observe` included. See [Session recordings](#session-recordings) |
 

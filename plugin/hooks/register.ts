@@ -356,6 +356,7 @@ export function resetState(): void {
   reviewRuns.clear()
   writtenFiles.clear()
   reworkRuns.clear()
+  labelPending.clear()
   lastNow = undefined
   lastSaveAt = undefined
   trailing?.cancel()
@@ -556,42 +557,80 @@ export function isFork(e: { fork?: boolean; subagentType?: string }): boolean {
   return e.fork === true || e.subagentType === 'fork'
 }
 
-// The task category of a spawn: the keyword one, or with `modelCategories` the label a small model gave (cached in the
-// store by a key that ignores case and punctuation). Any failure falls back to the keywords; never throws.
-async function taskCategory($: EngineInterface, e: { subagentType?: string; description?: string; prompt?: string }): Promise<string> {
+// The category an agent starts with, and, with `modelCategories` on a cache miss, the label a small model is still
+// working on (a promise that never rejects; it resolves to the refined category, or undefined to keep the keyword one).
+type CategoryPlan = { category: string; refine?: Promise<string | undefined> }
+
+// Refined labels in flight, by agent id: the outcome of a run waits for its own (see settleLabel).
+const labelPending = new Map<string, Promise<void>>()
+
+// 'other' from the model does not override a specific keyword category.
+function refined(type: string, label: string | undefined, fallback: string): string {
+  if (label === 'other' && !fallback.endsWith(':other')) return fallback
+  return combineCategory(type, label, fallback)
+}
+
+// The task category of a spawn. The keyword one (agent type, description and the first words of the prompt) is
+// always available at once. With `modelCategories` a cached label replaces it right away; otherwise the small model is
+// asked in the background (`refine`) and the spawn does not wait for it. Any failure keeps the keywords; never throws.
+async function taskCategory($: EngineInterface, e: { subagentType?: string; description?: string; prompt?: string }): Promise<CategoryPlan> {
   const type = e.subagentType ?? ''
   const description = e.description ?? ''
-  const fallback = categorize(type, description)
-  if (!config.modelCategories || mode === 'off' || mode === 'baseline') return fallback
+  const fallback = categorize(type, description, e.prompt)
+  if (!config.modelCategories || mode === 'off' || mode === 'baseline') return { category: fallback }
   try {
     const key = cacheKey(type, description, e.prompt ?? '')
-    if (key === '') return fallback
+    if (key === '') return { category: fallback }
     const hit = cacheGet(parseCache(await $.store.get(CATEGORIES_KEY)), key)
-    let label = hit.label
-    if (label !== undefined) {
+    if (hit.label !== undefined) {
       await storeQueue(async () => {
         const fresh = cacheGet(parseCache(await $.store.get(CATEGORIES_KEY)), key)
         if (fresh.label !== undefined) await $.store.set(CATEGORIES_KEY, fresh.cache)
       })
-    } else {
-      try { label = await $.model.classify(classifierInput(type, description, e.prompt ?? ''), LABELS, { model: 'haiku' }) } catch { label = undefined }
-      if (typeof label === 'string') {
-        const l = label.trim().toLowerCase()
-        if (!LABELS.includes(l)) label = undefined
-        else {
-          label = l
-          await storeQueue(async () => {
-            await $.store.set(CATEGORIES_KEY, cachePut(parseCache(await $.store.get(CATEGORIES_KEY)), key, l, CATEGORY_CACHE_MAX))
-          })
-        }
-      } else label = undefined
+      return { category: refined(type, hit.label, fallback) }
     }
-    // 'other' from the classifier does not override a specific keyword category.
-    if (label === 'other' && !fallback.endsWith(':other')) return fallback
-    return combineCategory(type, label, fallback)
+    const input = classifierInput(type, description, e.prompt ?? '')
+    const refine = (async (): Promise<string | undefined> => {
+      try {
+        let label: unknown
+        try { label = await $.model.classify(input, LABELS, { model: 'haiku' }) } catch { return undefined }
+        const l = typeof label === 'string' ? label.trim().toLowerCase() : ''
+        if (!LABELS.includes(l)) return undefined
+        await storeQueue(async () => {
+          await $.store.set(CATEGORIES_KEY, cachePut(parseCache(await $.store.get(CATEGORIES_KEY)), key, l, CATEGORY_CACHE_MAX))
+        })
+        return refined(type, l, fallback)
+      } catch {
+        return undefined
+      }
+    })()
+    return { category: fallback, refine }
   } catch {
-    return fallback
+    return { category: fallback }
   }
+}
+
+// Gives a running agent its refined category once the model has answered: the agent, the ledger's agent count and the
+// recording keep the category it started with only where they already copied it (the recording's spawn line).
+function applyLabel(id: string, category: string | undefined): void {
+  try {
+    const a = agents.get(id)
+    if (!a || category === undefined || category === a.category) return
+    const old = a.category
+    agents.set(id, { ...a, category })
+    const row = ledger.byCategory?.[old]
+    if (row && row.agents > 0) ledger = { ...ledger, byCategory: { ...ledger.byCategory, [old]: { ...row, agents: row.agents - 1 } } }
+    ledger = addAgent(ledger, category)
+  } catch { /* the keyword category stays */ }
+}
+
+// Waits (once) for the agent's label before its run is recorded, so the run lands in the refined category.
+async function settleLabel(id: string | undefined): Promise<void> {
+  try {
+    const p = id === undefined ? undefined : labelPending.get(id)
+    if (id !== undefined) labelPending.delete(id)
+    if (p) await p
+  } catch { /* nothing to wait for */ }
 }
 
 export function readMode(v: string | undefined): Mode {
@@ -837,7 +876,8 @@ export const register: Register = (on, options) => {
     // A fork inherits the parent's model and context: it is never rewritten, announced or tracked.
     if (isFork(e)) return next(e)
     let ev = e
-    const category = await taskCategory($, e)
+    const plan = await taskCategory($, e)
+    const category = plan.category
     const asked = tierOf(e.model ?? e.parentModel)
     // `model` is what the Agent call asked for; when it is absent the agent definition or the parent decides, and
     // the types give no way to tell those two apart: only a present `model` counts as an explicit choice.
@@ -876,6 +916,10 @@ export const register: Register = (on, options) => {
       const fresh = newAgent(r.agentId, category, r.model, e.prompt)
       agents.set(r.agentId, name === undefined ? fresh : { ...fresh, name })
       ledger = addAgent(ledger, category)
+      if (plan.refine) {
+        const id = r.agentId
+        labelPending.set(id, plan.refine.then((c) => applyLabel(id, c)))
+      }
       const now = watching() || recordingOn() ? await clockNow($) : undefined
       if (watching()) mark(r.agentId, now)
       try {
@@ -1076,6 +1120,7 @@ export const register: Register = (on, options) => {
   // 4. End of an agent's run: learn from it and refresh the running report.
   on('turn.complete', async ($, e, next) => {
     const id = e.agentId
+    if (id !== undefined && labelPending.has(id)) await settleLabel(id)
     const a = id ? agents.get(id) : undefined
     feed($, { type: 'complete', ...(id ? { agentId: id } : {}) })
     if (id && a && mode !== 'off') {

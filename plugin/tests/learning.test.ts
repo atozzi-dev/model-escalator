@@ -75,7 +75,7 @@ test('a clock that went backwards does not inflate counters', async () => {
 
 test('categorizes by agent type and task keywords', async () => {
   expect(categorize('general-purpose', 'Fix the login bug')).toBe('general-purpose:bugfix')
-  expect(categorize('Explore', 'map the repo')).toBe('Explore:other')
+  expect(categorize('Explore', 'map the repo')).toBe('Explore:explore')
 })
 
 test('keeps the requested tier without enough evidence', async () => {
@@ -129,6 +129,33 @@ test('formatStats shows counters with one decimal when fractional and the age of
   expect(out).toContain('sonnet: 4 runs, 0 escalated')
   expect(out).not.toContain('sonnet: 4 runs, 0 escalated (')
   expect(formatStats({}, t0)).toBe('No stats yet.')
+})
+
+test('formatStats: singular run, and decayed counts rounded to one decimal without a trailing .0', async () => {
+  const st: Stats = { c: { haiku: { runs: 1, escalated: 0, tokens: 0 }, sonnet: { runs: 1.96, escalated: 0.04, tokens: 0 }, opus: { runs: 0.5, escalated: 0, tokens: 0 } } }
+  const out = formatStats(st)
+  expect(out).toContain('c haiku: 1 run, 0 escalated')
+  expect(out).not.toContain('1 runs')
+  expect(out).toContain('c sonnet: 2 runs, 0 escalated')
+  expect(out).toContain('c opus: 0.5 runs')
+})
+
+test('formatStats: most expensive agent type first, then category, then tier', async () => {
+  const priced = (cost: number): Cell => ({ runs: 2, escalated: 0, tokens: 0, cost, costRuns: 2 })
+  const st: Stats = {
+    'cheap:docs': { haiku: priced(0.1) },
+    'big:tests': { sonnet: priced(1), haiku: priced(0.5) },
+    'big:feature': { haiku: priced(3) },
+    'cheap:other': { haiku: priced(0.2) },
+  }
+  const heads = formatStats(st).split('\n').map((l) => l.split(':').slice(0, 2).join(':'))
+  expect(heads).toEqual(['- big:feature haiku', '- big:tests haiku', '- big:tests sonnet', '- cheap:other haiku', '- cheap:docs haiku'])
+})
+
+test('formatStats: without costs the stored order is kept', async () => {
+  const cell: Cell = { runs: 1, escalated: 0, tokens: 0 }
+  const out = formatStats({ 'b:x': { haiku: cell }, 'a:y': { haiku: cell }, 'b:z': { haiku: cell } })
+  expect(out.split('\n').map((l) => l.split(' ')[1])).toEqual(['b:x', 'b:z', 'a:y'])
 })
 
 test('formatStats ages: minutes, hours, days, and no age without a clock', async () => {
