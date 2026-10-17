@@ -123,6 +123,7 @@ function learnedRows(i: StatsInput, top: number): ViewCell[][] {
 }
 
 const TIERS = ['haiku', 'sonnet', 'opus']
+const GUARDS = ['tests', 'reviews', 'rework']
 const isAdvice = (a: unknown): a is Advice => {
   const o = a as Partial<Advice> | null
   return typeof o === 'object' && o !== null && typeof o.category === 'string' && TIERS.includes(o.tier as string) &&
@@ -131,7 +132,7 @@ const isAdvice = (a: unknown): a is Advice => {
 }
 
 // One row per suggestion: what changes, the evidence, and the cost of a run now and (estimated) on the cheaper model.
-// The last cell is the strength of a measured suggestion, "safety net" or "unmeasured" otherwise (a missing quality
+// The last cell is the strength of a measured suggestion, "guarded: <check>" or "unmeasured" otherwise (a missing quality
 // reads as unmeasured), with a note under the table saying what that means; a last row keeps the general caveat.
 function adviceRows(list: unknown, top: number): ViewCell[][] {
   const ok = Array.isArray(list) ? list.filter(isAdvice) : []
@@ -142,15 +143,15 @@ function adviceRows(list: unknown, top: number): ViewCell[][] {
   for (const a of shown) {
     out.push([
       name(a.category), plain(`${a.tier} -> ${a.suggested}`), right(num1(a.runs)), right(money(a.costNow)), right(money(a.costCheaper)),
-      { text: a.quality === 'measured' ? a.strength : a.quality === 'safety-net' ? 'safety net' : 'unmeasured', dim: true },
+      { text: a.quality === 'measured' ? a.strength : a.quality === 'guarded' ? `guarded: ${GUARDS.includes(a.guard as string) ? a.guard : '?'}` : 'unmeasured', dim: true },
     ])
   }
   const more = ok.length - shown.length
   if (more > 0) out.push([label(`+${more} more`)])
-  if (shown.some((a) => a.quality === 'safety-net')) {
-    out.push([label('safety net: quality not measured yet; lead edits of the cheaper model\'s files would show a drop')])
+  if (shown.some((a) => a.quality === 'guarded')) {
+    out.push([label('guarded: quality not measured yet; tests, sampled reviews or lead rework would show a drop after the switch')])
   }
-  if (shown.some((a) => a.quality !== 'measured' && a.quality !== 'safety-net')) {
+  if (shown.some((a) => a.quality !== 'measured' && a.quality !== 'guarded')) {
     out.push([label('unmeasured: quality not measured, the mod cannot tell whether the cheaper model would do as well')])
   }
   out.push([label('From runs that did not get stuck, not a comparison with the cheaper model; costs are estimates')])

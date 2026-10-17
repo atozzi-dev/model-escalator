@@ -27,7 +27,7 @@ Mods are not sandboxed: they run with your permissions. To see what the mod hook
 
 After installing, nothing needs configuring. The mod runs in `active` mode: it tracks every subagent and in-process teammate, leaves your lead model alone, and intervenes only on the agents it sees get stuck. Within a session:
 
-- `/escalator` shows the session cost (the lead and the subagents apart), the estimated savings and the interventions so far; once per session it adds a one-line hint when a task category runs on a stronger model than it seems to need, and the mod has a way to tell if the cheaper one does worse.
+- `/escalator` shows the session cost (the lead and the subagents apart), the estimated savings and the interventions so far; once per session it adds a one-line hint when a task category runs on a stronger model than it seems to need, and the cheaper one has already done that work well under the mod's checks.
 - `/escalator map` opens the live map of agents (picture below).
 - `/escalator panel` opens a panel with the session at a glance and what the mod has learned; `/escalator stats` prints the learned statistics as text.
 
@@ -144,13 +144,13 @@ These are the subcommands listed by `/escalator help`:
 
 Learning never starts an agent below the model its Agent call asked for, so a category that always asks for Opus keeps paying Opus prices. `/escalator stats` and the stats panel list the categories that look like they could run one tier lower; you decide, by asking for the cheaper model in the Agent call or the agent's definition.
 
-A suggestion only means the current model **did not get stuck** on that category (enough runs, almost no escalations, failed checks or rework). It is not a comparison with the cheaper model, and the savings are estimates from list prices. Whether the cheaper model would do the work *as well* is a separate question, and the mod answers it only where it has a quality signal:
+A suggestion only means the current model **did not get stuck** on that category (enough runs, almost no escalations, failed checks or rework). It is not a comparison with the cheaper model, and the savings are estimates from list prices. Whether the cheaper model would do the work *as well* is a separate question. Checks passed by the current model (its reviews, its `verifyCommand` runs, no rework of its files) describe the current model only: they appear as context, never as evidence. Each suggestion falls in one of three kinds:
 
-- enough senior reviews of the category (`reviewRate`, at least 3 reviews, on either model);
-- your `verifyCommand`, for work that writes code;
-- rework by the lead, for work that writes files (features, fixes, tests, refactors, docs, UI, data), counted on runs that started below the lead's model: on the current model, or on at least 5 runs the cheaper model already made on that category with few failures.
+- **Measured**: the cheaper model already ran this category at least 5 times (decayed count) with few failures, under at least one active check: 3 or more senior reviews of its runs (`reviewRate`), your `verifyCommand` for work that writes code, or rework tracking (`reworkWindowMinutes`) for work that writes files (features, fixes, tests, refactors, docs, UI, data). The suggestion names that evidence, for example "verifyCommand passed on 6 sonnet runs", "reviews of sonnet runs average 4.3" or "no rework by the lead in 6 sonnet runs". Only these are marked strong, and only these can become the one-line hint in `/escalator`.
+- **Guarded**: no such evidence yet, but a check would catch a drop after the switch: your `verifyCommand` for code (the strongest), sampled senior reviews when `reviewRate` is on, or the lead's edits of the cheaper model's files. The suggestion says quality is not measured yet and which check would notice; learning then moves the category back up.
+- **Unmeasured**: read-only work (reviews, audits, research) leaves nothing to review, test or rework, and work of unknown kind has no check unless `reviewRate` is on. The suggestion says plainly that the mod cannot tell whether the cheaper model would find the same issues.
 
-Each suggestion names the signal it relies on (for example "your verifyCommand passed" or "no rework by the lead in 6 sonnet runs"). Work that writes files but has never run on the cheaper model has only a **safety net**: if the cheaper model does worse, edits by the lead within `reworkWindowMinutes` would show it and learning would move the category back up, but nothing has measured it yet. Those suggestions say so, are never marked strong and never become the hint. Read-only work (reviews, audits, research) leaves nothing to review, test or rework, and work of unknown kind without reviews has no signal either: those suggestions say plainly that the mod cannot tell whether the cheaper model would find the same issues, are never marked strong and never become the one-line hint in `/escalator`. A cheaper security reviewer that quietly misses problems would look like a success to the mod, so compare a few runs yourself before switching.
+Reviews and rework are only tracked on runs that start below the lead's model. A cheaper security reviewer that quietly misses problems would look like a success to the mod, so for read-only work compare a few runs yourself before switching.
 
 ### The agent map and the stats panel
 

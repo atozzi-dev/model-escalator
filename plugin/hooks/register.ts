@@ -221,7 +221,7 @@ async function currentAdvice($: EngineInterface): Promise<Advice[]> {
     return downshiftAdvice(stats, {
       now: await clockNow($), halfLifeMs: halfLifeMs(), minReviewScore: config.minReviewScore, prices: config.prices,
       learnByCost: config.learnByCost, projects, projectKey: projectId,
-      verify: config.verifyCommand.trim() !== '', reworkWindowMinutes: config.reworkWindowMinutes, baseline,
+      verify: config.verifyCommand.trim() !== '', reviewRate: config.reviewRate, reworkWindowMinutes: config.reworkWindowMinutes, baseline,
     })
   } catch {
     return []

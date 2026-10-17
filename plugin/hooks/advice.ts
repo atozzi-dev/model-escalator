@@ -27,14 +27,19 @@
 //   become hints; `moderate` ones stay in `/escalator stats` and the panel.
 // - Modes. Show nothing in `off`; in `baseline` every agent runs on the reference model on purpose, so no hint.
 //
-// Quality. "Never got stuck" says the tier finishes the work, not that a cheaper tier would do it as well. A
-// suggestion is `measured` only when something would show a drop in the quality of the work (`qualityFor`): enough
-// senior reviews of this category (on the current or the cheaper tier), a `verifyCommand` for work that writes code,
-// or lead rework for work that writes files, on a tier below the lead's model where rework is tracked. Read-only work
-// (`review`, `explore`) has none of these: no diff to review, nothing to test or rework. Work that writes files on a
-// tier at the lead's model, with too few runs on the cheaper tier, is a `safety-net`: rework would catch a drop after
-// the switch, but nothing measured it yet. A `safety-net` or `unmeasured` suggestion is never strong and never the
-// hint; it stays in `/escalator stats` and the panel, worded so it does not vouch for the cheaper model.
+// Quality. "Never got stuck" says the current tier finishes the work, not that a cheaper tier would do it as well,
+// and checks passed on the current tier only describe the current tier. So (`qualityFor`):
+// - `measured`: evidence from the cheaper tier's own runs of this category: at least `LEARN.minRuns` of them within
+//   `maxNotAcceptedRate`, with at least one active check on them: 3 or more senior reviews (their mean below the bar
+//   already dropped the suggestion), a `verifyCommand` for code, lead rework tracking for written files. Only measured
+//   suggestions are strong and can become the hint.
+// - `guarded`: no such evidence yet, but a check would catch a drop after the switch: the `verifyCommand` for code
+//   (`tests`), sampled reviews (`reviews`), lead rework for written files (`rework`).
+// - `unmeasured`: read-only work (`review`, `explore`: no diff to review, nothing to test or rework), or work of
+//   unknown kind or with no check at all.
+// Reviews and rework are tracked only on runs that start below the lead's model. Reviews on the current tier appear
+// in the text as context only. Guarded and unmeasured suggestions stay in `/escalator stats` and the panel, worded
+// so they do not vouch for the cheaper model.
 
 import { DEFAULT_PRICES, type Price } from './config'
 import { LADDER, type Tier } from './detector'
@@ -48,14 +53,12 @@ import { HALF_LIFE_MS, LEARN, recommend, scopedStats, type Cell, type Projects, 
 // - `maxEscalationRate` 5%: "never gets stuck", with room for one escalation in 20 runs.
 // - `maxNotAcceptedRate` 10%: escalations, failed verifications, low reviews and rework together, one in 10 at most.
 //   A category that already needs fixing now and then on the stronger tier is a poor candidate for a weaker one.
-// - `strongRuns` 16: twice `minRuns`, with a not-accepted rate within `maxEscalationRate`. Only strong suggestions
-//   become the session hint.
 // - `cheaperMinRuns` 2 and `cheaperMaxNotAcceptedRate` 25%: the cheaper tier's own cell blocks the suggestion when
 //   it already failed this category in more than a quarter of at least 2 runs, or its reviews average below the bar.
 //   One failed run alone is noise; 2 of 3, or 1 of 2, is a warning. It is stricter than learning (40% over 5 runs),
 //   which also blocks: the suggestion is dropped whenever learning would raise the cheaper tier back.
-//   A cheaper tier with at least `LEARN.minRuns` runs within `maxNotAcceptedRate` has proven itself: the suggestion
-//   is strong whatever the run count on the current tier.
+//   A cheaper tier with at least `LEARN.minRuns` runs within `maxNotAcceptedRate`, under an active check, has proven
+//   itself: the only case of a measured, strong suggestion, whatever the run count on the current tier.
 // - `maxLines` suggestions are listed, `repeatAfterMs` (7 days) between two hints for the same category and tier,
 //   `maxHinted` entries kept in the hint table.
 // - `minReviews` 3: reviews (decayed) a cell needs before their mean counts as a quality signal. One or two scores
@@ -65,7 +68,6 @@ export const ADVICE = {
   minRuns: 8,
   maxEscalationRate: 0.05,
   maxNotAcceptedRate: 0.1,
-  strongRuns: 16,
   cheaperMinRuns: 2,
   cheaperMaxNotAcceptedRate: 0.25,
   maxLines: 5,
@@ -74,14 +76,14 @@ export const ADVICE = {
 } as const
 
 export type Strength = 'strong' | 'moderate'
-// `safety-net`: nothing measures the cheaper tier's work yet, but lead rework would catch a drop once it runs there.
-export type Quality = 'measured' | 'safety-net' | 'unmeasured'
-// The signal that measures a suggestion: reviews of the current tier's runs, of the cheaper tier's runs, the
-// verifyCommand, lead rework counted on the current tier, or on enough runs of the cheaper tier.
-export type QualitySignal = 'reviews' | 'cheaper-reviews' | 'verify' | 'rework' | 'rework-cheaper'
+export type Quality = 'measured' | 'guarded' | 'unmeasured'
+// The check whose results on the cheaper tier's runs measure a suggestion.
+export type QualitySignal = 'reviews' | 'verify' | 'rework'
+// The check that would catch a drop after the switch, strongest first: the verifyCommand, sampled reviews, rework.
+export type Guard = 'tests' | 'reviews' | 'rework'
 
 // Category labels (`classify.ts` LABELS) by what the work leaves behind. Any other label, `other` included, is work
-// of unknown kind: only reviews measure it.
+// of unknown kind: only reviews check it.
 export const WRITE_LABELS: readonly string[] = ['feature', 'bugfix', 'tests', 'refactor', 'docs', 'ui', 'data']
 export const CODE_LABELS: readonly string[] = ['feature', 'bugfix', 'tests', 'refactor', 'ui', 'data']
 export const READ_ONLY_LABELS: readonly string[] = ['review', 'explore']
@@ -101,7 +103,7 @@ export type Advice = {
   runs: number
   escalationRate: number
   notAcceptedRate: number
-  reviewMean?: number        // only when the cell has reviews
+  reviewMean?: number        // reviews of the current tier, only when it has some: context, never evidence
   reviews?: number
   cheaperRuns?: number       // runs already recorded on the suggested tier, when any
   priceRatio: number         // price of the suggested tier over the current one (input and output)
@@ -110,8 +112,9 @@ export type Advice = {
   strength: Strength         // 'strong' only when measured
   quality: Quality
   signal?: QualitySignal     // only when measured
-  qualityNote: string        // measured: the signal ("reviews average 4.6"); safety-net: what would catch a drop;
-                             // unmeasured: why nothing measures it
+  guard?: Guard              // only when guarded
+  qualityNote: string        // measured: the evidence ("reviews of sonnet runs average 4.3"); guarded: what would
+                             // catch a drop; unmeasured: why nothing checks it
 }
 
 export type AdviceOptions = {
@@ -123,7 +126,8 @@ export type AdviceOptions = {
   projects?: Projects
   projectKey?: string
   verify?: boolean             // a verifyCommand is configured
-  reworkWindowMinutes?: number // 0 turns rework tracking off; default on
+  reviewRate?: number          // share of cheaper runs reviewed; 0 (default) = off
+  reworkWindowMinutes?: number // 0 turns rework tracking off; default 30
   baseline?: Tier              // the lead's model: rework and reviews are tracked only on tiers below it; default opus
 }
 
@@ -201,16 +205,17 @@ export function priceRatio(from: Tier, to: Tier, prices: Record<Tier, Price> = D
 }
 
 const STRENGTH_ORDER: Record<Strength, number> = { strong: 0, moderate: 1 }
-const QUALITY_ORDER: Record<Quality, number> = { measured: 0, 'safety-net': 1, unmeasured: 2 }
+const QUALITY_ORDER: Record<Quality, number> = { measured: 0, guarded: 1, unmeasured: 2 }
 const saving = (a: Advice): number => (a.costNow !== undefined && a.costCheaper !== undefined ? (a.costNow - a.costCheaper) * a.runs : 0)
 
-// The suggestions, strong first, then measured before unmeasured, then by estimated saving (cost difference per run
+// The suggestions, strong first, then measured, guarded, unmeasured, then by estimated saving (cost difference per run
 // times runs), then by runs. At most one per category: the qualifying tier with the most runs. Never throws;
 // malformed input gives [].
 export function downshiftAdvice(stats: unknown, opts: AdviceOptions = {}): Advice[] {
   try {
     const { now, halfLifeMs = HALF_LIFE_MS, minReviewScore = LEARN.minReviewScore, prices = DEFAULT_PRICES, learnByCost = true } = opts
     const verify = opts.verify === true
+    const reviewRate = isNum(opts.reviewRate) && opts.reviewRate > 0 ? opts.reviewRate : 0
     const reworkMinutes = isNum(opts.reworkWindowMinutes) ? Math.max(0, opts.reworkWindowMinutes) : 30
     const rework = reworkMinutes > 0
     const baseline: Tier = isTier(opts.baseline) ? opts.baseline : 'opus'
@@ -226,7 +231,7 @@ export function downshiftAdvice(stats: unknown, opts: AdviceOptions = {}): Advic
       const row = view[category] ?? {}
       let best: Advice | undefined
       for (const tier of LADDER) {
-        const a = adviseTier(view, row, category, tier, { now, halfLifeMs, minReviewScore, prices, learnByCost, verify, rework, reworkMinutes, baseline })
+        const a = adviseTier(view, row, category, tier, { now, halfLifeMs, minReviewScore, prices, learnByCost, verify, reviewRate, rework, reworkMinutes, baseline })
         if (a === undefined) continue
         a.scope = key !== undefined && row[tier] === projects[key]?.stats[category]?.[tier] ? 'project' : 'global'
         if (best === undefined || a.runs >= best.runs) best = a
@@ -243,55 +248,56 @@ export function downshiftAdvice(stats: unknown, opts: AdviceOptions = {}): Advic
 
 type Ctx = {
   now?: number; halfLifeMs: number; minReviewScore: number; prices: Record<Tier, Price>; learnByCost: boolean
-  verify: boolean; rework: boolean; reworkMinutes: number; baseline: Tier
+  verify: boolean; reviewRate: number; rework: boolean; reworkMinutes: number; baseline: Tier
 }
 
 const below = (t: Tier, baseline: Tier): boolean => LADDER.indexOf(t) < LADDER.indexOf(baseline)
 const enough = (x: Seen | undefined): x is Seen & { reviews: number; reviewMean: number } =>
   x !== undefined && x.reviews !== undefined && x.reviewMean !== undefined && x.reviews >= ADVICE.minReviews - 1e-9
 
-// What would show a drop in quality on this category, strongest first: reviews of either tier (the review gates of
-// `adviseTier` already dropped the suggestion when their mean is below the bar), the verifyCommand for code, lead
-// rework for written files. Rework (and reviews) are tracked only on runs that start below the lead's model, so for a
-// tier at the lead's model rework is evidence only from enough runs already made on the cheaper tier; without them it
-// is a `safety-net`: it would catch a drop after the switch, but proves nothing before it.
-function qualityFor(category: string, tier: Tier, suggested: Tier, s: Seen, c: Seen | undefined, x: Ctx):
-  { quality: Quality; signal?: QualitySignal; qualityNote: string } {
+type QualityPart = { quality: Quality; signal?: QualitySignal; guard?: Guard; qualityNote: string }
+
+// The quality of the cheaper tier on this category (see "Quality" at the top). `s` is the current tier, read only to
+// keep it out of the evidence; `c` the cheaper tier. Checks per kind of work: reviews for any work that is not
+// read-only, the verifyCommand for code, rework for written files; reviews and rework only when the cheaper tier is
+// below the lead's model, the only runs they are tracked on.
+function qualityFor(category: string, suggested: Tier, c: Seen | undefined, x: Ctx): QualityPart {
   const label = categoryLabel(category)
   const n = (v: number): number => Math.round(v)
   if (READ_ONLY_LABELS.includes(label)) {
     return { quality: 'unmeasured', qualityNote: 'read-only work: no files to review, test or rework' }
   }
-  if (enough(s)) return { quality: 'measured', signal: 'reviews', qualityNote: `reviews average ${s.reviewMean.toFixed(1)}` }
-  if (enough(c)) return { quality: 'measured', signal: 'cheaper-reviews', qualityNote: `reviews of ${suggested} runs average ${c.reviewMean.toFixed(1)}` }
-  const reviewed = Math.max(s.reviews ?? 0, c?.reviews ?? 0)
-  const few = reviewed > 0 ? `only ${n(reviewed)} of the ${ADVICE.minReviews} reviews needed` : ''
-  if (!WRITE_LABELS.includes(label)) {
-    return { quality: 'unmeasured', qualityNote: few || 'no reviews, and the work is not known to change files' }
-  }
-  if (x.verify && CODE_LABELS.includes(label)) {
-    const failed = n(s.failedVerify)
-    const runs = n(s.runs)
-    return { quality: 'measured', signal: 'verify',
-      qualityNote: failed === 0 ? 'your verifyCommand passed' : `your verifyCommand passed in ${runs - failed} of ${runs} runs` }
-  }
-  if (x.rework && below(tier, x.baseline)) {
-    const k = n(s.reworked)
-    return { quality: 'measured', signal: 'rework', qualityNote: k === 0 ? 'no rework by the lead' : `the lead reworked ${k} of ${n(s.runs)} runs` }
-  }
-  if (x.rework && below(suggested, x.baseline)) {
-    // Rework counts as evidence only once the cheaper tier has run this category often enough, and well: before
-    // that it is a safety net (a drop would be caught after the switch), not a measure.
-    if (c !== undefined && c.runs >= LEARN.minRuns - 1e-9 && rate(c.notAccepted, c.runs) <= ADVICE.maxNotAcceptedRate) {
-      const k = n(c.reworked)
-      return { quality: 'measured', signal: 'rework-cheaper',
-        qualityNote: k === 0 ? `no rework by the lead in ${n(c.runs)} ${suggested} runs` : `the lead reworked ${k} of ${n(c.runs)} ${suggested} runs` }
+  const tracked = below(suggested, x.baseline)
+  const tests = x.verify && CODE_LABELS.includes(label)
+  const rework = x.rework && tracked && WRITE_LABELS.includes(label)
+  const sampled = x.reviewRate > 0 && tracked
+  // Evidence: enough clean runs of the cheaper tier, under an active check.
+  if (c !== undefined && c.runs >= LEARN.minRuns - 1e-9 && rate(c.notAccepted, c.runs) <= ADVICE.maxNotAcceptedRate) {
+    const runs = n(c.runs)
+    if (enough(c)) return { quality: 'measured', signal: 'reviews', qualityNote: `reviews of ${suggested} runs average ${c.reviewMean.toFixed(1)}` }
+    if (tests) {
+      const failed = n(c.failedVerify)
+      return { quality: 'measured', signal: 'verify', qualityNote: failed === 0
+        ? `verifyCommand passed on ${runs} ${suggested} runs` : `verifyCommand passed on ${runs - failed} of ${runs} ${suggested} runs` }
     }
-    return { quality: 'safety-net', qualityNote: `if ${suggested} does worse, edits by the lead within ${n(x.reworkMinutes)} ` +
-      'minutes would show it and learning would move this category back up' }
+    if (rework) {
+      const k = n(c.reworked)
+      return { quality: 'measured', signal: 'rework', qualityNote: k === 0
+        ? `no rework by the lead in ${runs} ${suggested} runs` : `the lead reworked ${k} of ${runs} ${suggested} runs` }
+    }
   }
-  const why = !x.rework ? 'rework tracking is off' : 'rework is tracked only below the lead\'s model'
-  return { quality: 'unmeasured', qualityNote: `${few || 'no reviews'}, no verifyCommand for this work, and ${why}` }
+  // No evidence: a check that would catch a drop after the switch.
+  const back = 'and learning would move this category back up'
+  if (tests) return { quality: 'guarded', guard: 'tests', qualityNote: `if ${suggested} does worse, your verifyCommand would catch the failures ${back}` }
+  if (sampled) return { quality: 'guarded', guard: 'reviews', qualityNote: `if ${suggested} does worse, sampled senior reviews (reviewRate) would show it ${back}` }
+  if (rework) {
+    return { quality: 'guarded', guard: 'rework',
+      qualityNote: `if ${suggested} does worse, edits by the lead within ${n(x.reworkMinutes)} minutes would show it ${back}` }
+  }
+  if (!WRITE_LABELS.includes(label)) return { quality: 'unmeasured', qualityNote: 'no reviews, and the work is not known to change files' }
+  return { quality: 'unmeasured', qualityNote: tracked
+    ? 'no verifyCommand or reviewRate, and rework tracking is off'
+    : 'no verifyCommand, and reviews and rework are tracked only on models below the lead\'s' }
 }
 
 function adviseTier(view: Stats, row: Partial<Record<Tier, Cell>>, category: string, tier: Tier, x: Ctx): Advice | undefined {
@@ -314,10 +320,9 @@ function adviseTier(view: Stats, row: Partial<Record<Tier, Cell>>, category: str
     if (c.reviewMean !== undefined && c.reviewMean < x.minReviewScore) return undefined
   }
   if (recommend(view, category, suggested, x.now, x.halfLifeMs, x.learnByCost) !== suggested) return undefined
-  const proven = c !== undefined && c.runs >= LEARN.minRuns && rate(c.notAccepted, c.runs) <= ADVICE.maxNotAcceptedRate
-  const q = qualityFor(category, tier, suggested, s, c, x)
-  const strong = q.quality === 'measured' &&
-    (proven || (s.runs >= ADVICE.strongRuns && notAcceptedRate <= ADVICE.maxEscalationRate))
+  // Measured means the cheaper tier proved itself: the only strong suggestion.
+  const q = qualityFor(category, suggested, c, x)
+  const strong = q.quality === 'measured'
   return {
     category, tier, suggested, scope: 'global', runs: s.runs, escalationRate, notAcceptedRate,
     ...(s.reviewMean !== undefined ? { reviewMean: s.reviewMean, reviews: s.reviews } : {}),
@@ -367,7 +372,8 @@ function line(a: Advice): string {
     `${Math.round(a.runs)} runs`,
     k === 0 ? 'never stuck' : `stuck ${pct(a.escalationRate)}`,
     `${pct(a.notAcceptedRate)} not accepted`,
-    ...(nonNeg(a.reviewMean) && a.signal !== 'reviews' ? [`reviews ${a.reviewMean.toFixed(1)}/5`] : []),
+    // Reviews of the current tier are context, never the evidence.
+    ...(nonNeg(a.reviewMean) ? [`${a.tier} runs: reviews average ${a.reviewMean.toFixed(1)}`] : []),
     ...(nonNeg(a.cheaperRuns) && a.cheaperRuns >= 1 ? [`${Math.round(a.cheaperRuns)} runs on ${a.suggested} already`] : []),
     ...(note(a) !== '' ? [`quality: ${note(a)}`] : []),
     hasCost(a) ? `about ${usd(a.costCheaper!)} instead of ${usd(a.costNow!)} per run` : `${a.suggested} costs about ${pct(a.priceRatio)} per token`,
@@ -396,14 +402,17 @@ function unmeasuredLine(a: Advice, reviewRate: number): string {
     `but the mod cannot tell whether it would ${goal}${why}. ${how}`
 }
 
-// A safety-net suggestion: "coder:feature never got stuck in 18 runs on opus. On sonnet it would cost about $0.47
+// A guarded suggestion: "coder:feature never got stuck in 18 runs on opus. On sonnet it would cost about $0.47
 // instead of $0.94 per run. Quality is not measured yet (no sonnet runs to compare): if sonnet does worse, edits by the
 // lead within 30 minutes would show it and learning would move this category back up."
-function safetyNetLine(a: Advice): string {
+function guardedLine(a: Advice): string {
   const cost = costText(a)
   const why = note(a) !== '' ? `: ${note(a)}` : ''
+  const k = nonNeg(a.cheaperRuns) ? Math.round(a.cheaperRuns) : 0
+  const runs = k === 0 ? `no ${a.suggested} runs to compare` : k < LEARN.minRuns ? `only ${k} ${a.suggested} runs so far`
+    : `too few accepted ${a.suggested} runs`
   return `${a.category} ${stuckText(a, Math.round(a.runs))}. ${cost.charAt(0).toUpperCase()}${cost.slice(1)}. ` +
-    `Quality is not measured yet (no ${a.suggested} runs to compare)${why}.`
+    `Quality is not measured yet (${runs})${why}.`
 }
 
 export type FormatOptions = { respectExplicitModel?: boolean; reviewRate?: number }
@@ -417,7 +426,7 @@ export function formatAdvice(list: Advice[], opts: FormatOptions = {}): { text: 
     if (ok.length === 0) return { text: '', lines: [], hint: '' }
     const reviewRate = isNum(opts.reviewRate) ? opts.reviewRate : 0
     const lines = ok.slice(0, ADVICE.maxLines).map((a) =>
-      (measured(a) ? line(a) : a.quality === 'safety-net' ? safetyNetLine(a) : unmeasuredLine(a, reviewRate)))
+      (measured(a) ? line(a) : a.quality === 'guarded' ? guardedLine(a) : unmeasuredLine(a, reviewRate)))
     const more = ok.length - lines.length
     const strong = ok.find((a) => a.strength === 'strong' && measured(a))
     const how = opts.respectExplicitModel === true
@@ -428,7 +437,8 @@ export function formatAdvice(list: Advice[], opts: FormatOptions = {}): { text: 
       ...lines.map((l) => `- ${l}`),
       ...(more > 0 ? [`- and ${more} more`] : []),
       'These are based on runs that did not get stuck, not on a comparison with the cheaper model, and the savings are ' +
-        'estimates. "quality" names what would show the cheaper model doing worse work; without it a suggestion is never strong.',
+        'estimates. Only checks on the cheaper model\'s own runs ("quality: ...") count as measured quality; checks on the ' +
+        'current model are context, and only measured suggestions are strong.',
       'The mod never starts an agent below the model it asked for: ask for the cheaper model in the Agent call or in the agent\'s definition. ' + how,
     ].join('\n')
     return { text, lines, hint: strong !== undefined ? hintLine(strong) : '' }

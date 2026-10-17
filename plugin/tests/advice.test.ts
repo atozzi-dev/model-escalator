@@ -34,7 +34,9 @@ test('a category that never got stuck in enough runs on opus gets a sonnet sugge
   expect(close(a.costNow, 0.94)).toBe(true)
   expect(close(a.costCheaper, 0.47)).toBe(true)
   expect(close(a.priceRatio, 0.5)).toBe(true)
-  expect(a.strength).toBe('strong')
+  // no sonnet run yet: guarded by the verifyCommand, not measured, so not strong
+  expect(a.quality).toBe('guarded')
+  expect(a.strength).toBe('moderate')
 })
 
 test('fewer than the minimum runs gives no advice', async () => {
@@ -43,9 +45,9 @@ test('fewer than the minimum runs gives no advice', async () => {
   expect(downshiftAdvice(runs({}, 'c', 'opus', ADVICE.minRuns), { now: T0 }).length).toBe(1)
 })
 
-test('the minimum run count gives a moderate suggestion, twice as many a strong one', async () => {
+test('many runs on the current tier alone never make a suggestion strong', async () => {
   expect(downshiftAdvice(runs({}, 'c:feature', 'opus', 12), { now: T0, verify: true })[0]!.strength).toBe('moderate')
-  expect(downshiftAdvice(runs({}, 'c:feature', 'opus', ADVICE.strongRuns), { now: T0, verify: true })[0]!.strength).toBe('strong')
+  expect(downshiftAdvice(runs({}, 'c:feature', 'opus', 60), { now: T0, verify: true })[0]!.strength).toBe('moderate')
 })
 
 test('an escalation rate above the bar gives no advice', async () => {
@@ -225,6 +227,9 @@ test('strong suggestions come first, then the largest estimated saving', async (
   let st = runs({}, 'small:feature', 'opus', 20, 0, 0.1)
   st = runs(st, 'big:feature', 'opus', 20, 0, 1)
   st = runs(st, 'weak:feature', 'opus', 10, 0, 5)
+  // small and big already ran cleanly on sonnet: measured, strong; weak did not
+  st = runs(st, 'small:feature', 'sonnet', 5)
+  st = runs(st, 'big:feature', 'sonnet', 5)
   const list = downshiftAdvice(st, { now: T0, verify: true })
   expect(list.map((a) => a.category).join(',')).toBe('big:feature,small:feature,weak:feature')
 })
@@ -266,13 +271,13 @@ test('a malformed cheaper cell does not block and does not throw', async () => {
 const sample = (over: Partial<Advice> = {}): Advice => ({
   category: 'security-reviewer:other', tier: 'opus', suggested: 'sonnet', scope: 'global', runs: 18,
   escalationRate: 0, notAcceptedRate: 0, priceRatio: 0.5, costNow: 0.94, costCheaper: 0.47, strength: 'strong',
-  quality: 'measured', signal: 'reviews', qualityNote: 'reviews average 4.6', ...over,
+  quality: 'measured', signal: 'reviews', qualityNote: 'reviews of sonnet runs average 4.6', ...over,
 })
 
 test('the hint reads as one short sentence with the estimate', async () => {
   expect(hintLine(sample())).toBe(
-    'security-reviewer:other never got stuck in 18 runs on opus (reviews average 4.6): on sonnet it would cost about ' +
-    '$0.47 instead of $0.94 per run. Ask for sonnet in the Agent call, or see /escalator stats.')
+    'security-reviewer:other never got stuck in 18 runs on opus (reviews of sonnet runs average 4.6): on sonnet it would ' +
+    'cost about $0.47 instead of $0.94 per run. Ask for sonnet in the Agent call, or see /escalator stats.')
 })
 
 test('the hint without a cost uses the price ratio', async () => {
@@ -288,11 +293,11 @@ test('the hint says how often it got stuck when it did', async () => {
 
 test('formatAdvice lists suggestions, says the figures are estimates and gives a hint', async () => {
   const out = formatAdvice([sample(), sample({ category: 'infra-reviewer:other', runs: 12, strength: 'moderate', reviewMean: 4.25, reviews: 2,
-    signal: 'cheaper-reviews', qualityNote: 'reviews of sonnet runs average 4.4' })])
+    signal: 'rework', qualityNote: 'no rework by the lead in 6 sonnet runs' })])
   expect(out.lines.length).toBe(2)
   expect(out.lines[0]).toContain('security-reviewer:other: opus -> sonnet')
   expect(out.lines[0]).toContain('about $0.47 instead of $0.94 per run')
-  expect(out.lines[1]).toContain('reviews 4.3/5')
+  expect(out.lines[1]).toContain('opus runs: reviews average 4.3')
   expect(out.lines[1]).toContain('moderate')
   expect(out.text).toContain('estimate')
   expect(out.text).toContain(out.lines[0]!)

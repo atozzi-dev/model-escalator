@@ -119,13 +119,13 @@ test('a hinted suggestion is not hinted again in a later session within a week',
   expect(await run($, '')).not.toContain('never got stuck in 18 runs')
 })
 
-test('a moderate suggestion is no hint', { options: { verifyCommand: 'npm test' } }, async ($, on) => {
+test('a guarded suggestion is no hint', { options: { verifyCommand: 'npm test' } }, async ($, on) => {
   wire(on)
   await $.session.start({ cwd: '/work' } as never)
   data.stats = { 'c:feature': { opus: { runs: 10, escalated: 0, tokens: 1 } } }
   const text = await run($, '')
   expect(text).not.toContain('never got stuck')
-  expect(await run($, 'stats')).toContain('c:feature: opus -> sonnet')
+  expect(await run($, 'stats')).toContain('your verifyCommand would catch the failures')
 })
 
 // --- quality ---
@@ -152,7 +152,7 @@ test('the stats name the signal that measures a suggestion', async ($, on) => {
   expect(await run($, '')).toContain('(no rework by the lead in 5 sonnet runs)')
 })
 
-test('code work never run on the cheaper model has only a safety net and no hint', async ($, on) => {
+test('code work never run on the cheaper model is only guarded and no hint', async ($, on) => {
   wire(on)
   await $.session.start({ cwd: '/work' } as never)
   data.stats = { 'coder:feature': { opus: OPUS } }
@@ -162,12 +162,12 @@ test('code work never run on the cheaper model has only a safety net and no hint
   expect(stats).toContain('edits by the lead within 30 minutes would show it')
 })
 
-test('the verifyCommand option measures code work', { options: { verifyCommand: 'npm test', reworkWindowMinutes: 0 } }, async ($, on) => {
+test('the verifyCommand option measures code work on the cheaper model runs', { options: { verifyCommand: 'npm test', reworkWindowMinutes: 0 } }, async ($, on) => {
   wire(on)
   await $.session.start({ cwd: '/work' } as never)
   data.stats = EASY
-  expect(await run($, 'stats')).toContain('quality: your verifyCommand passed')
-  expect(await run($, '')).toContain('(your verifyCommand passed)')
+  expect(await run($, 'stats')).toContain('quality: verifyCommand passed on 5 sonnet runs')
+  expect(await run($, '')).toContain('(verifyCommand passed on 5 sonnet runs)')
 })
 
 test('code work with rework off and no verifyCommand is unmeasured and no hint', { options: { reworkWindowMinutes: 0 } }, async ($, on) => {
@@ -178,11 +178,14 @@ test('code work with rework off and no verifyCommand is unmeasured and no hint',
   expect(await run($, 'stats')).toContain('Set verifyCommand or turn on reviewRate')
 })
 
-test('reviewRate on changes the advice for other work', { options: { reviewRate: 0.5 } }, async ($, on) => {
+test('reviewRate on guards other work with sampled reviews', { options: { reviewRate: 0.5 } }, async ($, on) => {
   wire(on)
   await $.session.start({ cwd: '/work' } as never)
   data.stats = { 'gp:other': { opus: OPUS } }
-  expect(await run($, 'stats')).toContain('reviewRate is on')
+  const stats = await run($, 'stats')
+  expect(stats).toContain('Quality is not measured yet')
+  expect(stats).toContain('sampled senior reviews (reviewRate) would show it')
+  expect(await run($, '')).not.toContain('never got stuck')
 })
 
 test('the view marks unmeasured advice and says what it means', () => {
@@ -191,14 +194,14 @@ test('the view marks unmeasured advice and says what it means', () => {
   expect(rows.find((r) => r.startsWith('reviewer:review'))!).toContain('unmeasured')
   expect(rows.join('\n')).toContain('quality not measured')
   expect(rows.join('\n')).toContain('not a comparison with the cheaper model')
-  expect(rows.join('\n')).not.toContain('safety net')
+  expect(rows.join('\n')).not.toContain('guarded')
 })
 
-test('the view marks safety-net advice and says what it means', () => {
-  const v = buildStatsView(input({ advice: [advice({ category: 'w:feature', strength: 'moderate', quality: 'safety-net', signal: undefined, qualityNote: 'x' })] }))
+test('the view marks guarded advice with its guard and says what it means', () => {
+  const v = buildStatsView(input({ advice: [advice({ category: 'w:feature', strength: 'moderate', quality: 'guarded', guard: 'tests', signal: undefined, qualityNote: 'x' })] }))
   const rows = v.sections.find((s) => s.id === 'advice')!.rows.map((r) => r.map((c) => c.text).join(' '))
-  expect(rows.find((r) => r.startsWith('w:feature'))!).toContain('safety net')
-  expect(rows.join('\n')).toContain('safety net: quality not measured yet')
+  expect(rows.find((r) => r.startsWith('w:feature'))!).toContain('guarded: tests')
+  expect(rows.join('\n')).toContain('guarded: quality not measured yet')
   expect(rows.join('\n')).not.toContain('unmeasured:')
 })
 
