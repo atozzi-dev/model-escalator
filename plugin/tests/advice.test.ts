@@ -20,11 +20,11 @@ function runs(stats: Stats, category: string, tier: Tier, n: number, bad = 0, co
 // --- thresholds ---
 
 test('a category that never got stuck in enough runs on opus gets a sonnet suggestion', async () => {
-  const st = runs({}, 'security-reviewer:other', 'opus', 18, 0, 0.94)
+  const st = runs({}, 'coder:feature', 'opus', 18, 0, 0.94)
   const list = downshiftAdvice(st, { now: T0 })
   expect(list.length).toBe(1)
   const a = list[0]!
-  expect(a.category).toBe('security-reviewer:other')
+  expect(a.category).toBe('coder:feature')
   expect(a.tier).toBe('opus')
   expect(a.suggested).toBe('sonnet')
   expect(a.scope).toBe('global')
@@ -44,8 +44,8 @@ test('fewer than the minimum runs gives no advice', async () => {
 })
 
 test('the minimum run count gives a moderate suggestion, twice as many a strong one', async () => {
-  expect(downshiftAdvice(runs({}, 'c', 'opus', 12), { now: T0 })[0]!.strength).toBe('moderate')
-  expect(downshiftAdvice(runs({}, 'c', 'opus', ADVICE.strongRuns), { now: T0 })[0]!.strength).toBe('strong')
+  expect(downshiftAdvice(runs({}, 'c:feature', 'opus', 12), { now: T0 })[0]!.strength).toBe('moderate')
+  expect(downshiftAdvice(runs({}, 'c:feature', 'opus', ADVICE.strongRuns), { now: T0 })[0]!.strength).toBe('strong')
 })
 
 test('an escalation rate above the bar gives no advice', async () => {
@@ -125,8 +125,8 @@ test('a cheaper tier with poor reviews blocks the advice', async () => {
 })
 
 test('a cheaper tier that proved itself makes the advice strong and is reported', async () => {
-  let st = runs({}, 'c', 'opus', 9)
-  st = runs(st, 'c', 'sonnet', 6)
+  let st = runs({}, 'c:feature', 'opus', 9)
+  st = runs(st, 'c:feature', 'sonnet', 6)
   const a = downshiftAdvice(st, { now: T0 }).find((x) => x.tier === 'opus')!
   expect(a.strength).toBe('strong')
   expect(close(a.cheaperRuns, 6)).toBe(true)
@@ -222,11 +222,11 @@ test('a cell without priced runs is advised without a cost estimate', async () =
 // --- order ---
 
 test('strong suggestions come first, then the largest estimated saving', async () => {
-  let st = runs({}, 'small', 'opus', 20, 0, 0.1)
-  st = runs(st, 'big', 'opus', 20, 0, 1)
-  st = runs(st, 'weak', 'opus', 10, 0, 5)
+  let st = runs({}, 'small:feature', 'opus', 20, 0, 0.1)
+  st = runs(st, 'big:feature', 'opus', 20, 0, 1)
+  st = runs(st, 'weak:feature', 'opus', 10, 0, 5)
   const list = downshiftAdvice(st, { now: T0 })
-  expect(list.map((a) => a.category).join(',')).toBe('big,small,weak')
+  expect(list.map((a) => a.category).join(',')).toBe('big:feature,small:feature,weak:feature')
 })
 
 // --- malformed input ---
@@ -265,13 +265,14 @@ test('a malformed cheaper cell does not block and does not throw', async () => {
 
 const sample = (over: Partial<Advice> = {}): Advice => ({
   category: 'security-reviewer:other', tier: 'opus', suggested: 'sonnet', scope: 'global', runs: 18,
-  escalationRate: 0, notAcceptedRate: 0, priceRatio: 0.5, costNow: 0.94, costCheaper: 0.47, strength: 'strong', ...over,
+  escalationRate: 0, notAcceptedRate: 0, priceRatio: 0.5, costNow: 0.94, costCheaper: 0.47, strength: 'strong',
+  quality: 'measured', signal: 'reviews', qualityNote: 'reviews average 4.6', ...over,
 })
 
 test('the hint reads as one short sentence with the estimate', async () => {
   expect(hintLine(sample())).toBe(
-    'security-reviewer:other never got stuck in 18 runs on opus: on sonnet it would cost about $0.47 instead of $0.94 per run. ' +
-    'Ask for sonnet in the Agent call, or see /escalator stats.')
+    'security-reviewer:other never got stuck in 18 runs on opus (reviews average 4.6): on sonnet it would cost about ' +
+    '$0.47 instead of $0.94 per run. Ask for sonnet in the Agent call, or see /escalator stats.')
 })
 
 test('the hint without a cost uses the price ratio', async () => {
@@ -286,7 +287,8 @@ test('the hint says how often it got stuck when it did', async () => {
 })
 
 test('formatAdvice lists suggestions, says the figures are estimates and gives a hint', async () => {
-  const out = formatAdvice([sample(), sample({ category: 'infra-reviewer:other', runs: 12, strength: 'moderate', reviewMean: 4.25, reviews: 2 })])
+  const out = formatAdvice([sample(), sample({ category: 'infra-reviewer:other', runs: 12, strength: 'moderate', reviewMean: 4.25, reviews: 2,
+    signal: 'cheaper-reviews', qualityNote: 'reviews of sonnet runs average 4.4' })])
   expect(out.lines.length).toBe(2)
   expect(out.lines[0]).toContain('security-reviewer:other: opus -> sonnet')
   expect(out.lines[0]).toContain('about $0.47 instead of $0.94 per run')

@@ -29,11 +29,12 @@ const run = async ($: any, args: string) =>
   (await $.command.run({ command: 'escalator', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as never) as { text: string }).text
 
 // 18 runs of a category on opus that never got stuck, 0.94 USD each: a strong suggestion for sonnet.
-const EASY = { 'security-reviewer:other': { opus: { runs: 18, escalated: 0, tokens: 1000, cost: 16.92, costRuns: 18 } } }
+const EASY = { 'coder:feature': { opus: { runs: 18, escalated: 0, tokens: 1000, cost: 16.92, costRuns: 18 } } }
 
 const advice = (over: Partial<Advice> = {}): Advice => ({
   category: 'reviewer:other', tier: 'opus', suggested: 'sonnet', scope: 'global', runs: 18, escalationRate: 0, notAcceptedRate: 0,
-  priceRatio: 0.5, costNow: 0.94, costCheaper: 0.47, strength: 'strong', ...over,
+  priceRatio: 0.5, costNow: 0.94, costCheaper: 0.47, strength: 'strong', quality: 'measured', signal: 'verify',
+  qualityNote: 'your verifyCommand passed', ...over,
 })
 
 const input = (over: Partial<StatsInput> = {}): StatsInput =>
@@ -74,7 +75,7 @@ test('/escalator stats lists the suggestions between the learned stats and the s
   data.stats = EASY
   const text = await run($, 'stats')
   expect(text).toContain('Cheaper model suggestions')
-  expect(text).toContain('security-reviewer:other: opus -> sonnet')
+  expect(text).toContain('coder:feature: opus -> sonnet')
   expect(text.indexOf('Cheaper model suggestions')).toBeGreaterThan(text.indexOf('Learned stats per category'))
 })
 
@@ -98,7 +99,7 @@ test('the first report of the session carries the hint of the first strong sugge
   await $.session.start({ cwd: '/work' } as never)
   data.stats = EASY
   const first = await run($, '')
-  expect(first).toContain('security-reviewer:other never got stuck in 18 runs on opus')
+  expect(first).toContain('coder:feature never got stuck in 18 runs on opus')
   expect(first).toContain('Ask for sonnet in the Agent call')
   expect(await run($, '')).not.toContain('never got stuck in 18 runs')
   expect(await run($, 'report')).not.toContain('never got stuck in 18 runs')
@@ -110,7 +111,7 @@ test('a hinted suggestion is not hinted again in a later session within a week',
   data.stats = EASY
   expect(await run($, '')).toContain('never got stuck in 18 runs')
   const hinted = data.adviceHinted
-  expect(JSON.stringify(hinted)).toContain('security-reviewer:other|opus')
+  expect(JSON.stringify(hinted)).toContain('coder:feature|opus')
   resetState()
   await $.session.start({ cwd: '/work' } as never)
   expect(await run($, '')).not.toContain('never got stuck in 18 runs')
@@ -119,10 +120,64 @@ test('a hinted suggestion is not hinted again in a later session within a week',
 test('a moderate suggestion is no hint', async ($, on) => {
   wire(on)
   await $.session.start({ cwd: '/work' } as never)
-  data.stats = { c: { opus: { runs: 10, escalated: 0, tokens: 1 } } }
+  data.stats = { 'c:feature': { opus: { runs: 10, escalated: 0, tokens: 1 } } }
   const text = await run($, '')
   expect(text).not.toContain('never got stuck')
-  expect(await run($, 'stats')).toContain('c: opus -> sonnet')
+  expect(await run($, 'stats')).toContain('c:feature: opus -> sonnet')
+})
+
+// --- quality ---
+
+// The same evidence for read-only work: no reviews, tests or rework can tell whether sonnet would do as well.
+const READ_ONLY = { 'security-reviewer:review': EASY['coder:feature'] }
+
+test('read-only work is listed in /escalator stats with its limit and never hinted', async ($, on) => {
+  wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  data.stats = READ_ONLY
+  expect(await run($, '')).not.toContain('never got stuck')
+  const stats = await run($, 'stats')
+  expect(stats).toContain('security-reviewer:review never got stuck in 18 runs on opus. On sonnet it would cost about $0.47')
+  expect(stats).toContain('cannot tell whether it would find the same issues')
+  expect(stats).toContain('not on a comparison with the cheaper model')
+})
+
+test('the stats name the signal that measures a suggestion', async ($, on) => {
+  wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  data.stats = EASY
+  expect(await run($, 'stats')).toContain('quality: rework by the lead would show on sonnet')
+})
+
+test('the verifyCommand option measures code work', { options: { verifyCommand: 'npm test', reworkWindowMinutes: 0 } }, async ($, on) => {
+  wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  data.stats = EASY
+  expect(await run($, 'stats')).toContain('quality: your verifyCommand passed')
+  expect(await run($, '')).toContain('(your verifyCommand passed)')
+})
+
+test('code work with rework off and no verifyCommand is unmeasured and no hint', { options: { reworkWindowMinutes: 0 } }, async ($, on) => {
+  wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  data.stats = EASY
+  expect(await run($, '')).not.toContain('never got stuck')
+  expect(await run($, 'stats')).toContain('Set verifyCommand or turn on reviewRate')
+})
+
+test('reviewRate on changes the advice for other work', { options: { reviewRate: 0.5 } }, async ($, on) => {
+  wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  data.stats = { 'gp:other': EASY['coder:feature'] }
+  expect(await run($, 'stats')).toContain('reviewRate is on')
+})
+
+test('the view marks unmeasured advice and says what it means', () => {
+  const v = buildStatsView(input({ advice: [advice({ category: 'reviewer:review', strength: 'moderate', quality: 'unmeasured', signal: undefined, qualityNote: 'read-only work' })] }))
+  const rows = v.sections.find((s) => s.id === 'advice')!.rows.map((r) => r.map((c) => c.text).join(' '))
+  expect(rows.find((r) => r.startsWith('reviewer:review'))!).toContain('unmeasured')
+  expect(rows.join('\n')).toContain('quality not measured')
+  expect(rows.join('\n')).toContain('not a comparison with the cheaper model')
 })
 
 for (const mode of ['baseline', 'off']) test(`no hint in ${mode} mode`, async ($, on) => {

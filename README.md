@@ -27,7 +27,7 @@ Mods are not sandboxed: they run with your permissions. To see what the mod hook
 
 After installing, nothing needs configuring. The mod runs in `active` mode: it tracks every subagent and in-process teammate, leaves your lead model alone, and intervenes only on the agents it sees get stuck. Within a session:
 
-- `/escalator` shows the session cost (the lead and the subagents apart), the estimated savings and the interventions so far; once per session it adds a one-line hint when a task category runs on a stronger model than it seems to need.
+- `/escalator` shows the session cost (the lead and the subagents apart), the estimated savings and the interventions so far; once per session it adds a one-line hint when a task category runs on a stronger model than it seems to need, and the mod has a way to tell if the cheaper one does worse.
 - `/escalator map` opens the live map of agents (picture below).
 - `/escalator panel` opens a panel with the session at a glance and what the mod has learned; `/escalator stats` prints the learned statistics as text.
 
@@ -123,7 +123,7 @@ These are the subcommands listed by `/escalator help`:
 | Command | Effect |
 |---|---|
 | `/escalator` or `/escalator report` | Session cost, estimated savings and interventions (the default) |
-| `/escalator stats` | What the mod has learned per task category, the review scores of sampled runs, cheaper-model suggestions for categories that never get stuck, and this session's savings per category |
+| `/escalator stats` | What the mod has learned per task category, the review scores of sampled runs, cheaper-model suggestions for categories that never get stuck (see [Cheaper model suggestions](#cheaper-model-suggestions): not a quality guarantee), and this session's savings per category |
 | `/escalator config` | The effective configuration and the environment mode, with the variable each value came from |
 | `/escalator history [n]` | The last `n` recorded sessions (default 10, at most 50) |
 | `/escalator export [session\|learned\|history\|all]` | This session's costs, the learned statistics or the session history as CSV tables (default `session`), printed as text to paste into a spreadsheet; reads the plugin store only |
@@ -139,6 +139,18 @@ These are the subcommands listed by `/escalator help`:
 | `/escalator help` | List the subcommands |
 
 `<id>` is the agent's id or its name. An unknown subcommand shows the list.
+
+### Cheaper model suggestions
+
+Learning never starts an agent below the model its Agent call asked for, so a category that always asks for Opus keeps paying Opus prices. `/escalator stats` and the stats panel list the categories that look like they could run one tier lower; you decide, by asking for the cheaper model in the Agent call or the agent's definition.
+
+A suggestion only means the current model **did not get stuck** on that category (enough runs, almost no escalations, failed checks or rework). It is not a comparison with the cheaper model, and the savings are estimates from list prices. Whether the cheaper model would do the work *as well* is a separate question, and the mod answers it only where it has a quality signal:
+
+- enough senior reviews of the category (`reviewRate`, at least 3 reviews, on either model);
+- your `verifyCommand`, for work that writes code;
+- rework by the lead, for work that writes files (features, fixes, tests, refactors, docs, UI, data), tracked on models below the lead's.
+
+Each suggestion names the signal it relies on (for example "your verifyCommand passed" or "no rework by the lead"). Read-only work (reviews, audits, research) leaves nothing to review, test or rework, and work of unknown kind without reviews has no signal either: those suggestions say plainly that the mod cannot tell whether the cheaper model would find the same issues, are never marked strong and never become the one-line hint in `/escalator`. A cheaper security reviewer that quietly misses problems would look like a success to the mod, so compare a few runs yourself before switching.
 
 ### The agent map and the stats panel
 

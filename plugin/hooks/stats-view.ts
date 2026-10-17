@@ -131,19 +131,26 @@ const isAdvice = (a: unknown): a is Advice => {
 }
 
 // One row per suggestion: what changes, the evidence, and the cost of a run now and (estimated) on the cheaper model.
+// The last cell is the strength of a measured suggestion and "unmeasured" otherwise (a missing quality reads as
+// unmeasured), with a note under the table saying what that means; a last row keeps the general caveat.
 function adviceRows(list: unknown, top: number): ViewCell[][] {
   const ok = Array.isArray(list) ? list.filter(isAdvice) : []
   if (ok.length === 0) return []
   const money = (x: number | undefined): string => (typeof x === 'number' && Number.isFinite(x) && x >= 0 ? usd(x) : '-')
   const out: ViewCell[][] = [head('Category', 'Change', 'Runs', 'Now', 'Est.', '')]
-  for (const a of ok.slice(0, Math.min(top, ADVICE.maxLines))) {
+  const shown = ok.slice(0, Math.min(top, ADVICE.maxLines))
+  for (const a of shown) {
     out.push([
       name(a.category), plain(`${a.tier} -> ${a.suggested}`), right(num1(a.runs)), right(money(a.costNow)), right(money(a.costCheaper)),
-      { text: a.strength, dim: true },
+      { text: a.quality === 'measured' ? a.strength : 'unmeasured', dim: true },
     ])
   }
-  const more = ok.length - (out.length - 1)
+  const more = ok.length - shown.length
   if (more > 0) out.push([label(`+${more} more`)])
+  if (shown.some((a) => a.quality !== 'measured')) {
+    out.push([label('unmeasured: quality not measured, the mod cannot tell whether the cheaper model would do as well')])
+  }
+  out.push([label('From runs that did not get stuck, not a comparison with the cheaper model; costs are estimates')])
   return out
 }
 

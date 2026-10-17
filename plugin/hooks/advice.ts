@@ -8,10 +8,11 @@
 // How to wire it (register.ts and stats-view.ts, not done here):
 //
 // - Input. The global table (store key `stats`) and the projects table (`parseProjects` of store key `projects`)
-//   with the session's `projectId`; options from the config: `minReviewScore`, `prices`, `learnByCost`, plus
-//   `now` (`clockNow($)`) and `halfLifeMs()`. The project cell of a tier is used when it has enough runs, the global
-//   one otherwise, exactly as `scopedStats` does for learning.
-// - `/escalator stats`. Append `formatAdvice(list, { respectExplicitModel: config.respectExplicitModel }).text`,
+//   with the session's `projectId`; options from the config: `minReviewScore`, `prices`, `learnByCost`,
+//   `verify` (a `verifyCommand` is set), `reworkWindowMinutes`, plus the lead's `baseline`, `now` (`clockNow($)`) and
+//   `halfLifeMs()`. The project cell of a tier is used when it has enough runs, the global one otherwise, exactly as
+//   `scopedStats` does for learning.
+// - `/escalator stats`. Append `formatAdvice(list, { respectExplicitModel, reviewRate }).text`,
 //   when not empty, as its own block after the learned stats and the review scores and before this session's
 //   savings per category (`'\n\n' + text`).
 // - Stats panel. A small section after "learned" built in stats-view.ts from the same list (one row per suggestion:
@@ -25,6 +26,14 @@
 //   same suggestion comes back at most weekly and only while the evidence still holds. Only `strong` suggestions
 //   become hints; `moderate` ones stay in `/escalator stats` and the panel.
 // - Modes. Show nothing in `off`; in `baseline` every agent runs on the reference model on purpose, so no hint.
+//
+// Quality. "Never got stuck" says the tier finishes the work, not that a cheaper tier would do it as well. A
+// suggestion is `measured` only when something would show a drop in the quality of the work (`qualityFor`): enough
+// senior reviews of this category (on the current or the cheaper tier), a `verifyCommand` for work that writes code,
+// or lead rework for work that writes files, on a tier below the lead's model where rework is tracked. Read-only work
+// (`review`, `explore`) has none of these: no diff to review, nothing to test or rework. An `unmeasured` suggestion is
+// never strong and never the hint; it stays in `/escalator stats` and the panel, worded so it does not vouch for the
+// cheaper model.
 
 import { DEFAULT_PRICES, type Price } from './config'
 import { LADDER, type Tier } from './detector'
@@ -48,7 +57,10 @@ import { HALF_LIFE_MS, LEARN, recommend, scopedStats, type Cell, type Projects, 
 //   is strong whatever the run count on the current tier.
 // - `maxLines` suggestions are listed, `repeatAfterMs` (7 days) between two hints for the same category and tier,
 //   `maxHinted` entries kept in the hint table.
+// - `minReviews` 3: reviews (decayed) a cell needs before their mean counts as a quality signal. One or two scores
+//   are an anecdote; three at or above `minReviewScore` with no failure in the runs are a pattern.
 export const ADVICE = {
+  minReviews: 3,
   minRuns: 8,
   maxEscalationRate: 0.05,
   maxNotAcceptedRate: 0.1,
@@ -61,6 +73,22 @@ export const ADVICE = {
 } as const
 
 export type Strength = 'strong' | 'moderate'
+export type Quality = 'measured' | 'unmeasured'
+// The signal that measures a suggestion: reviews of the current tier's runs, of the cheaper tier's runs, the
+// verifyCommand, lead rework counted on the current tier, or lead rework that would be counted on the cheaper tier.
+export type QualitySignal = 'reviews' | 'cheaper-reviews' | 'verify' | 'rework' | 'rework-cheaper'
+
+// Category labels (`classify.ts` LABELS) by what the work leaves behind. Any other label, `other` included, is work
+// of unknown kind: only reviews measure it.
+export const WRITE_LABELS: readonly string[] = ['feature', 'bugfix', 'tests', 'refactor', 'docs', 'ui', 'data']
+export const CODE_LABELS: readonly string[] = ['feature', 'bugfix', 'tests', 'refactor', 'ui', 'data']
+export const READ_ONLY_LABELS: readonly string[] = ['review', 'explore']
+
+// The label of a `type:label` category: the text after the last colon, the whole text without one.
+export function categoryLabel(category: string): string {
+  const i = typeof category === 'string' ? category.lastIndexOf(':') : -1
+  return typeof category === 'string' ? category.slice(i + 1) : ''
+}
 
 // One suggestion. Counts and rates are decayed to `now`; costs are USD per run.
 export type Advice = {
@@ -77,7 +105,10 @@ export type Advice = {
   priceRatio: number         // price of the suggested tier over the current one (input and output)
   costNow?: number           // mean cost of a run on the current tier, when runs were priced
   costCheaper?: number       // estimate: costNow * priceRatio
-  strength: Strength
+  strength: Strength         // never 'strong' when unmeasured
+  quality: Quality
+  signal?: QualitySignal     // only when measured
+  qualityNote: string        // measured: the signal ("reviews average 4.6"); unmeasured: why nothing measures it
 }
 
 export type AdviceOptions = {
@@ -88,6 +119,9 @@ export type AdviceOptions = {
   learnByCost?: boolean
   projects?: Projects
   projectKey?: string
+  verify?: boolean             // a verifyCommand is configured
+  reworkWindowMinutes?: number // 0 turns rework tracking off; default on
+  baseline?: Tier              // the lead's model: rework and reviews are tracked only on tiers below it; default opus
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -128,12 +162,18 @@ const fade = (ms: number | undefined, halfLifeMs: number): number =>
   ms !== undefined && ms > 0 && halfLifeMs > 0 ? 0.5 ** (ms / halfLifeMs) : 1
 
 // What the advice reads of a cell at `now`: run counters decayed from `updatedAt`, reviews from `reviewedAt`.
-type Seen = { runs: number; escalated: number; notAccepted: number; cost?: number; reviews?: number; reviewMean?: number }
+type Seen = {
+  runs: number; escalated: number; notAccepted: number; failedVerify: number; reworked: number
+  cost?: number; reviews?: number; reviewMean?: number
+}
 
 function look(c: Cell, now: number | undefined, halfLifeMs: number): Seen {
   const f = now !== undefined && c.updatedAt !== undefined ? fade(now - c.updatedAt, halfLifeMs) : 1
   const g = now !== undefined && c.reviewedAt !== undefined ? fade(now - c.reviewedAt, halfLifeMs) : 1
-  const s: Seen = { runs: c.runs * f, escalated: c.escalated * f, notAccepted: (c.notAccepted ?? c.escalated) * f }
+  const s: Seen = {
+    runs: c.runs * f, escalated: c.escalated * f, notAccepted: (c.notAccepted ?? c.escalated) * f,
+    failedVerify: (c.failedVerify ?? 0) * f, reworked: (c.reworked ?? 0) * f,
+  }
   // Decay scales cost and costRuns alike, so the mean cost of a run does not change with it.
   if (c.cost !== undefined && c.costRuns !== undefined && c.costRuns > 0) s.cost = c.cost / c.costRuns
   if (c.reviews !== undefined && c.reviewScore !== undefined && c.reviews > 0) {
@@ -158,13 +198,18 @@ export function priceRatio(from: Tier, to: Tier, prices: Record<Tier, Price> = D
 }
 
 const STRENGTH_ORDER: Record<Strength, number> = { strong: 0, moderate: 1 }
+const QUALITY_ORDER: Record<Quality, number> = { measured: 0, unmeasured: 1 }
 const saving = (a: Advice): number => (a.costNow !== undefined && a.costCheaper !== undefined ? (a.costNow - a.costCheaper) * a.runs : 0)
 
-// The suggestions, strong first, then by estimated saving (cost difference per run times runs), then by runs.
-// At most one per category: the qualifying tier with the most runs. Never throws; malformed input gives [].
+// The suggestions, strong first, then measured before unmeasured, then by estimated saving (cost difference per run
+// times runs), then by runs. At most one per category: the qualifying tier with the most runs. Never throws;
+// malformed input gives [].
 export function downshiftAdvice(stats: unknown, opts: AdviceOptions = {}): Advice[] {
   try {
     const { now, halfLifeMs = HALF_LIFE_MS, minReviewScore = LEARN.minReviewScore, prices = DEFAULT_PRICES, learnByCost = true } = opts
+    const verify = opts.verify === true
+    const rework = !(isNum(opts.reworkWindowMinutes) && opts.reworkWindowMinutes <= 0)
+    const baseline: Tier = isTier(opts.baseline) ? opts.baseline : 'opus'
     const global = cleanStats(stats)
     const projects: Projects = {}
     const key = typeof opts.projectKey === 'string' && opts.projectKey !== '' ? opts.projectKey : undefined
@@ -177,21 +222,64 @@ export function downshiftAdvice(stats: unknown, opts: AdviceOptions = {}): Advic
       const row = view[category] ?? {}
       let best: Advice | undefined
       for (const tier of LADDER) {
-        const a = adviseTier(view, row, category, tier, { now, halfLifeMs, minReviewScore, prices, learnByCost })
+        const a = adviseTier(view, row, category, tier, { now, halfLifeMs, minReviewScore, prices, learnByCost, verify, rework, baseline })
         if (a === undefined) continue
         a.scope = key !== undefined && row[tier] === projects[key]?.stats[category]?.[tier] ? 'project' : 'global'
         if (best === undefined || a.runs >= best.runs) best = a
       }
       if (best !== undefined) out.push(best)
     }
-    return out.sort((a, b) => STRENGTH_ORDER[a.strength] - STRENGTH_ORDER[b.strength] || saving(b) - saving(a) ||
+    return out.sort((a, b) => STRENGTH_ORDER[a.strength] - STRENGTH_ORDER[b.strength] ||
+      QUALITY_ORDER[a.quality] - QUALITY_ORDER[b.quality] || saving(b) - saving(a) ||
       b.runs - a.runs || (a.category < b.category ? -1 : a.category > b.category ? 1 : 0))
   } catch {
     return []
   }
 }
 
-type Ctx = { now?: number; halfLifeMs: number; minReviewScore: number; prices: Record<Tier, Price>; learnByCost: boolean }
+type Ctx = {
+  now?: number; halfLifeMs: number; minReviewScore: number; prices: Record<Tier, Price>; learnByCost: boolean
+  verify: boolean; rework: boolean; baseline: Tier
+}
+
+const below = (t: Tier, baseline: Tier): boolean => LADDER.indexOf(t) < LADDER.indexOf(baseline)
+const enough = (x: Seen | undefined): x is Seen & { reviews: number; reviewMean: number } =>
+  x !== undefined && x.reviews !== undefined && x.reviewMean !== undefined && x.reviews >= ADVICE.minReviews - 1e-9
+
+// What would show a drop in quality on this category, strongest first: reviews of either tier (the review gates of
+// `adviseTier` already dropped the suggestion when their mean is below the bar), the verifyCommand for code, lead
+// rework for written files. Rework (and reviews) are tracked only on runs that start below the lead's model, so for a
+// tier at the lead's model the signal is the one the cheaper tier would get once the user switches.
+function qualityFor(category: string, tier: Tier, suggested: Tier, s: Seen, c: Seen | undefined, x: Ctx):
+  { quality: Quality; signal?: QualitySignal; qualityNote: string } {
+  const label = categoryLabel(category)
+  const n = (v: number): number => Math.round(v)
+  if (READ_ONLY_LABELS.includes(label)) {
+    return { quality: 'unmeasured', qualityNote: 'read-only work: no files to review, test or rework' }
+  }
+  if (enough(s)) return { quality: 'measured', signal: 'reviews', qualityNote: `reviews average ${s.reviewMean.toFixed(1)}` }
+  if (enough(c)) return { quality: 'measured', signal: 'cheaper-reviews', qualityNote: `reviews of ${suggested} runs average ${c.reviewMean.toFixed(1)}` }
+  const reviewed = Math.max(s.reviews ?? 0, c?.reviews ?? 0)
+  const few = reviewed > 0 ? `only ${n(reviewed)} of the ${ADVICE.minReviews} reviews needed` : ''
+  if (!WRITE_LABELS.includes(label)) {
+    return { quality: 'unmeasured', qualityNote: few || 'no reviews, and the work is not known to change files' }
+  }
+  if (x.verify && CODE_LABELS.includes(label)) {
+    const failed = n(s.failedVerify)
+    const runs = n(s.runs)
+    return { quality: 'measured', signal: 'verify',
+      qualityNote: failed === 0 ? 'your verifyCommand passed' : `your verifyCommand passed in ${runs - failed} of ${runs} runs` }
+  }
+  if (x.rework && below(tier, x.baseline)) {
+    const k = n(s.reworked)
+    return { quality: 'measured', signal: 'rework', qualityNote: k === 0 ? 'no rework by the lead' : `the lead reworked ${k} of ${n(s.runs)} runs` }
+  }
+  if (x.rework && below(suggested, x.baseline)) {
+    return { quality: 'measured', signal: 'rework-cheaper', qualityNote: `rework by the lead would show on ${suggested}` }
+  }
+  const why = !x.rework ? 'rework tracking is off' : 'rework is tracked only below the lead\'s model'
+  return { quality: 'unmeasured', qualityNote: `${few || 'no reviews'}, no verifyCommand for this work, and ${why}` }
+}
 
 function adviseTier(view: Stats, row: Partial<Record<Tier, Cell>>, category: string, tier: Tier, x: Ctx): Advice | undefined {
   const i = LADDER.indexOf(tier)
@@ -214,7 +302,9 @@ function adviseTier(view: Stats, row: Partial<Record<Tier, Cell>>, category: str
   }
   if (recommend(view, category, suggested, x.now, x.halfLifeMs, x.learnByCost) !== suggested) return undefined
   const proven = c !== undefined && c.runs >= LEARN.minRuns && rate(c.notAccepted, c.runs) <= ADVICE.maxNotAcceptedRate
-  const strong = proven || (s.runs >= ADVICE.strongRuns && notAcceptedRate <= ADVICE.maxEscalationRate)
+  const q = qualityFor(category, tier, suggested, s, c, x)
+  const strong = q.quality === 'measured' &&
+    (proven || (s.runs >= ADVICE.strongRuns && notAcceptedRate <= ADVICE.maxEscalationRate))
   return {
     category, tier, suggested, scope: 'global', runs: s.runs, escalationRate, notAcceptedRate,
     ...(s.reviewMean !== undefined ? { reviewMean: s.reviewMean, reviews: s.reviews } : {}),
@@ -222,6 +312,7 @@ function adviseTier(view: Stats, row: Partial<Record<Tier, Cell>>, category: str
     priceRatio: ratio,
     ...(s.cost !== undefined ? { costNow: s.cost, costCheaper: s.cost * ratio } : {}),
     strength: strong ? 'strong' : 'moderate',
+    ...q,
   }
 }
 
@@ -234,20 +325,27 @@ const valid = (a: unknown): a is Advice => isObj(a) && typeof a['category'] === 
   isTier(a['suggested']) && nonNeg(a['runs']) && nonNeg(a['escalationRate']) && nonNeg(a['notAcceptedRate']) &&
   (a['strength'] === 'strong' || a['strength'] === 'moderate')
 const hasCost = (a: Advice): boolean => nonNeg(a.costNow) && nonNeg(a.costCheaper)
+// Only a suggestion that says it is measured counts as one: a missing or unknown `quality` reads as unmeasured.
+const measured = (a: Advice): boolean => a.quality === 'measured'
+const note = (a: Advice): string => (typeof a.qualityNote === 'string' ? a.qualityNote : '')
 
 function stuckText(a: Advice, n: number): string {
   const k = Math.round(a.escalationRate * a.runs)
   return k === 0 ? `never got stuck in ${n} runs on ${a.tier}` : `got stuck in ${k} of ${n} runs on ${a.tier}`
 }
 
-// The one-line hint: "<category> never got stuck in 18 runs on opus: on sonnet it would cost about $0.47 instead of
-// $0.94 per run. Ask for sonnet in the Agent call, or see /escalator stats."
-export function hintLine(a: Advice): string {
-  const n = Math.round(a.runs)
-  const cost = hasCost(a)
+function costText(a: Advice): string {
+  return hasCost(a)
     ? `on ${a.suggested} it would cost about ${usd(a.costCheaper!)} instead of ${usd(a.costNow!)} per run`
     : `${a.suggested} costs about ${pct(a.priceRatio)} of ${a.tier} per token`
-  return `${a.category} ${stuckText(a, n)}: ${cost}. Ask for ${a.suggested} in the Agent call, or see /escalator stats.`
+}
+
+// The one-line hint: "<category> never got stuck in 18 runs on opus (your verifyCommand passed): on sonnet it would
+// cost about $0.47 instead of $0.94 per run. Ask for sonnet in the Agent call, or see /escalator stats."
+export function hintLine(a: Advice): string {
+  const n = Math.round(a.runs)
+  const signal = measured(a) && note(a) !== '' ? ` (${note(a)})` : ''
+  return `${a.category} ${stuckText(a, n)}${signal}: ${costText(a)}. Ask for ${a.suggested} in the Agent call, or see /escalator stats.`
 }
 
 function line(a: Advice): string {
@@ -256,26 +354,48 @@ function line(a: Advice): string {
     `${Math.round(a.runs)} runs`,
     k === 0 ? 'never stuck' : `stuck ${pct(a.escalationRate)}`,
     `${pct(a.notAcceptedRate)} not accepted`,
-    ...(nonNeg(a.reviewMean) ? [`reviews ${a.reviewMean.toFixed(1)}/5`] : []),
+    ...(nonNeg(a.reviewMean) && a.signal !== 'reviews' ? [`reviews ${a.reviewMean.toFixed(1)}/5`] : []),
     ...(nonNeg(a.cheaperRuns) && a.cheaperRuns >= 1 ? [`${Math.round(a.cheaperRuns)} runs on ${a.suggested} already`] : []),
+    ...(note(a) !== '' ? [`quality: ${note(a)}`] : []),
     hasCost(a) ? `about ${usd(a.costCheaper!)} instead of ${usd(a.costNow!)} per run` : `${a.suggested} costs about ${pct(a.priceRatio)} per token`,
     ...(a.scope === 'project' ? ['this project'] : []),
   ]
   return `${a.category}: ${a.tier} -> ${a.suggested}, ${parts.join(', ')} (${a.strength})`
 }
 
-export type FormatOptions = { respectExplicitModel?: boolean }
+// An unmeasured suggestion in full sentences that do not vouch for the cheaper model: "security-reviewer:review never
+// got stuck in 18 runs on opus. On sonnet it would cost about $0.47 instead of $0.94 per run, but the mod cannot tell
+// whether it would find the same issues (read-only work: ...). Try sonnet on a few runs and compare the results
+// yourself." Reviews look at the agent's diff, so they cannot measure read-only work.
+function unmeasuredLine(a: Advice, reviewRate: number): string {
+  const label = categoryLabel(a.category)
+  const cost = costText(a)
+  const goal = label === 'review' ? 'find the same issues' : label === 'explore' ? 'find the same answers' : 'do the work as well'
+  const why = note(a) !== '' ? ` (${note(a)})` : ''
+  const how = READ_ONLY_LABELS.includes(label)
+    ? `Try ${a.suggested} on a few runs and compare the results yourself.`
+    : WRITE_LABELS.includes(label)
+      ? 'Set verifyCommand or turn on reviewRate to measure it.'
+      : reviewRate > 0
+        ? `reviewRate is on: reviews of ${a.suggested} runs that change files will measure it.`
+        : `Turn on reviewRate to measure it on ${a.suggested} runs that change files.`
+  return `${a.category} ${stuckText(a, Math.round(a.runs))}. ${cost.charAt(0).toUpperCase()}${cost.slice(1)}, ` +
+    `but the mod cannot tell whether it would ${goal}${why}. ${how}`
+}
 
-// `lines`: one short line per suggestion (at most `ADVICE.maxLines`), for the stats text and the panel. `text`: the
-// block for `/escalator stats`, '' when there is nothing to suggest. `hint`: `hintLine` of the first strong
-// suggestion, '' when there is none. Never throws.
+export type FormatOptions = { respectExplicitModel?: boolean; reviewRate?: number }
+
+// `lines`: one line per suggestion (at most `ADVICE.maxLines`), for the stats text: a short list line when measured,
+// full sentences that state the limit when not. `text`: the block for `/escalator stats`, '' when there is nothing
+// to suggest. `hint`: `hintLine` of the first strong, measured suggestion, '' when there is none. Never throws.
 export function formatAdvice(list: Advice[], opts: FormatOptions = {}): { text: string; lines: string[]; hint: string } {
   try {
     const ok = Array.isArray(list) ? list.filter(valid) : []
     if (ok.length === 0) return { text: '', lines: [], hint: '' }
-    const lines = ok.slice(0, ADVICE.maxLines).map(line)
+    const reviewRate = isNum(opts.reviewRate) ? opts.reviewRate : 0
+    const lines = ok.slice(0, ADVICE.maxLines).map((a) => (measured(a) ? line(a) : unmeasuredLine(a, reviewRate)))
     const more = ok.length - lines.length
-    const strong = ok.find((a) => a.strength === 'strong')
+    const strong = ok.find((a) => a.strength === 'strong' && measured(a))
     const how = opts.respectExplicitModel === true
       ? 'respectExplicitModel is on: a model asked for in the Agent call is kept even if it starts failing (a stuck agent is still escalated).'
       : 'If it starts failing, learning moves the category back up by itself.'
@@ -283,6 +403,8 @@ export function formatAdvice(list: Advice[], opts: FormatOptions = {}): { text: 
       'Cheaper model suggestions (costs are estimates from list prices):',
       ...lines.map((l) => `- ${l}`),
       ...(more > 0 ? [`- and ${more} more`] : []),
+      'These are based on runs that did not get stuck, not on a comparison with the cheaper model, and the savings are ' +
+        'estimates. "quality" names what would show the cheaper model doing worse work; without it a suggestion is never strong.',
       'The mod never starts an agent below the model it asked for: ask for the cheaper model in the Agent call or in the agent\'s definition. ' + how,
     ].join('\n')
     return { text, lines, hint: strong !== undefined ? hintLine(strong) : '' }
@@ -295,13 +417,13 @@ export function formatAdvice(list: Advice[], opts: FormatOptions = {}): { text: 
 
 const hintKey = (a: Advice): string => `${a.category}|${a.tier}`
 
-// The first strong suggestion whose `category|tier` was not hinted in the last `ADVICE.repeatAfterMs`. `hinted` is
-// the stored table (malformed entries read as never hinted).
+// The first strong, measured suggestion whose `category|tier` was not hinted in the last `ADVICE.repeatAfterMs`.
+// `hinted` is the stored table (malformed entries read as never hinted).
 export function pickHint(list: Advice[], hinted: Record<string, number>, now: number): Advice | undefined {
   try {
     const table = isObj(hinted) ? hinted : {}
     return (Array.isArray(list) ? list : []).filter(valid).find((a) => {
-      if (a.strength !== 'strong') return false
+      if (a.strength !== 'strong' || !measured(a)) return false
       const at = table[hintKey(a)]
       return !isNum(at) || now - at >= ADVICE.repeatAfterMs
     })
