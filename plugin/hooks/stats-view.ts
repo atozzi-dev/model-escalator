@@ -2,11 +2,12 @@
 // elements per surface. Pure and total: malformed input degrades to fewer or empty rows, never throws.
 import { costPerAccepted, HALF_LIFE_MS, type Stats } from './learning'
 import { savings, type Ledger } from './savings'
+import { ADVICE, type Advice } from './advice'
 
 // align: numbers are right-aligned. short: a narrower text used when the column has to give way. clip: 'middle'
 // cuts a name in its middle, keeping the end that tells similar names apart ("gen…:bugfix").
 export type ViewCell = { text: string; bold?: boolean; dim?: boolean; align?: 'right'; short?: string; clip?: 'middle' }
-export type ViewSection = { id: 'session' | 'plan' | 'categories' | 'learned'; title: string; rows: ViewCell[][] }
+export type ViewSection = { id: 'session' | 'plan' | 'categories' | 'learned' | 'advice'; title: string; rows: ViewCell[][] }
 export type StatsView = { sections: ViewSection[] }
 
 export type StatsInput = {
@@ -16,6 +17,7 @@ export type StatsInput = {
   paused: string[]            // one label per paused agent
   plan: string                // the report's "Plan usage" block, '' when there is none
   stats: Stats                // learned statistics (global)
+  advice?: Advice[]           // cheaper-model suggestions (advice.ts), none by default
   now?: number
   halfLifeMs?: number
   topRows?: number            // rows per table, default 5
@@ -109,6 +111,31 @@ function learnedRows(i: StatsInput, top: number): ViewCell[][] {
   return out
 }
 
+const TIERS = ['haiku', 'sonnet', 'opus']
+const isAdvice = (a: unknown): a is Advice => {
+  const o = a as Partial<Advice> | null
+  return typeof o === 'object' && o !== null && typeof o.category === 'string' && TIERS.includes(o.tier as string) &&
+    TIERS.includes(o.suggested as string) && typeof o.runs === 'number' && Number.isFinite(o.runs) &&
+    (o.strength === 'strong' || o.strength === 'moderate')
+}
+
+// One row per suggestion: what changes, the evidence, and the cost of a run now and (estimated) on the cheaper model.
+function adviceRows(list: unknown, top: number): ViewCell[][] {
+  const ok = Array.isArray(list) ? list.filter(isAdvice) : []
+  if (ok.length === 0) return []
+  const money = (x: number | undefined): string => (typeof x === 'number' && Number.isFinite(x) && x >= 0 ? usd(x) : '-')
+  const out: ViewCell[][] = [head('Category', 'Change', 'Runs', 'Now', 'Est.', '')]
+  for (const a of ok.slice(0, Math.min(top, ADVICE.maxLines))) {
+    out.push([
+      name(a.category), plain(`${a.tier} -> ${a.suggested}`), right(num1(a.runs)), right(money(a.costNow)), right(money(a.costCheaper)),
+      { text: a.strength, dim: true },
+    ])
+  }
+  const more = ok.length - (out.length - 1)
+  if (more > 0) out.push([label(`+${more} more`)])
+  return out
+}
+
 // The panel's content: session, plan usage (only when the engine reports plan windows), savings per category and
 // the learned statistics.
 export function buildStatsView(i: StatsInput): StatsView {
@@ -118,6 +145,8 @@ export function buildStatsView(i: StatsInput): StatsView {
   if (plan.length > 0) sections.push({ id: 'plan', title: 'Plan usage', rows: plan })
   sections.push({ id: 'categories', title: 'Savings by category', rows: categoryRows(i.ledger, top) })
   sections.push({ id: 'learned', title: 'Learned statistics', rows: learnedRows(i, top) })
+  const advice = adviceRows(i.advice, top)
+  if (advice.length > 0) sections.push({ id: 'advice', title: 'Cheaper model suggestions', rows: advice })
   return { sections }
 }
 

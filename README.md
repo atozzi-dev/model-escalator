@@ -27,7 +27,7 @@ Mods are not sandboxed: they run with your permissions. To see what the mod hook
 
 After installing, nothing needs configuring. The mod runs in `active` mode: it tracks every subagent and in-process teammate, leaves your lead model alone, and intervenes only on the agents it sees get stuck. Within a session:
 
-- `/escalator` shows the session cost, the estimated savings and the interventions so far.
+- `/escalator` shows the session cost, the estimated savings and the interventions so far; once per session it adds a one-line hint when a task category runs on a stronger model than it seems to need.
 - `/escalator map` opens the live map of agents (picture below).
 - `/escalator panel` opens a panel with the session at a glance and what the mod has learned; `/escalator stats` prints the learned statistics as text.
 
@@ -123,7 +123,7 @@ These are the subcommands listed by `/escalator help`:
 | Command | Effect |
 |---|---|
 | `/escalator` or `/escalator report` | Session cost, estimated savings and interventions (the default) |
-| `/escalator stats` | What the mod has learned per task category, the review scores of sampled runs, and this session's savings per category |
+| `/escalator stats` | What the mod has learned per task category, the review scores of sampled runs, cheaper-model suggestions for categories that never get stuck, and this session's savings per category |
 | `/escalator config` | The effective configuration and the environment mode, with the variable each value came from |
 | `/escalator history [n]` | The last `n` recorded sessions (default 10, at most 50) |
 | `/escalator export [session\|learned\|history\|all]` | This session's costs, the learned statistics or the session history as CSV tables (default `session`), printed as text to paste into a spreadsheet; reads the plugin store only |
@@ -226,7 +226,7 @@ This section lists what `claude plugin validate plugin` reports for the mod. Not
 - **UI output:** log lines, status line, toasts (`$.ui.log`, `$.ui.status`, `$.ui.toast`), and in active mode short notices in the main conversation (`$.session.append`, `notifyLead`).
 - **Environment variables (read only):** `MODEL_ESCALATOR_MODE`, `MODEL_ESCALATOR_BASELINE`, `EVAL_MODEL_ESCALATOR_MODE`, `EVAL_MODEL_ESCALATOR_BASELINE`.
 - **Session state:** key `model-escalator.session` (`$.state.get`, `$.state.set`): the per-agent snapshot, including recent tool summaries (file paths and command lines) and error text. It is redacted only when it is sent to the senior model.
-- **Store** (`$.store.get`, `$.store.set`, `$.store.delete`): `stats` (learned counters per category and start tier), `projects` (the same per project; the working directory is stored as a hash), `sessions` (session summaries: mode, reference model, cost totals; no prompts), `categories` (the classification cache: the subagent type, the first 120 characters of its description and the first 12 words of its prompt, normalised, with the label; at most 200 entries), and with `recordSessions` on, `recordings` (the last N session recordings: per-agent events as hashed features, redacted error signatures and agent labels; 256 KiB per session and 1.25 MiB in all, see [Session recordings](#session-recordings)). `/escalator reset` clears `stats` and `projects`; `/escalator reset history` clears `sessions`; `/escalator reset recordings` clears `recordings`.
+- **Store** (`$.store.get`, `$.store.set`, `$.store.delete`): `stats` (learned counters per category and start tier), `projects` (the same per project; the working directory is stored as a hash), `sessions` (session summaries: mode, reference model, cost totals; no prompts), `adviceHinted` (when each cheaper-model hint was last shown, so it is not repeated within a week), `categories` (the classification cache: the subagent type, the first 120 characters of its description and the first 12 words of its prompt, normalised, with the label; at most 200 entries), and with `recordSessions` on, `recordings` (the last N session recordings: per-agent events as hashed features, redacted error signatures and agent labels; 256 KiB per session and 1.25 MiB in all, see [Session recordings](#session-recordings)). `/escalator reset` clears `stats` and `projects`; `/escalator reset history` clears `sessions`; `/escalator reset recordings` clears `recordings`.
 - **Model calls** (`$.model.complete`, `$.model.classify`): the senior consult; the sampled review (`reviewRate`); a one-token probe of a swap target when a swap fails with an error the mod does not recognise; and the category classification (`modelCategories`, Haiku by default). Model calls go through the provider of your Claude Code session; the mod makes no network calls of its own.
 - **Processes** (`$.process.run`, no shell): `git diff --stat` in the project folder at each consult; `git diff HEAD`, read only with external diff drivers and text filters off, for a sampled review; and the `verifyCommand` you set, at the end of each tracked run. The agent's output never chooses a command.
 - **Plan usage** (`$.session.usage`): read only, and only shown by `/escalator` and the panel.

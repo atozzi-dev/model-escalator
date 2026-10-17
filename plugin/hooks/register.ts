@@ -2,6 +2,7 @@ import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepInpu
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, describeConfig, parseConfig, splitCommand, type Config } from './config'
 import { LADDER, afterHelp, agentHead, beginRequest, endRequest, limitReached, restartSilence, sessionClosed, startCall, agentLabel, allowedMax, nextTier, canAskForHelp, classifyFailure, consultLimit, countStep, EFFORTS, endRun, escalated, features, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_LEAD_NOTICES, newAgent, noteProgress, normalizePath, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, spawnName, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type Features, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
+import { downshiftAdvice, formatAdvice, markHinted, pickHint, type Advice } from './advice'
 import { exportCsv } from './export'
 import { parseReplayArgs,replayReport } from './replay'
 import { addAgent as addRecAgent, indexOf as recIndexOf, mergeRecordings, parseRecordings, push as recPush, recordedOptions, relTime, resumeRecording, startRecording, stepEvent, toolEvent, type Live, type RecEvent, type RecordedMode, type Recording } from './recorder'
@@ -22,6 +23,7 @@ import { addAgent, addConsult, addEscalation, addIntervention, addStep, asUsage,
 export const HELP_TOOL = 'mcp__model-escalator__ask_for_help'
 const STATS_KEY = 'stats'
 const PROJECTS_KEY = 'projects'
+const ADVICE_HINTED_KEY = 'adviceHinted'
 const SESSIONS_KEY = 'sessions'
 const CATEGORIES_KEY = 'categories'
 const RECORDINGS_KEY = 'recordings'
@@ -206,7 +208,46 @@ function stopMapTimer(): void {
 async function statsSignature($: EngineInterface): Promise<string> {
   let learned: unknown
   try { learned = await $.store.get(STATS_KEY) } catch { learned = undefined }
-  return JSON.stringify([mode, baseline, ledger, [...agents.values()].filter((a) => a.paused).map((a) => a.id), learned])
+  return JSON.stringify([mode, baseline, ledger, [...agents.values()].filter((a) => a.paused).map((a) => a.id), learned, await currentAdvice($)])
+}
+
+// The cheaper-model suggestions for this session's project (advice.ts), strong first. [] in `off` mode and on any
+// failure: advice is never worth breaking a report or a redraw.
+async function currentAdvice($: EngineInterface): Promise<Advice[]> {
+  try {
+    if (mode === 'off') return []
+    const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
+    const projects = parseProjects(await $.store.get(PROJECTS_KEY))
+    return downshiftAdvice(stats, {
+      now: await clockNow($), halfLifeMs: halfLifeMs(), minReviewScore: config.minReviewScore, prices: config.prices,
+      learnByCost: config.learnByCost, projects, projectKey: projectId,
+    })
+  } catch {
+    return []
+  }
+}
+
+// Set once the hint was shown in this session; a `$.state` flag keeps it across a module reload.
+let adviceHintShown = false
+
+// The hint line for the report, once per session: the first strong suggestion not hinted in the last week.
+// '' in `off` and `baseline` modes, when it was shown already, when there is none, and on any failure.
+async function adviceHint($: EngineInterface, list: Advice[]): Promise<string> {
+  try {
+    if (mode === 'off' || mode === 'baseline' || adviceHintShown) return ''
+    try { if ((await $.state.get({ plugin: 'model-escalator', key: 'advice-hinted' })).value === true) { adviceHintShown = true; return '' } } catch { /* no flag */ }
+    const now = (await clockNow($)) ?? 0
+    const raw = await $.store.get(ADVICE_HINTED_KEY)
+    const hinted = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, number> : {}
+    const pick = pickHint(list, hinted, now)
+    if (pick === undefined) return ''
+    adviceHintShown = true
+    try { await $.state.set({ plugin: 'model-escalator', key: 'advice-hinted' }, true) } catch { /* the module flag still holds */ }
+    await storeQueue(async () => { await $.store.set(ADVICE_HINTED_KEY, markHinted(hinted, pick, now)) })
+    return formatAdvice([pick]).hint
+  } catch {
+    return ''
+  }
 }
 
 async function statsTick($: EngineInterface): Promise<void> {
@@ -315,6 +356,7 @@ function noteTask(id: string | undefined, e: Record<string, unknown>, r: unknown
 export function resetState(): void {
   sessionTag = newTag()
   projectId = ''
+  adviceHintShown = false
   exploreRandom = undefined
   agents.clear()
   limitNoted.clear()
@@ -743,8 +785,9 @@ export const register: Register = (on, options) => {
       const reviews = formatReviews(stats)
       // This session's savings per category go here, not in the report: the report's request counts stay one table.
       const byCategory = ledger.byCategory && Object.keys(ledger.byCategory).length > 0 ? '\n\n' + reportByCategory(ledger, baseline) : ''
+      const advice = formatAdvice(await currentAdvice($), { respectExplicitModel: config.respectExplicitModel }).text
       return { text: 'Learned stats per category (runs / escalated):\n' + formatStats(stats, await clockNow($), halfLifeMs()) +
-        (reviews ? '\n\nSenior review scores of sampled runs (1-5):\n' + reviews : '') + byCategory }
+        (reviews ? '\n\nSenior review scores of sampled runs (1-5):\n' + reviews : '') + (advice ? '\n\n' + advice : '') + byCategory }
     }
     if (arg === 'reset') {
       // The category cache is kept: it maps task text to a label, which is a fact about the text, not something learned
@@ -782,8 +825,9 @@ export const register: Register = (on, options) => {
     const planText = plan ? '\n\n' + plan : ''
     const pausedText = paused.length === 0 ? '' : '\n\nPaused (resume with /escalator resume <id>|all):\n' +
       paused.map((a) => `- ${agentLabel(a)} (${a.category}, ${a.tier})`).join('\n')
-    return { text: `Mode: ${mode}\n` + report(ledger, baseline) + planText + pausedText +
-      '\n\nMore: /escalator stats, /escalator map (live agent network), /escalator history, /escalator config, /escalator help' }
+    const hint = await adviceHint($, await currentAdvice($))
+    return { text: `Mode: ${mode}\n` + report(ledger, baseline) + planText + pausedText + (hint ? '\n\n' + hint : '') +
+      '\n\nMore:/escalator stats, /escalator map (live agent network), /escalator history, /escalator config, /escalator help' }
   })
 
   // The map pane. Desktop, VS Code and mobile draw an interactive Svg; the terminal a short text for now.
@@ -836,7 +880,7 @@ export const register: Register = (on, options) => {
       const { Box, Text } = $.ui.resolve(e)
       const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
       const view = buildStatsView({
-        mode, baseline, ledger, stats, plan: await readPlan($), now: await clockNow($), halfLifeMs: halfLifeMs(),
+        mode, baseline, ledger, stats, plan: await readPlan($), now: await clockNow($), halfLifeMs: halfLifeMs(), advice: await currentAdvice($),
         paused: [...agents.values()].filter((a) => a.paused).map((a) => `${agentLabel(a)} (${a.category}, ${a.tier})`),
       })
       const text = (c: ViewCell, wrap: 'wrap' | 'truncate-end' = 'truncate-end') =>

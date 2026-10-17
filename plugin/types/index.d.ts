@@ -103,6 +103,8 @@ declare module 'claude-code' {
         }
         drawnSeq?: number
       }
+      // Set once the cheaper-model hint was shown in this session, so a module reload does not show it twice.
+      'advice-hinted': boolean
     }
   }
 }
