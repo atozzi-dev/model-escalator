@@ -27,7 +27,7 @@ Mods are not sandboxed: they run with your permissions. To see what the mod hook
 
 After installing, nothing needs configuring. The mod runs in `active` mode: it tracks every subagent and in-process teammate, leaves your lead model alone, and intervenes only on the agents it sees get stuck. Within a session:
 
-- `/escalator` shows the session cost, the estimated savings and the interventions so far.
+- `/escalator` shows the session cost (the lead and the subagents apart), the estimated savings and the interventions so far; once per session it adds a one-line hint when a task category runs on a stronger model than it seems to need, and the cheaper one has already done that work well under the mod's checks.
 - `/escalator map` opens the live map of agents (picture below).
 - `/escalator panel` opens a panel with the session at a glance and what the mod has learned; `/escalator stats` prints the learned statistics as text.
 
@@ -80,7 +80,7 @@ Some features are off by default because they change cost or behaviour in ways t
 - `deescalateAfter`: returning to a cheaper model rewrites the prompt cache and may bring the block back.
 - `explore`: deliberately runs some tasks on a model learning had ruled out; some tasks should not run on a weaker model.
 - `reviewRate`: each sampled review is one senior call.
-- `modelCategories`: adds one classification call per uncached spawn, and its cost is not in the report.
+- `modelCategories`: adds one background classification call per uncached spawn (the spawn does not wait for it), and its cost is not in the report.
 - `respectExplicitModel`: the mod cannot tell a model you asked for from one the lead chose, and lead agents often name a cheap model; correcting that choice is what learning is for.
 
 ## Getting work delegated
@@ -123,7 +123,7 @@ These are the subcommands listed by `/escalator help`:
 | Command | Effect |
 |---|---|
 | `/escalator` or `/escalator report` | Session cost, estimated savings and interventions (the default) |
-| `/escalator stats` | What the mod has learned per task category, the review scores of sampled runs, and this session's savings per category |
+| `/escalator stats` | What the mod has learned per task category, the review scores of sampled runs, cheaper-model suggestions for categories that never get stuck (see [Cheaper model suggestions](#cheaper-model-suggestions): not a quality guarantee), and this session's savings per category |
 | `/escalator config` | The effective configuration and the environment mode, with the variable each value came from |
 | `/escalator history [n]` | The last `n` recorded sessions (default 10, at most 50) |
 | `/escalator export [session\|learned\|history\|all]` | This session's costs, the learned statistics or the session history as CSV tables (default `session`), printed as text to paste into a spreadsheet; reads the plugin store only |
@@ -132,13 +132,25 @@ These are the subcommands listed by `/escalator help`:
 | `/escalator consult <id>` | Ask the senior model about an agent now; the advice reaches it on its next tool call. Active mode only |
 | `/escalator swap <id>` | Move an agent one tier up, from its next request (the map's detail buttons do the same). Active mode only |
 | `/escalator resume <id>\|all` | Resume agents paused at the human level |
-| `/escalator replay [option=value ...]` | Replay the recorded sessions (`recordSessions`) with other options and compare with what happened, without any model call. See [Replaying sessions](#replaying-sessions) |
+| `/escalator replay [option=value ...]`, `/escalator replay sweep option=values ...` | Replay the recorded sessions (`recordSessions`) with other options and compare with what happened, without any model call. See [Replaying sessions](#replaying-sessions) |
 | `/escalator reset` | Forget the learned statistics (the session history and the task category cache are kept) |
 | `/escalator reset history` | Clear the recorded session history |
 | `/escalator reset recordings` | Clear the session recordings kept for replay (`recordSessions`) |
 | `/escalator help` | List the subcommands |
 
 `<id>` is the agent's id or its name. An unknown subcommand shows the list.
+
+### Cheaper model suggestions
+
+Learning never starts an agent below the model its Agent call asked for, so a category that always asks for Opus keeps paying Opus prices. `/escalator stats` and the stats panel list the categories that look like they could run one tier lower; you decide, by asking for the cheaper model in the Agent call or the agent's definition.
+
+A suggestion only means the current model **did not get stuck** on that category (enough runs, almost no escalations, failed checks or rework). It is not a comparison with the cheaper model, and the savings are estimates from list prices. Whether the cheaper model would do the work *as well* is a separate question. Checks passed by the current model (its reviews, its `verifyCommand` runs, no rework of its files) describe the current model only: they appear as context, never as evidence. Each suggestion falls in one of three kinds:
+
+- **Measured**: the cheaper model already ran this category at least 5 times (decayed count) with few failures, under at least one active check: 3 or more senior reviews of its runs (`reviewRate`), your `verifyCommand` for work that writes code, or rework tracking (`reworkWindowMinutes`) for work that writes files (features, fixes, tests, refactors, docs, UI, data). The suggestion names that evidence, for example "verifyCommand passed on 6 sonnet runs", "reviews of sonnet runs average 4.3" or "no rework by the lead in 6 sonnet runs". Only these are marked strong, and only these can become the one-line hint in `/escalator`.
+- **Guarded**: no such evidence yet, but a check would catch a drop after the switch: your `verifyCommand` for code (the strongest), sampled senior reviews when `reviewRate` is on, or the lead's edits of the cheaper model's files. The suggestion says quality is not measured yet and which check would notice; learning then moves the category back up.
+- **Unmeasured**: read-only work (reviews, audits, research) leaves nothing to review, test or rework, and work of unknown kind has no check unless `reviewRate` is on. The suggestion says plainly that the mod cannot tell whether the cheaper model would find the same issues.
+
+Reviews and rework are only tracked on runs that start below the lead's model. A cheaper security reviewer that quietly misses problems would look like a success to the mod, so for read-only work compare a few runs yourself before switching.
 
 ### The agent map and the stats panel
 
@@ -183,7 +195,7 @@ Options are set from `/config` or under `pluginConfigs` in your settings (key `m
 | `minReviewScore` | 3 | From 1 to 5: a sampled run reviewed below this score counts as not accepted for learning |
 | `explore` | 0 (off) | From 0 to 1: how often a task starts on a cheaper model that learning had ruled out, to check whether it became good enough. Never below the model the task asked for. `observe` only logs it |
 | `respectExplicitModel` | false | When on and the Agent call names a model, learning and exploration do not change the starting model. The ladder still applies |
-| `modelCategories` | false | Labels each new subagent task with one short call to a small model (Haiku) instead of keywords only. Cached; a failed call falls back to the keywords |
+| `modelCategories` | false | Refines the task category of each new subagent with one short call to a small model (Haiku) on top of the keyword category (agent type, description and the start of the prompt). The agent starts at once on the keyword category; the label is cached and used for recording the run and for later spawns. A failed call keeps the keywords |
 | `reworkWindowMinutes` | 30 | Minutes after a cheaper run during which an edit by the lead to a file that run wrote counts as rework: the run is moved to not accepted once. `0` turns it off. Only edits made through Claude Code are seen |
 | `recordSessions` | 0 (off) | Records what the mod observed in each session and keeps the last N sessions (at most 50), so `/escalator replay` can try other options on them. Works in every mode except `off`, `observe` included. See [Session recordings](#session-recordings) |
 
@@ -202,6 +214,8 @@ Size: one session is capped at 256 KiB of JSON text; a longer session drops its 
 `/escalator replay` runs the recorded sessions through the same detector and ladder code with the options in force, changed by the `option=value` pairs you give, for example `/escalator replay thresholdHaiku=4 graceSteps=6 levels=nudge,swap,human`. It accepts `thresholdHaiku`, `thresholdSonnet`, `thresholdOpus`, `graceSteps`, `levels`, `effortStep`, `effortBoost`, `maxTier`, `oscillationEdits`, `idleSteps`, `idleWeight`, `stallMinutes`, `maxConsultsPerAgent`, `maxConsultsPerSession`, `consultBudgetUsd`, `deescalateAfter` and `pauseAtHuman`, with the same validation as the options; an invalid value or another option is refused with the list. It makes no model call and changes nothing.
 
 The output compares the recorded interventions with the candidate's, per level and per task category, counts escalated runs, lists possible false positives (agents that finished well with no intervention but that the candidate would hit) and the agents that differ most, with the tool result at which each action fires. A self-check replays each session with the options it was recorded with and reports how many recorded interventions it reproduces; `/escalator replay` with no option shows the options in force against the recording.
+
+`/escalator replay sweep option=values ...` replays every recorded session over a grid of options and ranks the candidates: a range `lo..hi` or `lo..hi:step`, a list `a,b,c`, or one value per option (for `levels`, alternatives separated by `|`), at most 200 combinations, for example `/escalator replay sweep thresholdHaiku=2..5 graceSteps=3,4,6`. Rows are ordered by the fewest possible false positives (weighted by the highest level they reach), then the most stuck agents caught, then closeness to the options in force; the row of the options in force is always shown. It makes no model call and has the same limits as the plain replay.
 
 Limits: the replay does not simulate the models. After an intervention each agent does what it did in the recording, so a note, consult or swap that comes earlier or later would have changed what followed; read the results as where the ladder would fire on the same work, not as outcomes. The start tier chosen by learning, verifications and reviews are not run again; consult answers are reused in order. Sessions recorded in `observe` or `baseline` mode replay as `observe`. Agents whose recording is incomplete (trimmed, cleared or interrupted by a reload) are skipped.
 
@@ -226,10 +240,10 @@ This section lists what `claude plugin validate plugin` reports for the mod. Not
 - **UI output:** log lines, status line, toasts (`$.ui.log`, `$.ui.status`, `$.ui.toast`), and in active mode short notices in the main conversation (`$.session.append`, `notifyLead`).
 - **Environment variables (read only):** `MODEL_ESCALATOR_MODE`, `MODEL_ESCALATOR_BASELINE`, `EVAL_MODEL_ESCALATOR_MODE`, `EVAL_MODEL_ESCALATOR_BASELINE`.
 - **Session state:** key `model-escalator.session` (`$.state.get`, `$.state.set`): the per-agent snapshot, including recent tool summaries (file paths and command lines) and error text. It is redacted only when it is sent to the senior model.
-- **Store** (`$.store.get`, `$.store.set`, `$.store.delete`): `stats` (learned counters per category and start tier), `projects` (the same per project; the working directory is stored as a hash), `sessions` (session summaries: mode, reference model, cost totals; no prompts), `categories` (the classification cache: the subagent type, the first 120 characters of its description and the first 12 words of its prompt, normalised, with the label; at most 200 entries), and with `recordSessions` on, `recordings` (the last N session recordings: per-agent events as hashed features, redacted error signatures and agent labels; 256 KiB per session and 1.25 MiB in all, see [Session recordings](#session-recordings)). `/escalator reset` clears `stats` and `projects`; `/escalator reset history` clears `sessions`; `/escalator reset recordings` clears `recordings`.
+- **Store** (`$.store.get`, `$.store.set`, `$.store.delete`): `stats` (learned counters per category and start tier), `projects` (the same per project; the working directory is stored as a hash), `sessions` (session summaries: mode, reference model, cost totals; no prompts), `adviceHinted` (when each cheaper-model hint was last shown, so it is not repeated within a week), `categories` (the classification cache: the subagent type, the first 120 characters of its description and the first 12 words of its prompt, normalised, with the label; at most 200 entries), and with `recordSessions` on, `recordings` (the last N session recordings: per-agent events as hashed features, redacted error signatures and agent labels; 256 KiB per session and 1.25 MiB in all, see [Session recordings](#session-recordings)). `/escalator reset` clears `stats` and `projects`; `/escalator reset history` clears `sessions`; `/escalator reset recordings` clears `recordings`.
 - **Model calls** (`$.model.complete`, `$.model.classify`): the senior consult; the sampled review (`reviewRate`); a one-token probe of a swap target when a swap fails with an error the mod does not recognise; and the category classification (`modelCategories`, Haiku by default). Model calls go through the provider of your Claude Code session; the mod makes no network calls of its own.
 - **Processes** (`$.process.run`, no shell): `git diff --stat` in the project folder at each consult; `git diff HEAD`, read only with external diff drivers and text filters off, for a sampled review; and the `verifyCommand` you set, at the end of each tracked run. The agent's output never chooses a command.
-- **Plan usage** (`$.session.usage`): read only, and only shown by `/escalator` and the panel.
+- **Plan usage and session cost** (`$.session.usage`): read only; the plan windows and the total Claude Code reports for the session are only shown by `/escalator` and the panel.
 - **Clock** (`$.clock.now`, `$.clock.after`, `$.clock.every`, `$.clock.sleep`): redraws, stall checks and batched saves.
 - **Command registration** (`$.command.register`) for `/escalator`.
 

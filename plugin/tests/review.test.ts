@@ -198,8 +198,8 @@ test('a sampled cheap run: git diff of the edited files, rubric and redacted dif
   expect(line).toContain('does the task')
   expect(h.toasts.length).toBe(0)
   const stats = await command($, 'stats')
-  expect(stats).toContain('general-purpose:other haiku: 1 runs')
-  expect(stats).toContain('- general-purpose:other haiku: average 4.0/5 over 1 review')
+  expect(stats).toContain('general-purpose:feature haiku: 1 run')
+  expect(stats).toContain('- general-purpose:feature haiku: average 4.0/5 over 1 review')
 })
 
 test('reviewModel overrides the senior; a low score shows a toast', { options: { ...RATE, reviewModel: 'sonnet' } }, async ($, on) => {
@@ -326,7 +326,7 @@ test('a run recorded after its review keeps the review in the stats', { options:
   release(undefined)
   await until(() => h.logs.some((l) => l.includes('verification passed')))
   const stats = await command($, 'stats')
-  expect(stats).toContain('general-purpose:other haiku: 1 runs')
+  expect(stats).toContain('general-purpose:feature haiku: 1 run')
   expect(stats).toContain('average 4.0/5 over 1 review')
 })
 

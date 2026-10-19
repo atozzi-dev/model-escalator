@@ -1,0 +1,78 @@
+name: Bug report
+description: Something does not work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. For a security problem do not use this form: use "Report a vulnerability" on the Security tab.
+  - type: input
+    id: claude-code-version
+    attributes:
+      label: Claude Code version
+      description: Output of `claude --version`.
+      placeholder: "2.1.301"
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - Terminal
+        - Desktop app
+        - VS Code extension
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: mod-version
+    attributes:
+      label: Mod version
+      description: Shown by `/plugin`, or the `version` in `plugin.json`.
+      placeholder: "1.2.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      description: Value of `MODEL_ESCALATOR_MODE`.
+      options:
+        - active (default)
+        - observe
+        - baseline
+        - "off"
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Output of `/escalator config`
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: export
+    attributes:
+      label: Output of `/escalator export all` (optional)
+      description: It contains costs, token counts and categories, no prompts or file contents. Check it before pasting.
+      render: text
+  - type: textarea
+    id: log
+    attributes:
+      label: Debug log lines (optional)
+      description: Lines from `claude --debug` that mention `model-escalator`.
+      render: text

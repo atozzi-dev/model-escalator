@@ -1,3 +1,4 @@
+import { promptHead } from './classify'
 import { LADDER, type Tier } from './detector'
 
 // One cell per category and start tier. Two groups of counters, each with its own clock:
@@ -30,19 +31,63 @@ export type Cell = {
 }
 export type Stats = Record<string, Partial<Record<Tier, Cell>>>
 
+// Keyword categories, tried in this order on the description. Labels and their order are the original ones, with
+// 'review' (new) inserted before 'explore' and 'feature' (new) last, so a description that landed in a label before
+// still does, except one that also says "review"/"audit" and nothing earlier in the list (it was 'explore' or 'other').
+// The patterns grew and now stop at word edges.
 const KEYWORDS: [RegExp, string][] = [
-  [/\btest|spec\b/i, 'tests'],
-  [/\bfix|bug|debug|error\b/i, 'bugfix'],
-  [/\brefactor|rename|cleanup\b/i, 'refactor'],
-  [/\bdoc|readme|comment\b/i, 'docs'],
-  [/\bmigrat|schema|database|sql\b/i, 'data'],
-  [/\bui|css|component|layout\b/i, 'ui'],
-  [/\bsearch|find|explore|research|read\b/i, 'explore'],
+  [/\b(?:test\w*|specs?|coverage|e2e|jest|vitest|pytest|tdd|assert\w*)\b/i, 'tests'],
+  [/\b(?:fix\w*|bugs?|bugfix\w*|debug\w*|errors?|crash\w*|fail\w*|broken|regress\w*|defects?|exceptions?|stack ?traces?|hotfix\w*|repair\w*|flaky)\b/i, 'bugfix'],
+  [/\b(?:refactor\w*|rework\w*|rewrit\w*|renam\w*|clean ?up|simplif\w*|restructur\w*|reorgani[sz]\w*|dedup\w*|tidy\w*|extract\w*)\b/i, 'refactor'],
+  [/\b(?:docs?|documentation|document\w*|readme|comments?|changelog|jsdoc|docstrings?|tutorials?)\b/i, 'docs'],
+  [/\b(?:migrat\w*|schemas?|databases?|db|sql\w*|postgres\w*|queries|query|datasets?|csv|etl)\b/i, 'data'],
+  [/\b(?:ui|ux|css|scss|tailwind|components?|layouts?|styl(?:e|es|ing)|front-?end|buttons?|modals?|responsive|svg|html|themes?)\b/i, 'ui'],
+  [/\b(?:review\w*|audit\w*|critique|assess\w*|vet|proofread\w*)\b/i, 'review'],
+  [/\b(?:search\w*|find\w*|explor\w*|research\w*|read|reads|investigat\w*|survey\w*|inspect\w*|map|locate|trace|analy[sz]\w*|summari[sz]\w*|understand\w*|look(?:ing)? (?:up|into|for|at))\b/i, 'explore'],
+  [/\b(?:implement\w*|add|adds|adding|creat\w*|build|develop\w*|introduc\w*|new|features?|wire|wiring|extend\w*|support)\b/i, 'feature'],
 ]
 
-export function categorize(subagentType: string, description: string): string {
-  const hit = KEYWORDS.find(([re]) => re.test(description))
-  return `${subagentType}:${hit ? hit[1] : 'other'}`
+// The agent type read as words ("security-reviewer" -> security, reviewer). Strong hints win over the description:
+// a reviewer reviews even when its task text talks about tests or errors. Weak hints only apply when the description
+// said nothing.
+const TYPE_STRONG: [RegExp, string][] = [
+  [/^(?:review\w*|audit\w*|critic|inspector)$/, 'review'],
+  [/^(?:tests?|tester|testers|testing|qa)$/, 'tests'],
+  [/^(?:writer|writers|docs?|documenter|documentation)$/, 'docs'],
+]
+const TYPE_WEAK: [RegExp, string][] = [[/^(?:explor\w*|research\w*|scout|search\w*|analyst|investigat\w*)$/, 'explore']]
+
+function typeHint(subagentType: string, table: [RegExp, string][]): string | undefined {
+  const words = subagentType.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+  for (const [re, label] of table) if (words.some((w) => re.test(w))) return label
+  return undefined
+}
+
+// The label whose pattern appears first in the brief (a brief opens with what the task is: "Implement ... test first").
+function firstLabel(text: string): string | undefined {
+  let best: { at: number; label: string } | undefined
+  for (const [re, label] of KEYWORDS) {
+    const at = text.search(re)
+    if (at >= 0 && (best === undefined || at < best.at)) best = { at, label }
+  }
+  return best?.label
+}
+
+// `type:label`. The label comes from, in order: the agent type when it names a role (reviewer, tester, writer), the
+// description (keyword rows in order), a weak type hint (explorer), the first words of the prompt, else 'other'.
+export function categorize(subagentType: string, description: string, prompt?: string): string {
+  let label: string | undefined
+  try {
+    const type = typeof subagentType === 'string' ? subagentType : ''
+    const desc = typeof description === 'string' ? description : ''
+    label = typeHint(type, TYPE_STRONG)
+    if (label === undefined) label = KEYWORDS.find(([re]) => re.test(desc))?.[1]
+    if (label === undefined) label = typeHint(type, TYPE_WEAK)
+    if (label === undefined && typeof prompt === 'string' && prompt !== '') label = firstLabel(promptHead(prompt))
+  } catch {
+    label = undefined
+  }
+  return `${subagentType}:${label ?? 'other'}`
 }
 
 // Old runs fade: every counter of a cell halves after this much time without a new run.
@@ -431,7 +476,11 @@ export function mulberry32(seed: number): () => number {
   }
 }
 
-const num1 = (n: number): string => (Number.isInteger(n) ? String(n) : n.toFixed(1))
+// Counters decay into fractions: shown rounded to one decimal, and without ".0" when that is a whole number, so a
+// count of 1.96 reads "2" and not "2.0" next to a "2". Whole counts stay as they are.
+const round1 = (n: number): number => Math.round(n * 10) / 10
+const num1 = (n: number): string => String(round1(n))
+const runsText = (n: number): string => (round1(n) === 1 ? '1 run' : `${num1(n)} runs`)
 
 function ageText(ms: number): string {
   if (ms < 60_000) return 'just now'
@@ -450,9 +499,12 @@ function costText(c: Cell, now: number | undefined, halfLifeMs: number): string 
 }
 
 // One line per category and tier; counters may be fractional once decayed. With `now`, shows how old each cell is.
-// Cells with priced runs also show the mean cost of a run and the cost per accepted run.
+// Cells with priced runs also show the mean cost of a run and the cost per accepted run. Lines are grouped by agent
+// type (the part of the category before the colon), the most expensive type first, then the most expensive
+// category, then the tier order; where costs tie the stored order is kept.
 export function formatStats(stats: Stats, now?: number, halfLifeMs = HALF_LIFE_MS): string {
-  const lines: string[] = []
+  type Row = { category: string; type: string; order: number; cost: number; seq: number; text: string }
+  const rows: Row[] = []
   for (const [category, row] of Object.entries(stats)) {
     for (const [tier, c] of Object.entries(row)) {
       if (!c) continue
@@ -460,10 +512,30 @@ export function formatStats(stats: Stats, now?: number, halfLifeMs = HALF_LIFE_M
       const na = c.notAccepted !== undefined && c.notAccepted !== c.escalated ? `, ${num1(c.notAccepted)} not accepted` : ''
       const rw = c.reworked ? `, reworked ${num1(c.reworked)}` : ''
       const age = now !== undefined && c.updatedAt !== undefined ? ` (updated ${ageText(Math.max(0, now - c.updatedAt))})` : ''
-      lines.push(`- ${category} ${tier}: ${num1(c.runs)} runs, ${num1(c.escalated)} escalated${failed}${na}${rw}${costText(c, now, halfLifeMs)}${age}`)
+      const colon = category.indexOf(':')
+      rows.push({
+        category, type: colon > 0 ? category.slice(0, colon) : category, order: LADDER.indexOf(tier as Tier), seq: rows.length,
+        cost: typeof c.cost === 'number' && Number.isFinite(c.cost) ? c.cost : 0,
+        text: `- ${category} ${tier}: ${runsText(c.runs)}, ${num1(c.escalated)} escalated${failed}${na}${rw}${costText(c, now, halfLifeMs)}${age}`,
+      })
     }
   }
-  return lines.length === 0 ? 'No stats yet.' : lines.join('\n')
+  if (rows.length === 0) return 'No stats yet.'
+  const typeCost = new Map<string, number>()
+  const catCost = new Map<string, number>()
+  const typeSeq = new Map<string, number>()
+  const catSeq = new Map<string, number>()
+  for (const r of rows) {
+    typeCost.set(r.type, (typeCost.get(r.type) ?? 0) + r.cost)
+    catCost.set(r.category, (catCost.get(r.category) ?? 0) + r.cost)
+    if (!typeSeq.has(r.type)) typeSeq.set(r.type, r.seq)
+    if (!catSeq.has(r.category)) catSeq.set(r.category, r.seq)
+  }
+  rows.sort((x, y) =>
+    (typeCost.get(y.type)! - typeCost.get(x.type)!) || (typeSeq.get(x.type)! - typeSeq.get(y.type)!) ||
+    (catCost.get(y.category)! - catCost.get(x.category)!) || (catSeq.get(x.category)! - catSeq.get(y.category)!) ||
+    (x.order - y.order) || (x.seq - y.seq))
+  return rows.map((r) => r.text).join('\n')
 }
 
 // --- Scope: per-project statistics with a global fallback ---

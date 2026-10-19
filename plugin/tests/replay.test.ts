@@ -232,3 +232,16 @@ test('/escalator replay without recordings says how to start, and with them prin
   expect(await runCommand($, 'replay graceSteps=x')).toContain('Invalid value for graceSteps')
   expect(await runCommand($, 'help')).toContain('/escalator replay')
 })
+
+test('/escalator replay sweep: no recordings, an invalid spec, and a ranked table with one recording', { options: { recordSessions: 5 } }, async ($, on) => {
+  const h = wire(on)
+  expect(await runCommand($, 'replay sweep thresholdHaiku=2..4')).toContain('No recorded sessions')
+  expect(await runCommand($, 'replay sweep graceSteps=x')).toContain('Invalid value for graceSteps')
+  expect(await runCommand($, 'replay sweep')).toContain('option=values')
+  await recordSession($, h)
+  const text = await runCommand($, 'replay sweep thresholdHaiku=2..4')
+  expect(text).toContain('Sweep of 3 candidates over 1 recorded session')
+  expect(text).toContain('Swept: thresholdHaiku 2..4 (3)')
+  expect(text).toContain('Ranking:')
+  expect(await runCommand($, 'help')).toContain('/escalator replay sweep')
+})

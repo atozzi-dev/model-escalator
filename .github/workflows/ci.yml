@@ -10,7 +10,7 @@ permissions:
 
 env:
   # Single source for the pinned engine version.
-  CLAUDE_CODE_VERSION: 2.1.295
+  CLAUDE_CODE_VERSION: 2.1.301
 
 jobs:
   test:
@@ -30,6 +30,9 @@ jobs:
       - name: Test the repository scripts
         working-directory: .
         run: node --test scripts/*.test.mjs
+      - name: Check that the manifest and changelog versions match
+        working-directory: .
+        run: node scripts/changelog-version.mjs check
       - name: Type check against the published mod API types
         run: |
           mkdir -p .claude-plugin/types

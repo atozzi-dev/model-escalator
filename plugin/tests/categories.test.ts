@@ -1,25 +1,28 @@
 import { expect, mock, test } from 'claude-code/testing'
 import { cacheKey } from '../hooks/classify'
 import { parseConfig } from '../hooks/config'
-import { resetState } from '../hooks/register'
+import { LABEL_WAIT_MS, resetState } from '../hooks/register'
 
 const ON = { modelCategories: true }
 let nextId = 0
 
-type Wired = { calls: { text: string; labels: readonly string[]; model?: string }[]; data: Record<string, unknown>; cats: string[]; logs: string[] }
+type Wired = { clock: ReturnType<typeof mock.clock>; release: () => void; calls: { text: string; labels: readonly string[]; model?: string }[]; data: Record<string, unknown>; cats: string[]; logs: string[] }
 
 // `answer` is what the fake classifier says; a function may throw to simulate a failed request.
-async function wire(on: any, $: any, answer: (text: string) => string | undefined, env: Record<string, string> = {}, seed: Record<string, unknown> = {}): Promise<Wired> {
+async function wire(on: any, $: any, answer: (text: string) => string | undefined, env: Record<string, string> = {}, seed: Record<string, unknown> = {}, hold = false): Promise<Wired> {
+  let release: () => void = () => {}
+  const gate = hold ? new Promise<void>((r) => { release = r }) : undefined
   resetState()
-  mock.clock(on, { now: 1_000_000_000_000 })
+  const clock = mock.clock(on, { now: 1_000_000_000_000 })
   mock.env(on, env)
   const data: Record<string, unknown> = { ...seed }
   on('store.get', (_$: unknown, e: any) => ({ value: data[e.key] }))
   on('store.set', (_$: unknown, e: any) => { data[e.key] = e.value; return { value: undefined } })
   on('store.delete', (_$: unknown, e: any) => { delete data[e.key]; return { value: undefined } })
   const calls: Wired['calls'] = []
-  on('model.classify', (_$: unknown, e: any) => {
+  on('model.classify', async (_$: unknown, e: any) => {
     calls.push({ text: e.text, labels: e.labels, model: e.options?.model })
+    if (gate) await gate
     return { value: answer(e.text) } as never
   })
   const logs: string[] = []
@@ -30,10 +33,10 @@ async function wire(on: any, $: any, answer: (text: string) => string | undefine
   on('ui.log', (_$: unknown, e: any) => { logs.push(String(e.message ?? e.text ?? '')); return { value: undefined } as never })
   for (const k of ['ui.toast', 'ui.status'] as const) on(k, () => ({ value: undefined }) as never)
   await $.session.start({ cwd: '/work' } as never)
-  return { calls, data, cats: [], logs }
+  return { clock, release, calls, data, cats: [], logs }
 }
 
-async function spawn($: any, description: string, prompt = 'please look at the thing', extra: Record<string, unknown> = {}) {
+async function spawn($: any, description: string, prompt = 'please do the thing', extra: Record<string, unknown> = {}) {
   return await $.agent.spawn({ prompt, description, subagentType: 'general-purpose', model: 'haiku', ...extra } as never) as { agentId: string }
 }
 
@@ -103,7 +106,7 @@ test("'other' with no keyword match stays other", { options: ON }, async ($, on)
 })
 
 test('a cache already in the store is used without a call', { options: ON }, async ($, on) => {
-  const key = cacheKey('general-purpose', 'build the widget', 'please look at the thing')
+  const key = cacheKey('general-purpose', 'build the widget', 'please do the thing')
   const w = await wire(on, $, () => 'docs', {}, { categories: { entries: [[key, 'ui']] } })
   const { agentId } = await spawn($, 'build the widget')
   expect(w.calls.length).toBe(0)
@@ -133,4 +136,63 @@ test('observe mode classifies (it only measures)', { options: ON }, async ($, on
   const w = await wire(on, $, () => 'feature', { MODEL_ESCALATOR_MODE: 'observe' })
   await spawn($, 'build the widget')
   expect(w.calls.length).toBe(1)
+})
+
+test('the spawn does not wait for the label: it starts at once on the keyword category and its learned tier', { options: ON }, async ($, on) => {
+  // 'build the widget' is a feature by keywords; haiku keeps escalating there, so the spawn is lifted to sonnet.
+  const cells = { haiku: { runs: 6, escalated: 5, tokens: 0 } }
+  const w = await wire(on, $, () => 'docs', {}, { stats: { 'general-purpose:feature': cells } }, true)
+  const r = await spawn($, 'build the widget') as { agentId: string; model?: string }
+  expect(r.agentId).toBeTruthy()
+  expect(r.model).toBe('sonnet')
+  expect(w.calls.length).toBe(1) // asked, not answered: the gate is still closed
+  expect(w.data.categories).toBe(undefined)
+  w.release()
+  await $.turn.complete({ agentId: r.agentId, answer: 'done' } as never)
+  // The run is recorded under the refined label, and the label is cached for later spawns.
+  expect(Object.keys(w.data.stats as object).sort()).toEqual(['general-purpose:docs', 'general-purpose:feature'])
+  expect(((w.data.categories as { entries: [string, string][] }).entries[0]![1])).toBe('docs')
+})
+
+test('a later spawn of the same task uses the cached label at once', { options: ON }, async ($, on) => {
+  const w = await wire(on, $, () => 'docs', {}, {}, true)
+  const first = await spawn($, 'build the widget')
+  w.release()
+  await $.turn.complete({ agentId: first.agentId, answer: 'done' } as never)
+  const second = await spawn($, 'build the widget')
+  expect(w.calls.length).toBe(1)
+  await $.turn.complete({ agentId: second.agentId, answer: 'done' } as never)
+  const cells = (w.data.stats as Record<string, { haiku: { runs: number } }>)['general-purpose:docs']!
+  expect(cells.haiku.runs).toBe(2)
+})
+
+test('a classifier that fails after the spawn leaves the keyword category', { options: ON }, async ($, on) => {
+  const w = await wire(on, $, () => { throw new Error('api-error') }, {}, {}, true)
+  const r = await spawn($, 'build the widget')
+  w.release()
+  await $.turn.complete({ agentId: r.agentId, answer: 'done' } as never)
+  expect(Object.keys(w.data.stats as object)).toEqual(['general-purpose:feature'])
+})
+
+test('a classifier that never answers does not hold the end of the run: the keyword category is recorded after the timeout', { options: ON }, async ($, on) => {
+  const w = await wire(on, $, () => 'docs', {}, {}, true) // the gate is never released before the run ends
+  const r = await spawn($, 'build the widget')
+  let done = false
+  const complete = $.turn.complete({ agentId: r.agentId, answer: 'done' } as never).then(() => { done = true })
+  await w.clock.advance(LABEL_WAIT_MS + 1)
+  await complete
+  expect(done).toBe(true)
+  expect(Object.keys(w.data.stats as object)).toEqual(['general-purpose:feature'])
+  // The label that arrives late only goes to the cache.
+  w.release()
+  await w.clock.advance(10)
+  expect(Object.keys(w.data.stats as object)).toEqual(['general-purpose:feature'])
+  expect(((w.data.categories as { entries: [string, string][] } | undefined)?.entries ?? [])[0]?.[1]).toBe('docs')
+})
+
+test('without the option the prompt still feeds the keyword category', async ($, on) => {
+  const w = await wire(on, $, () => 'docs')
+  const r = await spawn($, 'Task 9', 'Implement the export command.')
+  await $.turn.complete({ agentId: r.agentId, answer: 'done' } as never)
+  expect(Object.keys(w.data.stats as object)).toEqual(['general-purpose:feature'])
 })

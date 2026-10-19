@@ -2,8 +2,8 @@
 // JSON-safe LRU cache and the merge with the keyword category. No calls to `$`; nothing here throws.
 import { redactSecrets } from './dossier'
 
-// The keyword categories of `categorize` (learning.ts) stay as labels so stats remain comparable, plus two the
-// keywords cannot see and that otherwise fall into 'other': new code ('feature') and review work ('review').
+// The keyword categories of `categorize` (learning.ts) use the same labels, so keyword and model categories stay
+// comparable: the original seven, plus new code ('feature') and review work ('review').
 export const LABELS: readonly string[] = ['tests', 'bugfix', 'refactor', 'docs', 'data', 'ui', 'explore', 'feature', 'review', 'other']
 
 export const LABEL_DESCRIPTIONS: Readonly<Record<string, string>> = {
@@ -45,6 +45,16 @@ export function classifierInput(subagentType: string, description: string, promp
     const head = `Agent type: ${redactSecrets(prose(subagentType)).slice(0, 60)}\nTask: ${redactSecrets(prose(description)).slice(0, MAX_DESCRIPTION_CHARS)}\nBrief: `
     const room = Math.max(0, MAX_INPUT_CHARS - head.length)
     return (head + redactSecrets(prose(prompt)).slice(0, room)).slice(0, MAX_INPUT_CHARS)
+  } catch {
+    return ''
+  }
+}
+
+// The first words of a brief as the keyword categories read them: prose only, redacted, at most PROMPT_HEAD_CHARS.
+export const PROMPT_HEAD_CHARS = 400
+export function promptHead(prompt: unknown): string {
+  try {
+    return redactSecrets(prose(prompt)).slice(0, PROMPT_HEAD_CHARS)
   } catch {
     return ''
   }

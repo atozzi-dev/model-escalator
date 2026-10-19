@@ -1,12 +1,13 @@
 // The statistics panel as data: sections of rows of cells, no engine calls. `register.ts` maps it to Box and Text
 // elements per surface. Pure and total: malformed input degrades to fewer or empty rows, never throws.
 import { costPerAccepted, HALF_LIFE_MS, type Stats } from './learning'
-import { savings, type Ledger } from './savings'
+import { costSplit, savings, type Ledger } from './savings'
+import { ADVICE, type Advice } from './advice'
 
 // align: numbers are right-aligned. short: a narrower text used when the column has to give way. clip: 'middle'
 // cuts a name in its middle, keeping the end that tells similar names apart ("gen…:bugfix").
 export type ViewCell = { text: string; bold?: boolean; dim?: boolean; align?: 'right'; short?: string; clip?: 'middle' }
-export type ViewSection = { id: 'session' | 'plan' | 'categories' | 'learned'; title: string; rows: ViewCell[][] }
+export type ViewSection = { id: 'session' | 'plan' | 'categories' | 'learned' | 'advice'; title: string; rows: ViewCell[][] }
 export type StatsView = { sections: ViewSection[] }
 
 export type StatsInput = {
@@ -14,8 +15,10 @@ export type StatsInput = {
   baseline: string
   ledger: Ledger
   paused: string[]            // one label per paused agent
+  claudeCost?: number         // the session total Claude Code reports (USD), when it does
   plan: string                // the report's "Plan usage" block, '' when there is none
   stats: Stats                // learned statistics (global)
+  advice?: Advice[]           // cheaper-model suggestions (advice.ts), none by default
   now?: number
   halfLifeMs?: number
   topRows?: number            // rows per table, default 5
@@ -39,6 +42,12 @@ const head = (first: string, ...rest: (string | [string, string])[]): ViewCell[]
     : { text: t, bold: true, dim: true, align: 'right' })),
 ]
 
+// The lead and the agents apart, when the ledger has the split.
+function splitRows(l: Ledger): ViewCell[][] {
+  const s = costSplit(l)
+  return s ? [[label('Lead'), plain(`${usd(s.lead)}, ${s.pct}% of the session`)], [label('Subagents'), plain(usd(s.agents))]] : []
+}
+
 function sessionRows(i: StatsInput): ViewCell[][] {
   const l = i.ledger
   const s = savings({ ...l, actual: num(l.actual), baselineHigh: num(l.baselineHigh), baselineLow: num(l.baselineLow) })
@@ -49,6 +58,10 @@ function sessionRows(i: StatsInput): ViewCell[][] {
     [label('Cost'), plain(`${usd(num(l.actual))} (consults ${num(l.consults)}, ${usd(num(l.consultCost))})`)],
     [label(`All on ${i.baseline}`), plain(`${usd(num(l.baselineLow))} to ${usd(num(l.baselineHigh))}`)],
     [label('Savings'), plain(`${usd(s.low)} to ${usd(s.high)} (${s.lowPct}% to ${s.highPct}%)`)],
+    ...splitRows(l),
+    ...(i.claudeCost !== undefined && Number.isFinite(i.claudeCost)
+      ? [[label('Claude Code'), plain(`${usd(i.claudeCost)} reported, the mod metered ${usd(num(l.actual))}`)]]
+      : []),
     [label('Interventions'), plain(iv || 'none')],
     [label('Paused'), plain(i.paused.length > 0 ? i.paused.join('; ') : 'none')],
   ]
@@ -109,6 +122,42 @@ function learnedRows(i: StatsInput, top: number): ViewCell[][] {
   return out
 }
 
+const TIERS = ['haiku', 'sonnet', 'opus']
+const GUARDS = ['tests', 'reviews', 'rework']
+const isAdvice = (a: unknown): a is Advice => {
+  const o = a as Partial<Advice> | null
+  return typeof o === 'object' && o !== null && typeof o.category === 'string' && TIERS.includes(o.tier as string) &&
+    TIERS.includes(o.suggested as string) && typeof o.runs === 'number' && Number.isFinite(o.runs) &&
+    (o.strength === 'strong' || o.strength === 'moderate')
+}
+
+// One row per suggestion: what changes, the evidence, and the cost of a run now and (estimated) on the cheaper model.
+// The last cell is the strength of a measured suggestion, "guarded: <check>" or "unmeasured" otherwise (a missing quality
+// reads as unmeasured), with a note under the table saying what that means; a last row keeps the general caveat.
+function adviceRows(list: unknown, top: number): ViewCell[][] {
+  const ok = Array.isArray(list) ? list.filter(isAdvice) : []
+  if (ok.length === 0) return []
+  const money = (x: number | undefined): string => (typeof x === 'number' && Number.isFinite(x) && x >= 0 ? usd(x) : '-')
+  const out: ViewCell[][] = [head('Category', 'Change', 'Runs', 'Now', 'Est.', '')]
+  const shown = ok.slice(0, Math.min(top, ADVICE.maxLines))
+  for (const a of shown) {
+    out.push([
+      name(a.category), plain(`${a.tier} -> ${a.suggested}`), right(num1(a.runs)), right(money(a.costNow)), right(money(a.costCheaper)),
+      { text: a.quality === 'measured' ? a.strength : a.quality === 'guarded' ? `guarded: ${GUARDS.includes(a.guard as string) ? a.guard : '?'}` : 'unmeasured', dim: true },
+    ])
+  }
+  const more = ok.length - shown.length
+  if (more > 0) out.push([label(`+${more} more`)])
+  if (shown.some((a) => a.quality === 'guarded')) {
+    out.push([label('guarded: quality not measured yet; tests, sampled reviews or lead rework would show a drop after the switch')])
+  }
+  if (shown.some((a) => a.quality !== 'measured' && a.quality !== 'guarded')) {
+    out.push([label('unmeasured: quality not measured, the mod cannot tell whether the cheaper model would do as well')])
+  }
+  out.push([label('From runs that did not get stuck, not a comparison with the cheaper model; costs are estimates')])
+  return out
+}
+
 // The panel's content: session, plan usage (only when the engine reports plan windows), savings per category and
 // the learned statistics.
 export function buildStatsView(i: StatsInput): StatsView {
@@ -118,6 +167,8 @@ export function buildStatsView(i: StatsInput): StatsView {
   if (plan.length > 0) sections.push({ id: 'plan', title: 'Plan usage', rows: plan })
   sections.push({ id: 'categories', title: 'Savings by category', rows: categoryRows(i.ledger, top) })
   sections.push({ id: 'learned', title: 'Learned statistics', rows: learnedRows(i, top) })
+  const advice = adviceRows(i.advice, top)
+  if (advice.length > 0) sections.push({ id: 'advice', title: 'Cheaper model suggestions', rows: advice })
   return { sections }
 }
 

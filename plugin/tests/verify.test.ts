@@ -45,7 +45,7 @@ const finish =($: any, agentId: string) => $.turn.complete({ turnId: 't' + agent
 const stats = async ($: any): Promise<any> => {
   const out = await $.command.run({ command: 'escalator', args: 'stats', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as never) as { text: string }
   const cells: Record<string, Record<string, { runs: number; escalated: number; failedVerify?: number; notAccepted?: number }>> = {}
-  for (const m of out.text.matchAll(/^- (\S+) (\w+): ([\d.]+) runs, ([\d.]+) escalated(?:, ([\d.]+) failed verify)?(?:, ([\d.]+) not accepted)?/gm)) {
+  for (const m of out.text.matchAll(/^- (\S+) (\w+): ([\d.]+) runs?, ([\d.]+) escalated(?:, ([\d.]+) failed verify)?(?:, ([\d.]+) not accepted)?/gm)) {
     const escalated = Number(m[4])
     ;(cells[m[1]!] ??= {})[m[2]!] = {
       runs: Number(m[3]), escalated,

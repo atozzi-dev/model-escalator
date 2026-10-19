@@ -2,8 +2,9 @@ import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepInpu
 import { newTag, tagNote, withAnnouncement } from './channel'
 import { DEFAULT_CONFIG, describeConfig, parseConfig, splitCommand, type Config } from './config'
 import { LADDER, afterHelp, agentHead, beginRequest, endRequest, limitReached, restartSilence, sessionClosed, startCall, agentLabel, allowedMax, nextTier, canAskForHelp, classifyFailure, consultLimit, countStep, EFFORTS, endRun, escalated, features, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_LEAD_NOTICES, newAgent, noteProgress, normalizePath, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, spawnName, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type Features, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
+import { downshiftAdvice, formatAdvice, markHinted, pickHint, type Advice } from './advice'
 import { exportCsv } from './export'
-import { parseReplayArgs,replayReport } from './replay'
+import { parseReplayArgs, replayReport, sweep, sweepGrid, sweepReport } from './replay'
 import { addAgent as addRecAgent, indexOf as recIndexOf, mergeRecordings, parseRecordings, push as recPush, recordedOptions, relTime, resumeRecording, startRecording, stepEvent, toolEvent, type Live, type RecEvent, type RecordedMode, type Recording } from './recorder'
 import { buildDossier, inputFromState } from './dossier'
 import { cacheGet, cachePut, cacheKey, classifierInput, combineCategory, LABELS, parseCache } from './classify'
@@ -17,11 +18,12 @@ import { buildDetail, consultGate, findAgent, selectorChips, swapGate } from './
 import { buildStatsView, columnWidths, fitView, type ViewCell } from './stats-view'
 import { buildReviewPrompt, diffArgv, editedPath, formatReviews, isCheaper, parseReview, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun } from './review'
 import { parseSnapshot, type Snapshot, type TrackedAgent } from './state'
-import { addAgent, addConsult, addEscalation, addIntervention, addStep, asUsage, cost as stepCost, emptyLedger, planBlock, report, reportByCategory, savings, statusLine, type Ledger, type Usage } from './savings'
+import { addAgent, addConsult, addEscalation, addIntervention, addStep, asUsage, cost as stepCost, emptyLedger, planBlock, report, reportByCategory, savings, statusLine, claudeCostLine, claudeCostUsd, type Ledger, type Usage } from './savings'
 
 export const HELP_TOOL = 'mcp__model-escalator__ask_for_help'
 const STATS_KEY = 'stats'
 const PROJECTS_KEY = 'projects'
+const ADVICE_HINTED_KEY = 'adviceHinted'
 const SESSIONS_KEY = 'sessions'
 const CATEGORIES_KEY = 'categories'
 const RECORDINGS_KEY = 'recordings'
@@ -206,7 +208,47 @@ function stopMapTimer(): void {
 async function statsSignature($: EngineInterface): Promise<string> {
   let learned: unknown
   try { learned = await $.store.get(STATS_KEY) } catch { learned = undefined }
-  return JSON.stringify([mode, baseline, ledger, [...agents.values()].filter((a) => a.paused).map((a) => a.id), learned])
+  return JSON.stringify([mode, baseline, ledger, [...agents.values()].filter((a) => a.paused).map((a) => a.id), learned, await currentAdvice($), await readClaudeCost($)])
+}
+
+// The cheaper-model suggestions for this session's project (advice.ts), strong first. [] in `off` mode and on any
+// failure: advice is never worth breaking a report or a redraw.
+async function currentAdvice($: EngineInterface): Promise<Advice[]> {
+  try {
+    if (mode === 'off') return []
+    const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
+    const projects = parseProjects(await $.store.get(PROJECTS_KEY))
+    return downshiftAdvice(stats, {
+      now: await clockNow($), halfLifeMs: halfLifeMs(), minReviewScore: config.minReviewScore, prices: config.prices,
+      learnByCost: config.learnByCost, projects, projectKey: projectId,
+      verify: config.verifyCommand.trim() !== '', reviewRate: config.reviewRate, reworkWindowMinutes: config.reworkWindowMinutes, baseline,
+    })
+  } catch {
+    return []
+  }
+}
+
+// Set once the hint was shown in this session; a `$.state` flag keeps it across a module reload.
+let adviceHintShown = false
+
+// The hint line for the report, once per session: the first strong suggestion not hinted in the last week.
+// '' in `off` and `baseline` modes, when it was shown already, when there is none, and on any failure.
+async function adviceHint($: EngineInterface, list: Advice[]): Promise<string> {
+  try {
+    if (mode === 'off' || mode === 'baseline' || adviceHintShown) return ''
+    try { if ((await $.state.get({ plugin: 'model-escalator', key: 'advice-hinted' })).value === true) { adviceHintShown = true; return '' } } catch { /* no flag */ }
+    const now = (await clockNow($)) ?? 0
+    const raw = await $.store.get(ADVICE_HINTED_KEY)
+    const hinted = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, number> : {}
+    const pick = pickHint(list, hinted, now)
+    if (pick === undefined) return ''
+    adviceHintShown = true
+    try { await $.state.set({ plugin: 'model-escalator', key: 'advice-hinted' }, true) } catch { /* the module flag still holds */ }
+    await storeQueue(async () => { await $.store.set(ADVICE_HINTED_KEY, markHinted(hinted, pick, now)) })
+    return formatAdvice([pick]).hint
+  } catch {
+    return ''
+  }
 }
 
 async function statsTick($: EngineInterface): Promise<void> {
@@ -315,6 +357,7 @@ function noteTask(id: string | undefined, e: Record<string, unknown>, r: unknown
 export function resetState(): void {
   sessionTag = newTag()
   projectId = ''
+  adviceHintShown = false
   exploreRandom = undefined
   agents.clear()
   limitNoted.clear()
@@ -356,6 +399,7 @@ export function resetState(): void {
   reviewRuns.clear()
   writtenFiles.clear()
   reworkRuns.clear()
+  labelPending.clear()
   lastNow = undefined
   lastSaveAt = undefined
   trailing?.cancel()
@@ -556,42 +600,91 @@ export function isFork(e: { fork?: boolean; subagentType?: string }): boolean {
   return e.fork === true || e.subagentType === 'fork'
 }
 
-// The task category of a spawn: the keyword one, or with `modelCategories` the label a small model gave (cached in the
-// store by a key that ignores case and punctuation). Any failure falls back to the keywords; never throws.
-async function taskCategory($: EngineInterface, e: { subagentType?: string; description?: string; prompt?: string }): Promise<string> {
+// The category an agent starts with, and, with `modelCategories` on a cache miss, the label a small model is still
+// working on (a promise that never rejects; it resolves to the refined category, or undefined to keep the keyword one).
+type CategoryPlan = { category: string; refine?: Promise<string | undefined> }
+
+// Refined labels in flight, by agent id: the outcome of a run waits for its own (see settleLabel).
+export const LABEL_WAIT_MS = 3000
+const labelPending = new Map<string, { done: Promise<void>; late: boolean }>()
+
+// 'other' from the model does not override a specific keyword category.
+function refined(type: string, label: string | undefined, fallback: string): string {
+  if (label === 'other' && !fallback.endsWith(':other')) return fallback
+  return combineCategory(type, label, fallback)
+}
+
+// The task category of a spawn. The keyword one (agent type, description and the first words of the prompt) is
+// always available at once. With `modelCategories` a cached label replaces it right away; otherwise the small model is
+// asked in the background (`refine`) and the spawn does not wait for it. Any failure keeps the keywords; never throws.
+async function taskCategory($: EngineInterface, e: { subagentType?: string; description?: string; prompt?: string }): Promise<CategoryPlan> {
   const type = e.subagentType ?? ''
   const description = e.description ?? ''
-  const fallback = categorize(type, description)
-  if (!config.modelCategories || mode === 'off' || mode === 'baseline') return fallback
+  const fallback = categorize(type, description, e.prompt)
+  if (!config.modelCategories || mode === 'off' || mode === 'baseline') return { category: fallback }
   try {
     const key = cacheKey(type, description, e.prompt ?? '')
-    if (key === '') return fallback
+    if (key === '') return { category: fallback }
     const hit = cacheGet(parseCache(await $.store.get(CATEGORIES_KEY)), key)
-    let label = hit.label
-    if (label !== undefined) {
+    if (hit.label !== undefined) {
       await storeQueue(async () => {
         const fresh = cacheGet(parseCache(await $.store.get(CATEGORIES_KEY)), key)
         if (fresh.label !== undefined) await $.store.set(CATEGORIES_KEY, fresh.cache)
       })
-    } else {
-      try { label = await $.model.classify(classifierInput(type, description, e.prompt ?? ''), LABELS, { model: 'haiku' }) } catch { label = undefined }
-      if (typeof label === 'string') {
-        const l = label.trim().toLowerCase()
-        if (!LABELS.includes(l)) label = undefined
-        else {
-          label = l
-          await storeQueue(async () => {
-            await $.store.set(CATEGORIES_KEY, cachePut(parseCache(await $.store.get(CATEGORIES_KEY)), key, l, CATEGORY_CACHE_MAX))
-          })
-        }
-      } else label = undefined
+      return { category: refined(type, hit.label, fallback) }
     }
-    // 'other' from the classifier does not override a specific keyword category.
-    if (label === 'other' && !fallback.endsWith(':other')) return fallback
-    return combineCategory(type, label, fallback)
+    const input = classifierInput(type, description, e.prompt ?? '')
+    const refine = (async (): Promise<string | undefined> => {
+      try {
+        let label: unknown
+        try { label = await $.model.classify(input, LABELS, { model: 'haiku' }) } catch { return undefined }
+        const l = typeof label === 'string' ? label.trim().toLowerCase() : ''
+        if (!LABELS.includes(l)) return undefined
+        await storeQueue(async () => {
+          await $.store.set(CATEGORIES_KEY, cachePut(parseCache(await $.store.get(CATEGORIES_KEY)), key, l, CATEGORY_CACHE_MAX))
+        })
+        return refined(type, l, fallback)
+      } catch {
+        return undefined
+      }
+    })()
+    return { category: fallback, refine }
   } catch {
-    return fallback
+    return { category: fallback }
   }
+}
+
+// Gives a running agent its refined category once the model has answered: the agent, the ledger's agent count and the
+// recording keep the category it started with only where they already copied it (the recording's spawn line).
+function applyLabel(id: string, category: string | undefined): void {
+  try {
+    const a = agents.get(id)
+    if (!a || category === undefined || category === a.category) return
+    const old = a.category
+    agents.set(id, { ...a, category })
+    const row = ledger.byCategory?.[old]
+    if (row && row.agents > 0) ledger = { ...ledger, byCategory: { ...ledger.byCategory, [old]: { ...row, agents: row.agents - 1 } } }
+    ledger = addAgent(ledger, category)
+  } catch { /* the keyword category stays */ }
+}
+
+// Waits (once) for the agent's label before its run is recorded, so the run lands in the refined category, but never
+// longer than LABEL_WAIT_MS: after that the run is recorded under the keyword category and a label that arrives later
+// only goes to the cache (it is not applied to the agent).
+async function settleLabel($: EngineInterface, id: string | undefined): Promise<void> {
+  try {
+    const entry = id === undefined ? undefined : labelPending.get(id)
+    if (id !== undefined) labelPending.delete(id)
+    if (!entry) return
+    let timer: { cancel: () => void } | undefined
+    await Promise.race([
+      entry.done,
+      new Promise<void>((resolve) => {
+        try { timer = $.clock.after(LABEL_WAIT_MS, () => { entry.late = true; resolve() }) } catch { entry.late = true; resolve() }
+      }),
+    ])
+    timer?.cancel()
+  } catch { /* nothing to wait for */ }
 }
 
 export function readMode(v: string | undefined): Mode {
@@ -677,7 +770,7 @@ export const register: Register = (on, options) => {
       } catch { /* the tool is optional: the ladder works without it */ }
     }
     try {
-      await $.command.register({ name: 'escalator', description: 'Model escalator: savings report, stats panel and the live agent network', argumentHint: '[report|stats|config|history [n]|export [session|learned|history|all]|map|panel [close]|consult <id>|swap <id>|reset [history|recordings]|replay [option=value ...]|resume <id>|all|help]' })
+      await $.command.register({ name: 'escalator', description: 'Model escalator: savings report, stats panel and the live agent network', argumentHint: '[report|stats|config|history [n]|export [session|learned|history|all]|map|panel [close]|consult <id>|swap <id>|reset [history|recordings]|replay [option=value ...]|replay sweep option=values ...|resume <id>|all|help]' })
     } catch { /* name taken: the report stays reachable through the status line */ }
     return r
   })
@@ -693,8 +786,9 @@ export const register: Register = (on, options) => {
       const reviews = formatReviews(stats)
       // This session's savings per category go here, not in the report: the report's request counts stay one table.
       const byCategory = ledger.byCategory && Object.keys(ledger.byCategory).length > 0 ? '\n\n' + reportByCategory(ledger, baseline) : ''
+      const advice = formatAdvice(await currentAdvice($), { respectExplicitModel: config.respectExplicitModel, reviewRate: config.reviewRate }).text
       return { text: 'Learned stats per category (runs / escalated):\n' + formatStats(stats, await clockNow($), halfLifeMs()) +
-        (reviews ? '\n\nSenior review scores of sampled runs (1-5):\n' + reviews : '') + byCategory }
+        (reviews ? '\n\nSenior review scores of sampled runs (1-5):\n' + reviews : '') + (advice ? '\n\n' + advice : '') + byCategory }
     }
     if (arg === 'reset') {
       // The category cache is kept: it maps task text to a label, which is a fact about the text, not something learned
@@ -730,9 +824,11 @@ export const register: Register = (on, options) => {
     // On a subscription the engine reports the plan windows; on API billing there are none and the block is left out.
     const plan = await readPlan($)
     const planText = plan ? '\n\n' + plan : ''
+    const reported = claudeCostLine(await readClaudeCost($), ledger)
     const pausedText = paused.length === 0 ? '' : '\n\nPaused (resume with /escalator resume <id>|all):\n' +
       paused.map((a) => `- ${agentLabel(a)} (${a.category}, ${a.tier})`).join('\n')
-    return { text: `Mode: ${mode}\n` + report(ledger, baseline) + planText + pausedText +
+    const hint = await adviceHint($, await currentAdvice($))
+    return { text: `Mode: ${mode}\n` + report(ledger, baseline) + (reported ? '\n' + reported : '') + planText + pausedText + (hint ? '\n\n' + hint : '') +
       '\n\nMore: /escalator stats, /escalator map (live agent network), /escalator history, /escalator config, /escalator help' }
   })
 
@@ -785,8 +881,10 @@ export const register: Register = (on, options) => {
     try {
       const { Box, Text } = $.ui.resolve(e)
       const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
+      const claudeCost = await readClaudeCost($)
       const view = buildStatsView({
-        mode, baseline, ledger, stats, plan: await readPlan($), now: await clockNow($), halfLifeMs: halfLifeMs(),
+        mode, baseline, ledger, stats, plan: await readPlan($), now: await clockNow($), halfLifeMs: halfLifeMs(), advice: await currentAdvice($),
+        ...(claudeCost !== undefined ? { claudeCost } : {}),
         paused: [...agents.values()].filter((a) => a.paused).map((a) => `${agentLabel(a)} (${a.category}, ${a.tier})`),
       })
       const text = (c: ViewCell, wrap: 'wrap' | 'truncate-end' = 'truncate-end') =>
@@ -837,7 +935,8 @@ export const register: Register = (on, options) => {
     // A fork inherits the parent's model and context: it is never rewritten, announced or tracked.
     if (isFork(e)) return next(e)
     let ev = e
-    const category = await taskCategory($, e)
+    const plan = await taskCategory($, e)
+    const category = plan.category
     const asked = tierOf(e.model ?? e.parentModel)
     // `model` is what the Agent call asked for; when it is absent the agent definition or the parent decides, and
     // the types give no way to tell those two apart: only a present `model` counts as an explicit choice.
@@ -876,6 +975,12 @@ export const register: Register = (on, options) => {
       const fresh = newAgent(r.agentId, category, r.model, e.prompt)
       agents.set(r.agentId, name === undefined ? fresh : { ...fresh, name })
       ledger = addAgent(ledger, category)
+      if (plan.refine) {
+        const id = r.agentId
+        const entry = { done: Promise.resolve(), late: false }
+        entry.done = plan.refine.then((c) => { if (!entry.late) applyLabel(id, c) })
+        labelPending.set(id, entry)
+      }
       const now = watching() || recordingOn() ? await clockNow($) : undefined
       if (watching()) mark(r.agentId, now)
       try {
@@ -1076,6 +1181,7 @@ export const register: Register = (on, options) => {
   // 4. End of an agent's run: learn from it and refresh the running report.
   on('turn.complete', async ($, e, next) => {
     const id = e.agentId
+    if (id !== undefined && labelPending.has(id)) await settleLabel($, id)
     const a = id ? agents.get(id) : undefined
     feed($, { type: 'complete', ...(id ? { agentId: id } : {}) })
     if (id && a && mode !== 'off') {
@@ -1626,6 +1732,7 @@ const COMMAND_HELP = [
   '/escalator swap <id>: move an agent one tier up, from its next request (the map\'s detail buttons do the same)',
   '/escalator resume <id>|all: resume agents paused at the human level',
   '/escalator replay [option=value ...]: replay the recorded sessions with other options (thresholds, graceSteps, levels, ...) and compare, without any model call',
+  '/escalator replay sweep option=values ...: replay the recorded sessions over a grid of options (ranges lo..hi or lo..hi:step, lists a,b,c, alternatives of levels separated by |; at most 200 combinations) and rank them by false positives and stuck agents caught',
   '/escalator reset: forget the learned stats (history and category cache are kept)',
   '/escalator reset history: clear the recorded session history',
   '/escalator reset recordings: clear the sessions recorded for replay (option recordSessions)',
@@ -1654,15 +1761,24 @@ async function configCommand($: any): Promise<string> {
 // with the options in force changed as asked, against what the ladder did. Read only. Never throws.
 async function replayCommand($: EngineInterface, args: string): Promise<string> {
   try {
+    // The stored recordings plus this session's live copy.
+    const load = async (): Promise<Recording[]> => {
+      let recs: Recording[] = []
+      try { recs = parseRecordings(await $.store.get(RECORDINGS_KEY)) } catch { /* nothing stored */ }
+      if (recording && recording.rec.events.some((ev) => ev.k !== 'boot')) {
+        const live = JSON.parse(JSON.stringify(recording.rec)) as Recording
+        recs = [...recs.filter((r) => r.id !== live.id), live]
+      }
+      return recs
+    }
+    if (args === 'sweep' || args.startsWith('sweep ')) {
+      const grid = sweepGrid(args.slice(5).trim(), config)
+      if ('error' in grid) return grid.error
+      return sweepReport(sweep(await load(), config, grid))
+    }
     const candidate = parseReplayArgs(args, config)
     if ('error' in candidate) return candidate.error
-    let recs: Recording[] = []
-    try { recs = parseRecordings(await $.store.get(RECORDINGS_KEY)) } catch { /* nothing stored */ }
-    if (recording && recording.rec.events.some((ev) => ev.k !== 'boot')) {
-      const live = JSON.parse(JSON.stringify(recording.rec)) as Recording
-      recs = [...recs.filter((r) => r.id !== live.id), live]
-    }
-    return replayReport(recs, config, candidate)
+    return replayReport(await load(), config, candidate)
   } catch {
     return 'Could not replay the recorded sessions.'
   }
@@ -1937,6 +2053,11 @@ async function closeStatsPanel($: EngineInterface): Promise<string> {
   } catch {
     return 'Could not close the Escalator panel.'
   }
+}
+
+// The session total Claude Code reports (`$.session.usage().cost`, free), in USD; undefined when it reports none.
+async function readClaudeCost($: EngineInterface): Promise<number | undefined> {
+  try { return claudeCostUsd((await $.session.usage()).cost) } catch { return undefined }
 }
 
 // The report's "Plan usage" block: '' on API billing or when the engine cannot tell. Never throws.

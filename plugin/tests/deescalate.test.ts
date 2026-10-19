@@ -193,7 +193,7 @@ test('a run that swapped up and came back is recorded as escalated', OPT, async 
   await progress($, h, id, 2)
   await $.turn.complete({ turnId: 't', agentId: id, answer: 'done' } as never)
   const text = ((await $.command.run({ command: 'escalator', args: 'stats', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as never)) as { text: string }).text
-  expect(text).toContain('haiku: 1 runs, 1 escalated')
+  expect(text).toContain('haiku: 1 run, 1 escalated')
 })
 
 test('escalated() is true for a de-escalated agent', () => {

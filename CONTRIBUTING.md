@@ -40,3 +40,16 @@ Types: `feat`, `fix`, `test`, `docs`, `refactor`, `perf`, `chore`, `ci`.
 ## Pull requests
 
 One topic per pull request. Describe what changed, why, and how you tested it, including any live check. Add a line to `CHANGELOG.md` under Unreleased for user-visible changes.
+
+## Issues
+
+Use the issue forms: the bug report asks for the Claude Code version and surface, the mod version and mode, and the output of `/escalator config`. Security problems go through private vulnerability reporting (see `SECURITY.md`), never a public issue.
+
+## Releasing
+
+Maintainers only.
+
+1. On `develop`, set `version` in `plugin/.claude-plugin/plugin.json`, rename `## [Unreleased]` in `CHANGELOG.md` to `## [X.Y.Z] - YYYY-MM-DD` and add a fresh empty `## [Unreleased]` above it. CI fails if the manifest and the newest dated section disagree (`node scripts/changelog-version.mjs check`).
+2. Open a pull request from `develop` to `main` and merge it once the `test` check is green.
+3. Tag the merge commit on `main` and push the tag: `git tag vX.Y.Z` then `git push origin vX.Y.Z`.
+4. The Release workflow checks the tag against the manifest and creates the GitHub release (`model-escalator X.Y.Z`) with that version's changelog section as notes. If a release for the tag already exists it does nothing.
