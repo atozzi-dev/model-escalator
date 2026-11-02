@@ -1,8 +1,12 @@
 // Downshift advice: tells the user when a task category runs on a model stronger than it seems to need.
 //
-// Learning (`learning.ts`) only climbs: it never starts an agent below the model the Agent call asked for, so a
-// category that always asks for opus and never gets stuck keeps paying opus prices. The mod cannot change that at
-// spawn without overriding an explicit choice; it can only tell the user, who decides. This module reads the learned
+// Learning (`learning.ts`) only climbs. With `startTier: auto` (the default) a spawn whose Agent call names no model
+// already starts on its category's tier (`AUTO_START`: explore on haiku, code, tests, docs, data and ui on sonnet).
+// What it does not lower is a model named in the Agent call or the agent's definition, reviews and other tasks, and
+// every agent under `startTier: requested`: a category that always asks for opus and never gets stuck keeps paying
+// opus prices there. The mod cannot change that at spawn without overriding an explicit choice; it can only tell
+// the user, who decides. (A suggestion is never pointless under auto: runs on a tier above the category's own
+// came from an explicit model.) This module reads the learned
 // statistics and lists those categories, one suggestion each, one tier down. Pure: no engine calls, never throws.
 //
 // How to wire it (register.ts and stats-view.ts, not done here):
@@ -415,7 +419,7 @@ function guardedLine(a: Advice): string {
     `Quality is not measured yet (${runs})${why}.`
 }
 
-export type FormatOptions = { respectExplicitModel?: boolean; reviewRate?: number }
+export type FormatOptions = { respectExplicitModel?: boolean; reviewRate?: number; startTier?: 'auto' | 'requested' }
 
 // `lines`: one line per suggestion (at most `ADVICE.maxLines`), for the stats text: a short list line when measured,
 // full sentences that state the limit when not. `text`: the block for `/escalator stats`, '' when there is nothing
@@ -439,7 +443,11 @@ export function formatAdvice(list: Advice[], opts: FormatOptions = {}): { text: 
       'These are based on runs that did not get stuck, not on a comparison with the cheaper model, and the savings are ' +
         'estimates. Only checks on the cheaper model\'s own runs ("quality: ...") count as measured quality; checks on the ' +
         'current model are context, and only measured suggestions are strong.',
-      'The mod never starts an agent below the model it asked for: ask for the cheaper model in the Agent call or in the agent\'s definition. ' + how,
+      (opts.startTier === 'requested'
+        ? 'startTier requested is on: the mod starts every agent on the model it asked for. '
+        : 'With startTier auto the mod already starts some categories lower when the Agent call names no model (explore on haiku; bugfix, feature, refactor, tests, docs, data and ui on sonnet). ') +
+        'These suggestions are for what it does not lower: a model named in the Agent call or the agent\'s definition, reviews and other tasks. ' +
+        'Nothing changes on its own: ask for the cheaper model in the Agent call or in the agent\'s definition. ' + how,
     ].join('\n')
     return { text, lines, hint: strong !== undefined ? hintLine(strong) : '' }
   } catch {

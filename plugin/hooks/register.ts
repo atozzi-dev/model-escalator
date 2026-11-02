@@ -790,7 +790,7 @@ export const register: Register = (on, options) => {
       const reviews = formatReviews(stats)
       // This session's savings per category go here, not in the report: the report's request counts stay one table.
       const byCategory = ledger.byCategory && Object.keys(ledger.byCategory).length > 0 ? '\n\n' + reportByCategory(ledger, baseline) : ''
-      const advice = formatAdvice(await currentAdvice($), { respectExplicitModel: config.respectExplicitModel, reviewRate: config.reviewRate }).text
+      const advice = formatAdvice(await currentAdvice($), { respectExplicitModel: config.respectExplicitModel, reviewRate: config.reviewRate, startTier: config.startTier }).text
       return { text: 'Learned stats per category (runs / escalated):\n' + formatStats(stats, await clockNow($), halfLifeMs()) +
         (reviews ? '\n\nSenior review scores of sampled runs (1-5):\n' + reviews : '') + (advice ? '\n\n' + advice : '') + byCategory }
     }
