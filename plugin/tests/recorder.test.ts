@@ -133,6 +133,17 @@ test('stored recordings: the current one replaces its older copy, at most `keep`
   expect(merged.length).toBeLessThan(9)
 })
 
+test('stored recordings with no agents take no slot', async () => {
+  const mk = (id: string, withAgent: boolean): Recording => {
+    const l = startRecording(id, 1, 'active', 'opus', {})
+    if (withAgent) addAgent(l, { id: 'a', label: 'a', cat: 'c', tier: 'haiku' })
+    return l.rec
+  }
+  const stored = [mk('e1', false), mk('a', true), mk('e2', false), mk('b', true), mk('e3', false)]
+  expect(mergeRecordings(stored, mk('c', true), 3).map((r) => r.id)).toEqual(['a', 'b', 'c'])
+  expect(mergeRecordings(stored, mk('now', false), 3).map((r) => r.id)).toEqual(['a', 'b', 'now'])
+})
+
 test('parsing drops malformed recordings and a reloaded one keeps its agent indexes', async () => {
   const live = fresh()
   addAgent(live, { id: 'x1', label: 'a', cat: 'c', tier: 'haiku' })

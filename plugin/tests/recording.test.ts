@@ -202,6 +202,21 @@ test('only the newest recordSessions sessions are kept', { options: { recordSess
   expect(all.map((r) => r.agents[0]?.label)).toEqual(['worker1', 'worker2'])
 })
 
+test('a session in which no agent ran is not written; one that spawns later is', { options: { recordSessions: 5 } }, async ($, on) => {
+  const h = wire(on, {}, { fresh: true })
+  await $.session.start({ cwd: '/work' } as never)
+  await $.session.end({ reason: 'exit' } as never)
+  expect(h.recordingWrites).toBe(0)
+  expect(h.store['recordings']).toBe(undefined)
+  // A session that starts empty and then spawns an agent is written once the agent exists.
+  await $.session.start({ cwd: '/work' } as never)
+  const id = await spawn($)
+  await work($, h, id, 2)
+  await $.session.end({ reason: 'exit' } as never)
+  expect(recordings(h).length).toBe(1)
+  expect(recordings(h)[0]!.agents.length).toBe(1)
+})
+
 test('/escalator reset recordings clears them and config shows the option', { options: { recordSessions: 4 } }, async ($, on) => {
   const h = wire(on)
   await $.session.start({ cwd: '/work' } as never)

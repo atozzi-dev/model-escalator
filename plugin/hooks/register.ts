@@ -543,8 +543,10 @@ async function startRecorder($: EngineInterface, reload: boolean): Promise<void>
 }
 
 // Writes the recording to the store now (through the store queue). Never throws.
+// A recording in which no agent ran has nothing to replay and takes no slot: it stays dirty and is written once an agent exists.
 async function flushRecording($: EngineInterface): Promise<void> {
   if (!recording || !recDirty) return
+  if (recording.rec.agents.length === 0) return
   recDirty = false
   try {
     recording.rec.baseline = baseline
