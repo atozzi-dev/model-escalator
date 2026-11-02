@@ -152,7 +152,7 @@ test('the stats name the signal that measures a suggestion', async ($, on) => {
   expect(await run($, '')).toContain('(no rework by the lead in 5 sonnet runs)')
 })
 
-test('code work never run on the cheaper model is only guarded and no hint', async ($, on) => {
+test('code work never run on the cheaper model is only guarded and no hint', { options: { reviewRate: 0 } }, async ($, on) => {
   wire(on)
   await $.session.start({ cwd: '/work' } as never)
   data.stats = { 'coder:feature': { opus: OPUS } }
@@ -170,7 +170,7 @@ test('the verifyCommand option measures code work on the cheaper model runs', { 
   expect(await run($, '')).toContain('(verifyCommand passed on 5 sonnet runs)')
 })
 
-test('code work with rework off and no verifyCommand is unmeasured and no hint', { options: { reworkWindowMinutes: 0 } }, async ($, on) => {
+test('code work with rework off and no verifyCommand is unmeasured and no hint', { options: { reworkWindowMinutes: 0, reviewRate: 0 } }, async ($, on) => {
   wire(on)
   await $.session.start({ cwd: '/work' } as never)
   data.stats = EASY

@@ -35,6 +35,9 @@ declare module 'claude-code' {
           consults?: number
           runCost?: number
           escCounted?: boolean
+          lowered?: 'haiku' | 'sonnet' | 'opus'
+          ownTier?: 'haiku' | 'sonnet' | 'opus'
+          qualityFailed?: boolean
           paused?: boolean
           progressSignals?: number
           deescalated?: boolean

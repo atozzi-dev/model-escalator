@@ -8,7 +8,7 @@ import { parseReplayArgs, replayReport, sweep, sweepGrid, sweepReport } from './
 import { addAgent as addRecAgent, indexOf as recIndexOf, mergeRecordings, parseRecordings, push as recPush, recordedOptions, relTime, resumeRecording, startRecording, stepEvent, toolEvent, type Live, type RecEvent, type RecordedMode, type Recording } from './recorder'
 import { buildDossier, inputFromState } from './dossier'
 import { cacheGet, cachePut, cacheKey, classifierInput, combineCategory, LABELS, parseCache } from './classify'
-import { categorize, costPerAccepted, formatStats, isAccepted, mulberry32, parseProjects, projectKey, recommendScopedWithExploration, recordReviewScoped, recordReworkScoped, recordScoped, scopedStats, type Projects, type Stats } from './learning'
+import { autoStartTier, categorize, costPerAccepted, formatLoweredStarts, formatStats, isAccepted, mulberry32, ownTierOf, parseProjects, projectKey, recommendScopedWithExploration, recordReviewScoped, recordReworkScoped, recordScoped, scopedStats, type Projects, type Stats } from './learning'
 import { emptyGraph, LEAD_ID, reduce, SENIOR_ID, type GraphInput, type GraphState } from './graph'
 import { layoutGraph, type LayoutMemory } from './layout'
 import { renderSvg } from './render-svg'
@@ -62,7 +62,8 @@ const editedFiles = new Map<string, string[]>()
 // which land in either order: the score when the review came first, whether the run was counted as accepted (and
 // when) when the run came first. An entry is dropped once both sides are in; after a module reload the map is
 // empty, which loses at most one flip and never counts a run twice. Capped, oldest dropped first.
-type ReviewedRun = { accepted?: boolean; at?: number; score?: number }
+// `qualityOk`: the run was recorded and not counted as a quality failure (failed verification, low review, rework).
+type ReviewedRun = { accepted?: boolean; qualityOk?: boolean; at?: number; score?: number }
 const reviewRuns = new Map<string, ReviewedRun>()
 const MAX_REVIEWED_RUNS = 200
 const runKey = (id: string, turnId: unknown): string => `${id}:${typeof turnId === 'string' ? turnId : ''}`
@@ -76,6 +77,7 @@ type ReworkRun = {
   id: string; category: string; tier: Tier; label: string; files: Set<string>; endedAt: number
   reworked: boolean
   accepted?: boolean   // how the run was counted, once it is recorded
+  qualityOk?: boolean  // and whether it was counted as a quality failure (false) or not (true)
   at?: number          // when it was recorded
   pending?: boolean    // reworked before it was recorded: applied by recordOutcome
 }
@@ -788,7 +790,7 @@ export const register: Register = (on, options) => {
       const reviews = formatReviews(stats)
       // This session's savings per category go here, not in the report: the report's request counts stay one table.
       const byCategory = ledger.byCategory && Object.keys(ledger.byCategory).length > 0 ? '\n\n' + reportByCategory(ledger, baseline) : ''
-      const advice = formatAdvice(await currentAdvice($), { respectExplicitModel: config.respectExplicitModel, reviewRate: config.reviewRate }).text
+      const advice = formatAdvice(await currentAdvice($), { respectExplicitModel: config.respectExplicitModel, reviewRate: config.reviewRate, startTier: config.startTier }).text
       return { text: 'Learned stats per category (runs / escalated):\n' + formatStats(stats, await clockNow($), halfLifeMs()) +
         (reviews ? '\n\nSenior review scores of sampled runs (1-5):\n' + reviews : '') + (advice ? '\n\n' + advice : '') + byCategory }
     }
@@ -827,10 +829,11 @@ export const register: Register = (on, options) => {
     const plan = await readPlan($)
     const planText = plan ? '\n\n' + plan : ''
     const reported = claudeCostLine(await readClaudeCost($), ledger)
+    const lowered = formatLoweredStarts(agents.values())
     const pausedText = paused.length === 0 ? '' : '\n\nPaused (resume with /escalator resume <id>|all):\n' +
       paused.map((a) => `- ${agentLabel(a)} (${a.category}, ${a.tier})`).join('\n')
     const hint = await adviceHint($, await currentAdvice($))
-    return { text: `Mode: ${mode}\n` + report(ledger, baseline) + (reported ? '\n' + reported : '') + planText + pausedText + (hint ? '\n\n' + hint : '') +
+    return { text: `Mode: ${mode}\n` + report(ledger, baseline) + (reported ? '\n' + reported : '') + (lowered ? '\n' + lowered : '') + planText + pausedText + (hint ? '\n\n' + hint : '') +
       '\n\nMore: /escalator stats, /escalator map (live agent network), /escalator history, /escalator config, /escalator help' }
   })
 
@@ -939,16 +942,27 @@ export const register: Register = (on, options) => {
     let ev = e
     const plan = await taskCategory($, e)
     const category = plan.category
-    const asked = tierOf(e.model ?? e.parentModel)
     // `model` is what the Agent call asked for; when it is absent the agent definition or the parent decides, and
     // the types give no way to tell those two apart: only a present `model` counts as an explicit choice.
-    const explicit = config.respectExplicitModel && mode !== 'baseline' && typeof e.model === 'string' && e.model !== ''
+    const named = typeof e.model === 'string' && e.model !== ''
+    const parentTier = tierOf(named ? e.model : e.parentModel)
+    const explicit = config.respectExplicitModel && mode !== 'baseline' && named
+    // startTier auto: a call that names no model starts on its category's tier, never above what the agent type runs
+    // on by itself (the parent's model for general-purpose, else the model its definition was seen to resolve to).
+    const auto = config.startTier === 'auto' && mode !== 'baseline' && !named
+    const own = auto ? ownTierOf(e.subagentType ?? '', parentTier, agents.values()) : undefined
+    // The tier the agent would run on without the mod: the reference for the lower start and for every rewrite.
+    const asked = own ?? parentTier
+    const floor = auto ? autoStartTier(category, parentTier, own === undefined ? null : own) : asked
+    // Set when the model stays as the call left it (no model named, none rewritten): the result tells the type's own tier.
+    let untouched = !named
+    let lowered: Tier | undefined
     try {
       const stats = ((await $.store.get(STATS_KEY)) ?? {}) as Stats
       const projects = parseProjects(await $.store.get(PROJECTS_KEY))
       const choice = mode === 'baseline'
         ? { tier: baseline, reason: 'requested' as const, learned: baseline }
-        : recommendScopedWithExploration(stats, projects, projectId, category, asked, {
+        : recommendScopedWithExploration(stats, projects, projectId, category, floor, {
           now: await clockNow($), halfLifeMs: halfLifeMs(), explore: config.explore, byCost: config.learnByCost,
           ...(config.explore > 0 && !explicit ? { rand: explorationRandom() } : {}),
         })
@@ -957,11 +971,17 @@ export const register: Register = (on, options) => {
       const best = explicit ? asked : exploring && mode === 'observe' ? choice.learned : choice.tier
       const label = spawnName(e) ?? category
       if (best !== asked) {
-        if (mode !== 'observe') ev = { ...e, model: best }
-        await $.ui.log(`${label}: ${asked} -> ${best}${mode === 'observe' ? ' (would)' : ''}`)
+        if (mode !== 'observe') { ev = { ...e, model: best }; untouched = false }
+        const would = mode === 'observe'
+        if (auto && floor !== asked && LADDER.indexOf(best) < LADDER.indexOf(asked)) {
+          if (!would) lowered = asked
+          await $.ui.log(`${label}: ${would ? 'would start' : 'started'} on ${best}, asked ${asked} (startTier auto)`)
+        } else {
+          await $.ui.log(`${label}: ${asked} -> ${best}${would ? ' (would)' : ''}`)
+        }
       }
       if (explicit && choice.learned !== asked) await $.ui.log(`${label}: kept the requested ${asked} (explicit), learning suggested ${choice.learned}`)
-      if (!explicit && choice.basis === 'cost') await $.ui.log(`${label}: chosen by cost per accepted run (${costLine(scopedStats(stats, projects, projectId, category, await clockNow($), halfLifeMs()), category, asked, await clockNow($))})`)
+      if (!explicit && choice.basis === 'cost') await $.ui.log(`${label}: chosen by cost per accepted run (${costLine(scopedStats(stats, projects, projectId, category, await clockNow($), halfLifeMs()), category, floor, await clockNow($))})`)
       if (exploring) {
         await $.ui.log(mode === 'observe'
           ? `${label}: would explore ${choice.tier} for ${category} (learned ${choice.learned})`
@@ -974,7 +994,11 @@ export const register: Register = (on, options) => {
     const r = await next(ev)
     if (r.agentId) {
       const name = spawnName(e)
-      const fresh = newAgent(r.agentId, category, r.model, e.prompt)
+      const made: TrackedAgent = newAgent(r.agentId, category, r.model, e.prompt)
+      const fresh: TrackedAgent = {
+        ...made, ...(lowered !== undefined ? { lowered } : {}),
+        ...(untouched && typeof r.model === 'string' && r.model !== '' ? { ownTier: tierOf(r.model) } : {}),
+      }
       agents.set(r.agentId, name === undefined ? fresh : { ...fresh, name })
       ledger = addAgent(ledger, category)
       if (plan.refine) {
@@ -1449,6 +1473,7 @@ async function writeStats($: EngineInterface, s: { stats: Stats; projects: Proje
 // was accepted. A review that already landed counts in the acceptance here; one that has not is told how the run
 // was counted (see reviewRun), so a late low score moves the run to not accepted exactly once.
 async function recordOutcome($: EngineInterface, a: TrackedAgent, wasEscalated: boolean, verifyFailed: boolean, key: string): Promise<void> {
+  let poor = verifyFailed
   await storeQueue(async () => {
     const { stats, projects } = await readStats($)
     const now = await clockNow($)
@@ -1456,21 +1481,34 @@ async function recordOutcome($: EngineInterface, a: TrackedAgent, wasEscalated: 
     let next = recordScoped(stats, projects, projectId, a.category, a.startTier, wasEscalated, 0, verifyFailed, now, halfLifeMs(),
       { cost: a.runCost, reviewScore: e?.score, minScore: config.minReviewScore })
     const accepted = isAccepted({ escalated: wasEscalated, verifyFailed, reviewScore: e?.score }, config.minReviewScore)
+    const qualityOk = isAccepted({ escalated: false, verifyFailed, reviewScore: e?.score }, config.minReviewScore)
+    poor = !qualityOk
     // The lead may have reworked the run before its verification landed: it is moved to not accepted now, once.
     const run = reworkRuns.get(key)
     const reworkedEarly = run?.pending === true
     if (run) {
       run.accepted = accepted && !reworkedEarly
+      run.qualityOk = qualityOk && !reworkedEarly
       if (now !== undefined) run.at = now
       if (reworkedEarly) {
         run.pending = false
-        next = recordReworkScoped(next.stats, next.projects, projectId, a.category, a.startTier, { now, halfLifeMs: halfLifeMs(), runAccepted: accepted, runAt: now })
+        next = recordReworkScoped(next.stats, next.projects, projectId, a.category, a.startTier,
+          { now, halfLifeMs: halfLifeMs(), runAccepted: accepted, runQualityOk: qualityOk, runAt: now })
       }
     }
     if (e?.score !== undefined) reviewRuns.delete(key)
-    else if (e) reviewRuns.set(key, { accepted: accepted && !reworkedEarly, ...(now !== undefined ? { at: now } : {}) })
+    else if (e) reviewRuns.set(key, { accepted: accepted && !reworkedEarly, qualityOk: qualityOk && !reworkedEarly, ...(now !== undefined ? { at: now } : {}) })
     await writeStats($, next)
   })
+  if (poor) markQualityFailed(a.id)
+}
+
+// Marks the agent as having a run that failed a quality check, for the startTier line of the report. Never throws.
+function markQualityFailed(id: string): void {
+  try {
+    const cur = agents.get(id)
+    if (cur && cur.qualityFailed !== true) agents.set(id, { ...cur, qualityFailed: true })
+  } catch { /* the count is informative only */ }
 }
 
 // Remembers the file a successful edit tool call of a tracked agent changed (first spelling kept, capped). Never throws.
@@ -1526,18 +1564,23 @@ async function noteLeadEdit($: EngineInterface, input: Record<string, unknown>):
     const run = hitKey === undefined ? undefined : reworkRuns.get(hitKey)
     if (!run || run.reworked) return
     run.reworked = true
+    markQualityFailed(run.id)
     recFor(run.id, (ra, at) => ({ k: 'rework', a: ra, at }))
     if (run.accepted === undefined) run.pending = true
     else {
       const was = run.accepted
+      const wasOk = run.qualityOk
       run.accepted = false
+      run.qualityOk = false
       await storeQueue(async () => {
         const { stats, projects } = await readStats($)
-        await writeStats($, recordReworkScoped(stats, projects, projectId, run.category, run.tier, { now, halfLifeMs: halfLifeMs(), runAccepted: was, runAt: run.at }))
+        await writeStats($, recordReworkScoped(stats, projects, projectId, run.category, run.tier,
+          { now, halfLifeMs: halfLifeMs(), runAccepted: was, runQualityOk: wasOk === true, runAt: run.at }))
       })
-      // A sampled review that lands later must not move the run to not accepted a second time.
+      // A sampled review that lands later must not move the run to not accepted (or to the quality failures) a second time.
       const rv = reviewRuns.get(hitKey!)
       if (rv?.accepted === true) rv.accepted = false
+      if (rv?.qualityOk === true) rv.qualityOk = false
     }
     try { await $.ui.log(`${run.label}: lead reworked ${raw.split(/[\/]/).pop()}`) } catch { /* the note is best effort */ }
   } catch { /* the check must never disturb the lead */ }
@@ -1555,6 +1598,9 @@ function startReview($: EngineInterface, a: AgentState, turnId: unknown, aborted
     const files = editedFiles.get(a.id) ?? []
     editedFiles.delete(a.id)
     if (!watching() || aborted || config.reviewRate <= 0 || !isCheaper(a.startTier, baseline)) return
+    // A run that edited no file (read-only work, or edits made only through the shell) has no diff of its own: the
+    // working tree would show other agents' or the lead's changes. It is not reviewed and costs no call.
+    if (files.length === 0) return
     const key = runKey(a.id, turnId)
     if (!sampleRun(config.reviewRate, sessionTag, key)) return
     reviewRuns.set(key, {})
@@ -1631,17 +1677,21 @@ async function reviewRun($: EngineInterface, a: AgentState, files: readonly stri
       if (e?.accepted !== undefined) {
         // The run is recorded: a low score moves it to not accepted, and the entry has done its job.
         await writeStats($, recordReviewScoped(stats, projects, projectId, a.category, a.startTier, review.score,
-          { now, halfLifeMs: halfLifeMs(), runAccepted: e.accepted, runAt: e.at, minScore: config.minReviewScore }))
+          { now, halfLifeMs: halfLifeMs(), runAccepted: e.accepted, runQualityOk: e.qualityOk === true, runAt: e.at, minScore: config.minReviewScore }))
         reviewRuns.delete(key)
         // The review already moved the run to not accepted: a later rework only counts.
         const w = reworkRuns.get(key)
-        if (w && e.accepted && review.score < config.minReviewScore) w.accepted = false
+        if (w && review.score < config.minReviewScore) {
+          if (e.accepted) w.accepted = false
+          if (e.qualityOk) w.qualityOk = false
+        }
       } else {
         // The run is not recorded yet: its recording reads the score from the entry.
         await writeStats($, recordReviewScoped(stats, projects, projectId, a.category, a.startTier, review.score, { now, halfLifeMs: halfLifeMs() }))
         reviewRuns.set(key, { score: review.score })
       }
     })
+    if (review.score < config.minReviewScore) markQualityFailed(a.id)
     try {
       const reasons = review.reasons.length > 0 ? `: ${review.reasons.join('; ')}` : ''
       await $.ui.log(`${agentLabel(a)} (${a.category}): review ${review.score}/5${reasons}`.slice(0, 600))

@@ -4,6 +4,21 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-02
+
+### Added
+
+- `startTier` option. With `auto` (the default), an agent whose Agent call names no model starts on the model its task category needs: exploration on Haiku; bug fixes, features, refactors, tests, docs, data and UI work on Sonnet. Reviews and other tasks start on the model asked. The start is never above the model the agent would have run on. A model named in the Agent call is always kept. `requested` keeps the previous behaviour.
+- Quality rule in learning: a failed verification, a review below `minReviewScore` or rework by the lead moves a category one tier up as soon as more than 10% of its runs on a tier fall short. Exploration and the cost rule do not go back to that tier until the evidence fades. Escalations are not counted as a quality loss.
+- `/escalator` shows how many runs started lower because of `startTier`, and how many of them escalated or failed a quality check.
+
+### Changed
+
+- Agents without an explicit model now start below the lead's model by default (`startTier: auto`). Set `startTier` to `requested` to keep every agent on the model it asked for.
+- `reviewRate` defaults to 0.25: one run in four of a cheaper model is reviewed by the senior model.
+- Runs that edited no file are no longer reviewed. Before, they were scored on the whole working tree diff, which could hold other agents' work.
+- The cheaper-model advice no longer claims that the mod never starts an agent below the model asked. It now says what `startTier: auto` already lowers and what it leaves to you.
+
 ## [1.3.1] - 2026-11-02
 
 ### Fixed

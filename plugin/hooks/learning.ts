@@ -11,6 +11,8 @@ import { LADDER, type Tier } from './detector'
 //   `record` copies them untouched; `recordReview` decays them from `reviewedAt` before adding a review.
 //
 // - `reworked` (run counter, decays with the others): runs whose files the lead edited soon after (see `recordRework`).
+// - `qualityFailed` (run counter, decays with the others): runs whose work was not good enough, each once whatever the
+//   reasons: failed verification, a review below the bar, rework. Escalations are not counted here (see `QUALITY`).
 //
 // Counters may be fractional once decayed. `updatedAt` (ms) is set only when a run is recorded with a clock.
 // Every optional field is absent in stats stored before it existed: `notAccepted` then reads as `escalated`, a cell
@@ -28,6 +30,7 @@ export type Cell = {
   reviewScore?: number
   reviewedAt?: number
   reworked?: number
+  qualityFailed?: number
 }
 export type Stats = Record<string, Partial<Record<Tier, Cell>>>
 
@@ -90,6 +93,73 @@ export function categorize(subagentType: string, description: string, prompt?: s
   return `${subagentType}:${label ?? 'other'}`
 }
 
+// --- Auto start tier (option `startTier: auto`) ---
+//
+// Learning and exploration only move up from the tier they are given, and most agents inherit the lead's model, so
+// without a lower start nothing would ever run on a cheaper model. With `startTier: auto`, a spawn whose Agent call
+// names no model starts on a tier chosen by the category's label: the cheapest model that usually does that kind of
+// work well. The escalation ladder and the quality rule (`QUALITY`) catch the tasks where it does not.
+// - `explore` on haiku: searching, reading and summarising. Its quality is not measured either (no diff), but a miss
+//   costs little: the lead reads the findings and acts on them itself.
+// - code, tests, docs, data and ui on sonnet: work that verification, sampled reviews and rework can check.
+// - `review`, `other` and any other label start as asked: a review's findings are the result, and no verification,
+//   diff review or rework can tell a review that missed an issue; an unknown kind of task has no evidence at all.
+export const AUTO_START: Readonly<Record<string, Tier>> = {
+  explore: 'haiku', bugfix: 'sonnet', feature: 'sonnet', refactor: 'sonnet', tests: 'sonnet', docs: 'sonnet', data: 'sonnet', ui: 'sonnet',
+}
+
+// The label of a `type:label` category: the part after the last colon (an agent type may hold colons itself).
+export function categoryLabel(category: string): string {
+  const i = category.lastIndexOf(':')
+  return i >= 0 ? category.slice(i + 1) : category
+}
+
+const cheaper = (a: Tier, b: Tier): Tier => (LADDER.indexOf(a) <= LADDER.indexOf(b) ? a : b)
+
+// The tier an agent of `category` starts on with `startTier: auto`. `asked` is the tier it would get otherwise (the
+// parent's model when the call names none). `own` is the tier the agent type runs on by itself when the call names no
+// model: `asked` when the type inherits it (the default), the tier its definition names once seen, or null while that
+// is not known. Never above `asked` nor above `own`. While `own` is unknown only haiku is a safe lower start: a
+// definition that already names a cheaper model than sonnet would otherwise be raised. Never throws.
+export function autoStartTier(category: string, asked: Tier, own: Tier | null = asked): Tier {
+  const ref = own === null ? asked : cheaper(own, asked)
+  const target = typeof category === 'string' ? AUTO_START[categoryLabel(category)] : undefined
+  if (target === undefined) return ref
+  if (own === null && target !== 'haiku') return asked
+  return cheaper(target, ref)
+}
+
+// Agent types known to run on the parent's model when the call names none (their definition names no model).
+export const INHERITING_TYPES: readonly string[] = ['general-purpose']
+
+// The tier an agent of `type` runs on by itself when the call names no model: the parent's for an inheriting type,
+// else the latest `ownTier` seen on an agent of that type in this session (`agents` in spawn order), else undefined.
+export function ownTierOf(type: string, parentTier: Tier, agents: Iterable<{ category: string; ownTier?: Tier }>): Tier | undefined {
+  if (INHERITING_TYPES.includes(type)) return parentTier
+  let seen: Tier | undefined
+  for (const a of agents) {
+    const i = a.category.lastIndexOf(':')
+    if (a.ownTier !== undefined && i >= 0 && a.category.slice(0, i) === type) seen = a.ownTier
+  }
+  return seen
+}
+
+// One line for the session report: how many runs `startTier: auto` started below the asked tier, and how many of them
+// escalated or failed a quality check (failed verification, a low review, rework). '' when none did.
+export function formatLoweredStarts(agents: Iterable<{ lowered?: Tier; startTier: Tier; tier: Tier; qualityFailed?: boolean; escCounted?: boolean }>): string {
+  let n = 0
+  let up = 0
+  let poor = 0
+  for (const a of agents) {
+    if (a.lowered === undefined) continue
+    n++
+    if (a.escCounted === true || LADDER.indexOf(a.tier) > LADDER.indexOf(a.startTier)) up++
+    if (a.qualityFailed === true) poor++
+  }
+  if (n === 0) return ''
+  return `Started lower by startTier: ${n === 1 ? '1 run' : `${n} runs`} (${up} escalated, ${poor} failed a quality check)`
+}
+
 // Old runs fade: every counter of a cell halves after this much time without a new run.
 export const HALF_LIFE_MS = 30 * 24 * 60 * 60 * 1000
 
@@ -115,6 +185,7 @@ function decayed(c: Cell, now: number | undefined, halfLifeMs: number): Cell {
     ...(c.cost !== undefined ? { cost: c.cost * f } : {}),
     ...(c.costRuns !== undefined ? { costRuns: c.costRuns * f } : {}),
     ...(c.reworked !== undefined ? { reworked: c.reworked * f } : {}),
+    ...(c.qualityFailed !== undefined ? { qualityFailed: c.qualityFailed * f } : {}),
   }
 }
 
@@ -129,7 +200,32 @@ const EMPTY: Cell = { runs: 0, escalated: 0, tokens: 0 }
 //   accepted run is lower by more than this share, so noise in the estimates does not make the choice flap.
 export const LEARN = { minRuns: 5, maxEscalationRate: 0.4, minReviewScore: 3, costMargin: 0.1 }
 
+// The quality rule, apart from the rules above. A quality failure is a run whose work was not good enough: it failed
+// the verification gate, a review scored it below `minReviewScore`, or the lead reworked its files. An escalation is
+// not one: a stronger model finished the job, which costs money (the failure-rate and cost rules weigh that) but not
+// quality. Quality failures must climb fast, because the user pays for them with bad work, not with tokens:
+// - `maxRate`: a tier whose decayed quality-failure rate in a category is above 10% is climbed over, with no minimum
+//   number of runs. One failure in the first few runs is enough; one in ten runs is tolerated.
+// - `minFailures`: the decayed quality failures needed for the rule to hold. Decay never changes a rate (all counters
+//   fade together), so the count is what lets the evidence expire: 0.5 keeps a single failure in force for one
+//   half-life (30 days by default), after which the category goes back to the cheaper tier and is measured again.
+// Exploration never tries a tier this rule climbed over (or any tier below it), and the cost rule never picks one.
+export const QUALITY = { maxRate: 0.1, minFailures: 0.5 }
+
 const validScore = (s: unknown): s is number => typeof s === 'number' && s >= 1 && s <= 5
+
+// Quality failures of a cell. A cell stored before the counter existed reads its failed verifications plus its
+// reworked runs (at most its runs): low reviews were not counted per run then.
+export function qualityFailures(c: Cell): number {
+  if (c.qualityFailed !== undefined) return c.qualityFailed
+  return Math.min(c.runs, (c.failedVerify ?? 0) + (c.reworked ?? 0))
+}
+
+// The (already decayed) cell breaks the quality rule.
+function qualityBad(c: Cell): boolean {
+  const q = qualityFailures(c)
+  return c.runs > 0 && q >= QUALITY.minFailures && q / c.runs > QUALITY.maxRate
+}
 
 // What is known of one run when it is judged. `reviewScore` only when the run was sampled and its review scored.
 export type Outcome = { escalated: boolean; verifyFailed?: boolean; reviewScore?: number }
@@ -167,6 +263,8 @@ export function record(
   const row = { ...(stats[category] ?? {}) }
   const c = decayed(row[tier] ?? EMPTY, now, halfLifeMs)
   const accepted = isAccepted({ escalated, verifyFailed, reviewScore: opts.reviewScore }, opts.minScore)
+  // The run's own work fell short: the same outcome judged without the escalation.
+  const poor = !isAccepted({ escalated: false, verifyFailed, reviewScore: opts.reviewScore }, opts.minScore)
   const cost = opts.cost
   const priced = typeof cost === 'number' && Number.isFinite(cost) && cost >= 0
   row[tier] = {
@@ -176,6 +274,7 @@ export function record(
     tokens: c.tokens + tokens,
     failedVerify: (c.failedVerify ?? 0) + (verifyFailed ? 1 : 0),
     notAccepted: (c.notAccepted ?? c.escalated) + (accepted ? 0 : 1),
+    qualityFailed: qualityFailures(c) + (poor ? 1 : 0),
     ...(priced ? { cost: (c.cost ?? 0) + cost, costRuns: (c.costRuns ?? 0) + 1 } : {}),
     ...(now !== undefined ? { updatedAt: now } : {}),
   }
@@ -199,25 +298,34 @@ export function record(
 // `notAccepted`: the run already faded in `runs` by that much, so the not-accepted rate moves exactly as if the run
 // had been recorded as not accepted. `notAccepted` never exceeds `runs`, so even a repeated flip of the same run
 // cannot count more failures than runs.
+//
+// The quality counter follows the same rule with its own flag: `runQualityOk` (default: `runAccepted`) is true when the
+// run was recorded and not counted as a quality failure, so a low score on an escalated run still counts once.
 
 export type ReviewOptions = {
   now?: number
   halfLifeMs?: number
   // true when the reviewed run was already recorded and counted as accepted.
   runAccepted?: boolean
+  // true when that run was recorded and not counted as a quality failure; defaults to `runAccepted`.
+  runQualityOk?: boolean
   // When that run was recorded (ms).
   runAt?: number
   minScore?: number
 }
 
-// Moves one run, counted as accepted, to not accepted in the (already decayed) cell: adds the run's weight today,
-// `0.5 ^ ((now - runAt) / halfLife)` (1 without `runAt`), capped so `notAccepted` never exceeds `runs`.
-function notAcceptedOnce(c: Cell, now: number | undefined, runAt: number | undefined, halfLifeMs: number): Cell {
+type Flip = { notAccepted: boolean; quality: boolean }
+
+// Moves one run of the (already decayed) cell to not accepted and/or to the quality failures: adds the run's weight
+// today, `0.5 ^ ((now - runAt) / halfLife)` (1 without `runAt`), capped so neither counter ever exceeds `runs`.
+// The clock moves to `now` when it is later, as the counters were decayed to it.
+function flipOnce(c: Cell, flip: Flip, now: number | undefined, runAt: number | undefined, halfLifeMs: number): Cell {
   const w = now !== undefined && runAt !== undefined ? fade(now - runAt, halfLifeMs) : 1
-  const before = c.notAccepted ?? c.escalated
+  const add = (before: number): number => Math.max(before, Math.min(c.runs, before + w))
   return {
     ...c,
-    notAccepted: Math.max(before, Math.min(c.runs, before + w)),
+    ...(flip.notAccepted ? { notAccepted: add(c.notAccepted ?? c.escalated) } : {}),
+    ...(flip.quality ? { qualityFailed: add(qualityFailures(c)) } : {}),
     ...(now !== undefined && (c.updatedAt === undefined || now > c.updatedAt) ? { updatedAt: now } : {}),
   }
 }
@@ -230,8 +338,9 @@ export function recordReview(stats: Stats, category: string, tier: Tier, score: 
   const { now, halfLifeMs = HALF_LIFE_MS, runAccepted, runAt, minScore = LEARN.minReviewScore } = opts
   const row = { ...(stats[category] ?? {}) }
   const raw = row[tier] ?? EMPTY
-  const flip = runAccepted === true && score < minScore
-  const c: Cell = flip ? notAcceptedOnce(decayed(raw, now, halfLifeMs), now, runAt, halfLifeMs) : { ...raw }
+  const low = score < minScore
+  const flip = { notAccepted: low && runAccepted === true, quality: low && (opts.runQualityOk ?? runAccepted) === true }
+  const c: Cell = flip.notAccepted || flip.quality ? flipOnce(decayed(raw, now, halfLifeMs), flip, now, runAt, halfLifeMs) : { ...raw }
   const g = now !== undefined && raw.reviewedAt !== undefined ? fade(now - raw.reviewedAt, halfLifeMs) : 1
   row[tier] = {
     ...c,
@@ -246,39 +355,47 @@ export function recordReview(stats: Stats, category: string, tier: Tier, score: 
 //
 // The lead edited, soon after the run ended, a file a cheap agent had written: the run needed fixing. Same "shift
 // once" semantics as a late review: the caller knows (in memory) whether the run was counted as accepted and when,
-// and calls this once per run. `runAccepted: true` moves the run to not accepted with its decayed weight; any other
-// value only counts the rework. The cell's `reworked` grows by one either way. A cell that does not exist returns
-// `stats` itself. Never mutates `stats`.
-export type ReworkOptions = { now?: number; halfLifeMs?: number; runAccepted?: boolean; runAt?: number }
+// and calls this once per run. `runAccepted: true` moves the run to not accepted with its decayed weight, and
+// `runQualityOk: true` (default: `runAccepted`) to the quality failures; otherwise the rework is only counted. The
+// cell's `reworked` grows by one either way. A cell that does not exist returns `stats` itself. Never mutates `stats`.
+export type ReworkOptions = { now?: number; halfLifeMs?: number; runAccepted?: boolean; runQualityOk?: boolean; runAt?: number }
 
 export function recordRework(stats: Stats, category: string, tier: Tier, opts: ReworkOptions = {}): Stats {
   const raw = stats[category]?.[tier]
   if (raw === undefined) return stats
   const { now, halfLifeMs = HALF_LIFE_MS, runAccepted, runAt } = opts
   const d = decayed(raw, now, halfLifeMs)
+  const flip = { notAccepted: runAccepted === true, quality: (opts.runQualityOk ?? runAccepted) === true }
   // Decayed to `now`, so the clock moves with the counters even when the run was not accepted before.
-  const c = runAccepted === true ? notAcceptedOnce(d, now, runAt, halfLifeMs)
+  const c = flip.notAccepted || flip.quality ? flipOnce(d, flip, now, runAt, halfLifeMs)
     : { ...d, ...(now !== undefined && d.updatedAt !== undefined && now > d.updatedAt ? { updatedAt: now } : {}) }
   return { ...stats, [category]: { ...stats[category], [tier]: { ...c, reworked: (d.reworked ?? 0) + 1 } } }
 }
 
 const failures = (c: Cell): number => c.notAccepted ?? c.escalated
 
-// Walks up from `requested` while the (decayed) evidence says the tier fails this category too often.
-// `passed` lists the tiers it climbed over, cheapest first, with their decayed cells.
+// Walks up from `requested` while the (decayed) evidence says the tier fails this category too often, by the
+// failure-rate rule or by the quality rule. `passed` lists the tiers it climbed over, cheapest first, with their
+// decayed cells; `quality` marks those the quality rule climbed over. `floor` is the lowest tier exploration and the
+// cost rule may use: the one above the highest tier the quality rule climbed over, else `requested`.
 function climb(stats: Stats, category: string, requested: Tier, now: number | undefined, halfLifeMs: number) {
-  const passed: { tier: Tier; cell: Cell }[] = []
+  const passed: { tier: Tier; cell: Cell; quality: boolean }[] = []
   let t = requested
+  let floor = requested
   for (;;) {
     const raw = stats[category]?.[t]
     const c = raw === undefined ? undefined : decayed(raw, now, halfLifeMs)
-    const bad = c !== undefined && c.runs >= LEARN.minRuns && failures(c) / c.runs > LEARN.maxEscalationRate
+    const rate = c !== undefined && c.runs >= LEARN.minRuns && failures(c) / c.runs > LEARN.maxEscalationRate
+    const quality = c !== undefined && qualityBad(c)
     const i = LADDER.indexOf(t)
-    if (!bad || i === LADDER.length - 1) return { tier: t, passed }
-    passed.push({ tier: t, cell: c })
+    if (!(rate || quality) || i === LADDER.length - 1) return { tier: t, passed: passed.filter((p) => !below(p.tier, floor)), floor }
+    passed.push({ tier: t, cell: c!, quality })
     t = LADDER[i + 1]!
+    if (quality) floor = t
   }
 }
+
+const below = (a: Tier, b: Tier): boolean => LADDER.indexOf(a) < LADDER.indexOf(b)
 
 // --- Cost per accepted run ---
 //
@@ -316,8 +433,13 @@ type Learned = { tier: Tier; passed: Passed[]; basis?: 'cost' }
 // and may land above L (a cheap tier that accepts often but runs long) or below it (one that fails more than 40% of
 // the time but is still cheaper per accepted run). `beat` on a passed tier is m / E(chosen): the acceptance it would
 // need to cost no more per accepted run than the chosen tier, used by exploration.
+//
+// The quality rule bounds both: the cost rule only weighs tiers from the climb's `floor` up that do not break the
+// quality rule (the rule's own tier always counts: it is the top of the ladder when it breaks it), and `passed` never
+// holds a tier below `floor`, so exploration cannot go back to it.
 function learn(stats: Stats, category: string, requested: Tier, now: number | undefined, halfLifeMs: number, byCost: boolean): Learned {
-  const rule = climb(stats, category, requested, now, halfLifeMs)
+  const climbed = climb(stats, category, requested, now, halfLifeMs)
+  const rule: Learned = { tier: climbed.tier, passed: climbed.passed }
   if (!byCost) return rule
   const priced: { tier: Tier; e: number; m: number; cell: Cell }[] = []
   for (let i = LADDER.indexOf(requested); i >= 0 && i < LADDER.length; i++) {
@@ -330,10 +452,11 @@ function learn(stats: Stats, category: string, requested: Tier, now: number | un
   }
   const atRule = priced.find((p) => p.tier === rule.tier)
   if (atRule === undefined) return rule
+  const allowed = priced.filter((p) => p === atRule || (!below(p.tier, climbed.floor) && !qualityBad(p.cell)))
   let best = atRule
-  for (const p of priced) if (p.e < best.e || (p.e === best.e && LADDER.indexOf(p.tier) < LADDER.indexOf(best.tier))) best = p
+  for (const p of allowed) if (p.e < best.e || (p.e === best.e && LADDER.indexOf(p.tier) < LADDER.indexOf(best.tier))) best = p
   if (best !== atRule && !(best.e < atRule.e * (1 - LEARN.costMargin))) best = atRule
-  const passed = priced
+  const passed = allowed
     .filter((p) => LADDER.indexOf(p.tier) < LADDER.indexOf(best.tier))
     .map((p) => ({ tier: p.tier, cell: p.cell, beat: best.e > 0 ? p.m / best.e : Infinity }))
   return { tier: best.tier, passed, basis: 'cost' }
@@ -341,7 +464,8 @@ function learn(stats: Stats, category: string, requested: Tier, now: number | un
 
 // The tier to start on for `category` when `requested` was asked. With `byCost` (the default) and enough priced runs
 // on every tier involved, the tier with the lowest expected cost per accepted run; otherwise the failure-rate rule,
-// which climbs the ladder while a tier's not-accepted rate is above `maxEscalationRate` over at least `minRuns` runs.
+// which climbs the ladder while a tier's not-accepted rate is above `maxEscalationRate` over at least `minRuns` runs,
+// or while its quality-failure rate breaks the quality rule (`QUALITY`), whatever the cost.
 // With `now`, old evidence is decayed first: the rate is unchanged (all counters fade together) but a category left
 // alone long enough drops below `minRuns` and falls back to the requested tier. Never throws.
 export function recommend(stats: Stats, category: string, requested: Tier, now?: number, halfLifeMs = HALF_LIFE_MS, byCost = true): Tier {
@@ -361,7 +485,9 @@ export function recommend(stats: Stats, category: string, requested: Tier, now?:
 // the same choice as sampling the rate itself.
 //
 // Exploration only undoes what learning raised: it never goes below the requested tier, so a model asked for at spawn
-// is never replaced by a cheaper one.
+// is never replaced by a cheaper one (with `startTier: auto` the caller passes the auto start tier as `requested`, so
+// exploration never goes below that either). It never undoes what the quality rule raised: a tier the quality rule
+// climbed over, and every tier below it, stay out until the quality evidence decays below the rule.
 //
 // When the cost rule decided, "good enough" means "no more expensive per accepted run than the chosen tier": a passed
 // tier with mean cost m beats E(chosen) when its acceptance exceeds m / E(chosen), i.e. when its failure rate is below
@@ -443,7 +569,7 @@ export function recommendWithExploration(stats: Stats, category: string, request
   const { now, halfLifeMs = HALF_LIFE_MS, rand } = opts
   const { tier: learned, passed, basis } = learn(stats, category, requested, now, halfLifeMs, opts.byCost !== false)
   const tag = basis !== undefined ? { basis } : {}
-  if (passed.length === 0) return { tier: learned, reason: 'requested', learned, ...tag }
+  if (passed.length === 0) return { tier: learned, reason: learned === requested ? 'requested' : 'raised', learned, ...tag }
   const w = opts.explore ?? 1
   const weight = w >= 0 ? Math.min(1, w) : 0
   if (rand !== undefined && weight > 0) {

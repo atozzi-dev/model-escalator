@@ -4,7 +4,10 @@ import type { LayoutMemory } from './layout'
 import type { Ledger } from './savings'
 
 // An agent as the mod tracks it: the detector's state plus the cost of its current run, which the mod meters.
-export type TrackedAgent = AgentState & { runCost?: number; escCounted?: boolean }
+// `lowered`: the tier asked, when `startTier: auto` started the agent below it. `ownTier`: the tier the agent got with no
+// model named and none rewritten, i.e. what its type runs on by itself. `qualityFailed`: a run of it failed
+// verification, was reviewed below the bar or was reworked by the lead.
+export type TrackedAgent = AgentState & { runCost?: number; escCounted?: boolean; lowered?: Tier; ownTier?: Tier; qualityFailed?: boolean }
 
 // Pure: the session state that must survive a module reload. The host keeps `$.state` for the session
 // (empty in a new session, intact across a hot reload), so a non-empty read at session start means reload.
@@ -49,6 +52,8 @@ export function parseSnapshot(v: unknown): Snapshot | undefined {
     if (typeof a.deescalated !== 'boolean') delete live.deescalated
     if (typeof a.effortBoosted !== 'boolean') delete live.effortBoosted
     if (typeof a.escCounted !== 'boolean') delete live.escCounted
+    if (typeof a.qualityFailed !== 'boolean') delete live.qualityFailed
+    for (const k of ['lowered', 'ownTier'] as const) if (!TIERS.includes(a[k] as string)) delete live[k]
     // The last request's effort: a level of the scale, a finite number, or null (the model takes none).
     const e = a.effortSeen
     if (!(e === null || EFFORTS.includes(e as never) || (typeof e === 'number' && Number.isFinite(e)))) delete live.effortSeen
