@@ -60,7 +60,11 @@ async function until(cond: () => boolean): Promise<void> {
 const cell = (h: H, tier = 'haiku'): Cell | undefined => ((h.data.stats as Stats | undefined)?.[CAT] as Record<string, Cell> | undefined)?.[tier]
 const spawn = async ($: any, model = 'haiku'): Promise<string> =>
   ((await $.agent.spawn({ prompt: 'add a cache to the loader', description: 'add loader cache', subagentType: 'general-purpose', model } as never)) as { agentId: string }).agentId
-const finish = ($: any, id: string) => $.turn.complete({ turnId: 't-' + id, agentId: id, answer: 'x' } as never)
+// Every run edits a file: a run with no edit of its own is never reviewed.
+const finish = async ($: any, id: string) => {
+  await $.tool.call({ tool: 'Edit', file_path: 'a.ts', old_string: 'old', new_string: 'new', agentId: id } as never)
+  return $.turn.complete({ turnId: 't-' + id, agentId: id, answer: 'x' } as never)
+}
 const step = ($: any, id: string, model = 'haiku') => drain($.turn.step({ turnId: 't-' + id, index: 0, model, messageCount: 2, agentId: id } as never) as never)
 const near = (a: number | undefined, b: number): boolean => a !== undefined && Math.abs(a - b) < 1e-6
 

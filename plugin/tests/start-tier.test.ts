@@ -1,0 +1,260 @@
+import { expect, mock, test } from 'claude-code/testing'
+import { DEFAULT_CONFIG, describeConfig, parseConfig } from '../hooks/config'
+import { AUTO_START, autoStartTier, categorize, categoryLabel, formatLoweredStarts, ownTierOf } from '../hooks/learning'
+import { resetState } from '../hooks/register'
+import { parseSnapshot } from '../hooks/state'
+
+// ---------- pure ----------
+
+test('config: startTier is auto by default, requested restores the old start, anything else falls back', () => {
+  expect(DEFAULT_CONFIG.startTier).toBe('auto')
+  expect(parseConfig({}).startTier).toBe('auto')
+  expect(parseConfig({ startTier: 'requested' }).startTier).toBe('requested')
+  expect(parseConfig({ startTier: ' Requested ' }).startTier).toBe('requested')
+  for (const bad of ['', 'haiku', 1, null, true]) expect(parseConfig({ startTier: bad }).startTier).toBe('auto')
+  expect(describeConfig(parseConfig({})).some((l) => l === 'startTier: auto')).toBe(true)
+})
+
+test('config: reviewRate defaults to 0.25', () => {
+  expect(parseConfig({}).reviewRate).toBe(0.25)
+  expect(parseConfig({ reviewRate: 0 }).reviewRate).toBe(0)
+})
+
+test('categoryLabel: the part after the last colon', () => {
+  expect(categoryLabel('general-purpose:bugfix')).toBe('bugfix')
+  expect(categoryLabel('superpowers:code-reviewer:review')).toBe('review')
+  expect(categoryLabel('nolabel')).toBe('nolabel')
+})
+
+test('auto start per category: explore on haiku, code, docs, data and ui on sonnet, review and other as asked', () => {
+  expect(autoStartTier('Explore:explore', 'opus')).toBe('haiku')
+  for (const label of ['bugfix', 'feature', 'refactor', 'tests', 'docs', 'data', 'ui']) {
+    expect(AUTO_START[label]).toBe('sonnet')
+    expect(autoStartTier(`general-purpose:${label}`, 'opus')).toBe('sonnet')
+  }
+  for (const label of ['review', 'other', 'something-new']) expect(autoStartTier(`general-purpose:${label}`, 'opus')).toBe('opus')
+})
+
+test('auto start never goes above the asked tier', () => {
+  expect(autoStartTier('general-purpose:bugfix', 'haiku')).toBe('haiku')
+  expect(autoStartTier('general-purpose:bugfix', 'sonnet')).toBe('sonnet')
+  expect(autoStartTier('general-purpose:explore', 'sonnet')).toBe('haiku')
+  expect(autoStartTier('general-purpose:explore', 'haiku')).toBe('haiku')
+})
+
+test('auto start with the tier the agent type runs on by itself: lowered from that, never above it; unknown blocks sonnet', () => {
+  // the definition picks haiku: a code task stays on haiku
+  expect(autoStartTier('scout:bugfix', 'opus', 'haiku')).toBe('haiku')
+  // the definition picks sonnet: explore still goes to haiku
+  expect(autoStartTier('scout:explore', 'opus', 'sonnet')).toBe('haiku')
+  // not known yet: haiku is never above anything, sonnet could be above a cheaper definition
+  expect(autoStartTier('scout:explore', 'opus', null)).toBe('haiku')
+  expect(autoStartTier('scout:bugfix', 'opus', null)).toBe('opus')
+})
+
+test('ownTierOf: the parent tier for general-purpose, the latest tier seen for other types, else unknown', () => {
+  const seen = [
+    { category: 'scout:explore', ownTier: 'sonnet' as const },
+    { category: 'plug:scout:bugfix', ownTier: 'opus' as const },
+    { category: 'scout:bugfix' },
+    { category: 'scout:docs', ownTier: 'haiku' as const },
+  ]
+  expect(ownTierOf('general-purpose', 'opus', seen)).toBe('opus')
+  expect(ownTierOf('scout', 'opus', seen)).toBe('haiku')
+  expect(ownTierOf('plug:scout', 'opus', seen)).toBe('opus')
+  expect(ownTierOf('other', 'opus', seen)).toBeUndefined()
+})
+
+test('snapshot: the start fields of an agent are kept when well formed and dropped otherwise', () => {
+  const base = {
+    agents: [], seenModels: {}, sessionTag: 'abc123', mode: 'active', baseline: 'opus', baselinePinned: false,
+    ledger: { actual: 0, baselineHigh: 0, baselineLow: 0, agentSteps: 0, byTier: {}, consults: 0, consultCost: 0, interventions: {} },
+  }
+  const good = parseSnapshot({ ...base, agents: [{ id: 'a', lowered: 'opus', ownTier: 'haiku', qualityFailed: true }] })!.agents[0]!
+  expect(good.lowered).toBe('opus')
+  expect(good.ownTier).toBe('haiku')
+  expect(good.qualityFailed).toBe(true)
+  const bad = parseSnapshot({ ...base, agents: [{ id: 'a', lowered: 'gpt', ownTier: 3, qualityFailed: 'yes' }] })!.agents[0]!
+  expect(bad.lowered).toBeUndefined()
+  expect(bad.ownTier).toBeUndefined()
+  expect(bad.qualityFailed).toBeUndefined()
+})
+
+test('formatLoweredStarts: runs started lower, escalated (swapped once or above the start) and failing a quality check', () => {
+  expect(formatLoweredStarts([{ startTier: 'opus', tier: 'opus' }])).toBe('')
+  expect(formatLoweredStarts([
+    { lowered: 'opus', startTier: 'sonnet', tier: 'opus' },
+    { lowered: 'opus', startTier: 'haiku', tier: 'haiku', escCounted: true, qualityFailed: true },
+    { lowered: 'opus', startTier: 'sonnet', tier: 'sonnet' },
+    { startTier: 'opus', tier: 'opus', qualityFailed: true },
+  ])).toBe('Started lower by startTier: 3 runs (2 escalated, 1 failed a quality check)')
+  expect(formatLoweredStarts([{ lowered: 'opus', startTier: 'sonnet', tier: 'sonnet' }])).toBe('Started lower by startTier: 1 run (0 escalated, 0 failed a quality check)')
+})
+
+// ---------- wiring ----------
+
+const NOW = 1_000_000_000_000
+
+type H = { spawned: (string | undefined)[]; logs: string[]; data: Record<string, unknown> }
+
+// The fake core resolves a spawn without a model to the agent definition's model (`defs`) or the parent's.
+function wire(on: any, env: Record<string, string> = {}, defs: Record<string, string> = {}, stats: unknown = {}): H {
+  resetState()
+  mock.clock(on, { now: NOW })
+  mock.env(on, env)
+  const data: Record<string, unknown> = { stats }
+  const h: H = { spawned: [], logs: [], data }
+  on('store.get', (_$: unknown, e: any) => ({ value: data[e.key] }))
+  on('store.set', (_$: unknown, e: any) => { data[e.key] = e.value; return { value: undefined } })
+  on('store.delete', (_$: unknown, e: any) => { delete data[e.key]; return { value: undefined } })
+  on('session.start', () => ({ cwd: '/work' }) as never)
+  on('command.register', () => ({ value: undefined }) as never)
+  let n = 0
+  on('agent.spawn', (_$: unknown, e: any) => {
+    h.spawned.push(e.model)
+    return { model: e.model ?? defs[e.subagentType] ?? e.parentModel, agentId: 'a' + ++n }
+  })
+  on('turn.complete', () => ({ text: 'done' }) as never)
+  on('tool.call', () => ({ result: 'ok' }) as never)
+  on('turn.step', async function* (_$: unknown, e: any) {
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn',
+      usage: { model: e.model, input_tokens: 1000, output_tokens: 500, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } as never
+  })
+  on('ui.log', (_$: unknown, e: any) => { h.logs.push(String(e.message ?? e.text ?? JSON.stringify(e))); return { value: undefined } as never })
+  for (const k of ['ui.toast', 'ui.status'] as const) on(k, () => ({ value: undefined }) as never)
+  return h
+}
+
+const spawn = async ($: any, description: string, opts: { model?: string; type?: string; parent?: string } = {}): Promise<string> =>
+  ((await $.agent.spawn({
+    prompt: 'p', description, subagentType: opts.type ?? 'general-purpose', parentModel: opts.parent ?? 'claude-opus-5-5',
+    ...(opts.model !== undefined ? { model: opts.model } : {}),
+  } as never)) as { agentId: string }).agentId
+
+const report = async ($: any): Promise<string> =>
+  ((await $.command.run({ command: 'escalator', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as never)) as { text: string }).text
+
+test('a spawn without a model starts on the category tier and the log says so', async ($, on) => {
+  const h = wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'fix the login bug')
+  await spawn($, 'find where the cache is built')
+  await spawn($, 'review the patch')
+  expect(h.spawned).toEqual(['sonnet', 'haiku', undefined])
+  expect(h.logs.some((l) => l.includes('started on sonnet, asked opus (startTier auto)'))).toBe(true)
+  expect(h.logs.some((l) => l.includes('started on haiku, asked opus (startTier auto)'))).toBe(true)
+})
+
+test('an explicit model in the Agent call is always kept by this rule', async ($, on) => {
+  const h = wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'fix the login bug', { model: 'opus' })
+  await spawn($, 'find where the cache is built', { model: 'claude-opus-5-5' })
+  expect(h.spawned).toEqual(['opus', 'claude-opus-5-5'])
+  expect(h.logs.some((l) => l.includes('startTier'))).toBe(false)
+})
+
+test('an empty model counts as no model', async ($, on) => {
+  const h = wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'fix the login bug', { model: '' })
+  expect(h.spawned).toEqual(['sonnet'])
+})
+
+test('startTier requested keeps the old start', { options: { startTier: 'requested' } }, async ($, on) => {
+  const h = wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'fix the login bug')
+  await spawn($, 'find where the cache is built')
+  expect(h.spawned).toEqual([undefined, undefined])
+})
+
+test('baseline mode never lowers the start', async ($, on) => {
+  const h = wire(on, { MODEL_ESCALATOR_MODE: 'baseline', MODEL_ESCALATOR_BASELINE: 'opus' })
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'fix the login bug')
+  await spawn($, 'find where the cache is built')
+  // the baseline is the parent's opus: nothing to rewrite, nothing lowered
+  expect(h.spawned).toEqual([undefined, undefined])
+  expect(h.logs.some((l) => l.includes('startTier'))).toBe(false)
+})
+
+test('observe mode only logs the lower start', async ($, on) => {
+  const h = wire(on, { MODEL_ESCALATOR_MODE: 'observe' })
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'fix the login bug')
+  expect(h.spawned).toEqual([undefined])
+  expect(h.logs.some((l) => l.includes('would start on sonnet, asked opus (startTier auto)'))).toBe(true)
+})
+
+test('a fork is never touched', async ($, on) => {
+  const h = wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  await $.agent.spawn({ prompt: 'p', description: 'fix the login bug', subagentType: 'fork', fork: true, parentModel: 'claude-opus-5-5' } as never)
+  expect(h.spawned).toEqual([undefined])
+})
+
+test('an agent type with its own model: the first code task runs as defined, later ones never above that model', async ($, on) => {
+  const h = wire(on, {}, { 'cheap-worker': 'claude-haiku-5-5', 'mid-worker': 'claude-sonnet-5-5' })
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'fix the login bug', { type: 'cheap-worker' })
+  await spawn($, 'fix the logout bug', { type: 'cheap-worker' })
+  // explore goes to haiku from the first spawn: haiku is never above any definition
+  await spawn($, 'find where the cache is built', { type: 'mid-worker' })
+  await spawn($, 'fix the cache bug', { type: 'mid-worker' })
+  await spawn($, 'fix the cache bug again', { type: 'mid-worker' })
+  expect(h.spawned).toEqual([undefined, undefined, 'haiku', undefined, undefined])
+  expect(h.logs.filter((l) => l.includes('startTier')).length).toBe(1)
+})
+
+test('learning raises from the auto start, and the stats are kept under the tier the agent started on', async ($, on) => {
+  const cat = categorize('general-purpose', 'fix the login bug')
+  // sonnet failed verification in 1 of 2 runs: the quality rule climbs over it
+  const h = wire(on, {}, {}, { [cat]: { sonnet: { runs: 2, escalated: 0, tokens: 0, failedVerify: 1, notAccepted: 1, qualityFailed: 1 } } })
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'fix the login bug')
+  expect(h.spawned).toEqual([undefined])
+  expect(h.logs.some((l) => l.includes('startTier'))).toBe(false)
+})
+
+test('exploration never goes below the auto start', { options: { explore: 1 } }, async ($, on) => {
+  const cat = categorize('general-purpose', 'fix the login bug')
+  // sonnet escalated 3 of 5 runs: the failure-rate rule raises it, haiku was never asked
+  const h = wire(on, {}, {}, { [cat]: { haiku: { runs: 0, escalated: 0, tokens: 0 }, sonnet: { runs: 5, escalated: 3, tokens: 0, notAccepted: 3 } } })
+  await $.session.start({ cwd: '/work' } as never)
+  for (let i = 0; i < 20; i++) await spawn($, 'fix the login bug')
+  expect(h.spawned.every((m) => m === undefined || m === 'sonnet')).toBe(true)
+  expect(h.spawned.includes('haiku')).toBe(false)
+})
+
+test('the report counts the runs started lower and how many escalated or failed a quality check', async ($, on) => {
+  wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'fix the login bug')
+  await spawn($, 'find where the cache is built')
+  await spawn($, 'review the patch')
+  const text = await report($)
+  expect(text).toContain('Started lower by startTier: 2 runs (0 escalated, 0 failed a quality check)')
+})
+
+test('no line in the report when nothing started lower', { options: { startTier: 'requested' } }, async ($, on) => {
+  wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'fix the login bug')
+  expect(await report($)).not.toContain('Started lower')
+})
+
+const sleep = (ms: number) => new Promise<void>((r) => (globalThis as unknown as { setTimeout: (f: () => void, ms: number) => unknown }).setTimeout(r, ms))
+
+test('a lowered run that fails verification counts in the report and as a quality failure of its start tier', { options: { verifyCommand: 'npm test', reviewRate: 0 } }, async ($, on) => {
+  const h = wire(on)
+  on('process.run', () => ({ value: { exitCode: 1, stdout: 'FAIL', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }) as never)
+  await $.session.start({ cwd: '/work' } as never)
+  const id = await spawn($, 'fix the login bug')
+  await $.turn.complete({ turnId: 't-' + id, agentId: id, answer: 'x' } as never)
+  const cat = categorize('general-purpose', 'fix the login bug')
+  const cell = () => (h.data.stats as Record<string, Record<string, { runs: number; qualityFailed?: number }>>)[cat]?.sonnet
+  for (let i = 0; i < 200 && cell()?.runs !== 1; i++) await sleep(10)
+  expect(cell()!.qualityFailed).toBe(1)
+  expect(await report($)).toContain('Started lower by startTier: 1 run (0 escalated, 1 failed a quality check)')
+})

@@ -40,7 +40,10 @@ export type Config = {
   minReviewScore: number            // lowest review score (1 to 5) of an accepted run
   reworkWindowMinutes: number       // minutes after a cheap agent's run during which a lead edit of its files counts as rework; 0 = off
   recordSessions: number            // sessions whose observation stream is recorded for /escalator replay (newest kept); 0 = off
+  startTier: StartTier              // auto: a spawn that names no model starts on the tier of its category; requested: as asked
 }
+
+export type StartTier = 'auto' | 'requested'
 
 // Most sessions the recorder keeps, whatever the option asks for (the store also caps the bytes).
 export const MAX_RECORD_SESSIONS = 50
@@ -90,8 +93,9 @@ export const DEFAULT_CONFIG: Config = {
   modelOverrides: {},
   verifyCommand: '',
   verifyTimeoutSeconds: 120,
-  // Off by default: every sampled run costs one senior call.
-  reviewRate: 0,
+  // One run in four of a cheaper model is reviewed: with startTier auto most agents start below the lead's model, and
+  // a review is the only quality check that needs no setup. Each sampled run costs one senior call.
+  reviewRate: 0.25,
   reviewModel: '',
   // Off by default: exploring deliberately runs some tasks on a model learning had ruled out.
   explore: 0,
@@ -102,6 +106,7 @@ export const DEFAULT_CONFIG: Config = {
   reworkWindowMinutes: 30,
   // Off by default: the recording lives in the plugin's store, next to the learned statistics.
   recordSessions: 0,
+  startTier: 'auto',
   modelIds: { haiku: 'claude-haiku-5-5', sonnet: 'claude-sonnet-5-5', opus: 'claude-opus-5-5' },
 }
 
@@ -141,6 +146,11 @@ function withEffort(levels: readonly Action[], on: boolean): readonly Action[] {
 function parseEffort(v: unknown, fallback: Effort): Effort {
   const t = typeof v === 'string' ? v.trim().toLowerCase() : ''
   return EFFORT_NAMES.includes(t as Effort) ? (t as Effort) : fallback
+}
+
+function parseStartTier(v: unknown, fallback: StartTier): StartTier {
+  const t = typeof v === 'string' ? v.trim().toLowerCase() : ''
+  return t === 'auto' || t === 'requested' ? t : fallback
 }
 
 function parseMaxTier(v: unknown, fallback: Tier): Tier {
@@ -241,7 +251,7 @@ function optionValues(c: Config): [string, unknown][] {
     ['reviewRate', c.reviewRate], ['reviewModel', c.reviewModel], ['explore', c.explore],
     ['respectExplicitModel', c.respectExplicitModel], ['learnByCost', c.learnByCost], ['modelCategories', c.modelCategories],
     ['minReviewScore', c.minReviewScore], ['reworkWindowMinutes', c.reworkWindowMinutes],
-    ['recordSessions', c.recordSessions],
+    ['recordSessions', c.recordSessions], ['startTier', c.startTier],
     ['prices', c.prices], ['modelIds', c.modelOverrides],
   ]
 }
@@ -332,6 +342,7 @@ export function parseConfig(raw: Raw | undefined, fallback: Config = DEFAULT_CON
       reworkWindowMinutes: rework !== undefined && rework >= 0 ? rework : d.reworkWindowMinutes,
       recordSessions: record !== undefined && record >= 0 ? Math.min(Math.floor(record), MAX_RECORD_SESSIONS) : d.recordSessions,
       reviewModel: typeof o.reviewModel === 'string' && reviewer.length <= 100 ? reviewer : d.reviewModel,
+      startTier: parseStartTier(o.startTier, d.startTier),
     }
   } catch {
     return d

@@ -72,14 +72,35 @@ When the score reaches the threshold of the agent's starting tier (`thresholdHai
 
 Agents that already run on the highest allowed tier skip the swap. `levels` removes levels from the list; the effort level is controlled by `effortStep` only.
 
-Learning is separate from the ladder. A run is accepted when it was not escalated, passed `verifyCommand` if one is set, and (when reviewed) scored at least `minReviewScore`. For each task category the mod starts new agents on the requested tier and moves the start one tier up while that tier fails (is not accepted) in more than 40% of at least 5 runs; once there is enough priced data, it picks the tier with the lowest cost per accepted run instead (`learnByCost`). Evidence fades with `learningHalfLifeDays`.
+Learning is separate from the ladder. A run is accepted when it was not escalated, passed `verifyCommand` if one is set, and (when reviewed) scored at least `minReviewScore`. For each task category the mod starts new agents on their start tier (see below) and moves the start one tier up while that tier fails (is not accepted) in more than 40% of at least 5 runs; once there is enough priced data, it picks the tier with the lowest cost per accepted run instead (`learnByCost`). Evidence fades with `learningHalfLifeDays`.
+
+### Start tier
+
+Most subagents inherit the lead's model, and learning only ever raises a start, so without a lower start nearly all the work would stay on the lead's model. With `startTier: auto` (the default), an agent whose Agent call names no model starts on the model its kind of task usually needs:
+
+| Task category | Starts on |
+|---|---|
+| explore (searching, reading, summarising) | haiku |
+| bugfix, feature, refactor, tests, docs, data, ui | sonnet |
+| review, other | the model asked (the lead's, or the agent definition's) |
+
+- A model named in the Agent call is always kept by this rule, whatever `respectExplicitModel` says.
+- The start is never above the model the agent would have run on: an agent definition that names haiku stays on haiku. For agent types other than `general-purpose` the mod cannot read the definition's model in advance, so the first code task of each such type in a session runs on what its definition picks, and the mod remembers it; explore tasks go to haiku from the first one.
+- Reviews and tasks of unknown kind stay on the model asked: their quality cannot be checked by tests, a review of a diff or rework.
+- Learning raises the start from there as usual, the ladder still moves a stuck agent up, and `explore` never goes below it. Savings are still compared with the lead's model.
+- The spawn log line says when a start was lowered, for example `started on sonnet, asked opus (startTier auto)`, and `/escalator` shows how many runs of the session started lower and how many of them escalated or failed a quality check.
+- `startTier: requested` starts every agent on the model asked, as before. `observe` only logs the lower start; `baseline` never lowers it.
+
+Quality guards that come with it:
+
+- One run in four of a cheaper model is reviewed by the senior model (`reviewRate` 0.25). Only runs that edited files are reviewed: a read-only run has no diff of its own and costs no call.
+- A quality rule apart from the 40% rule: a failed `verifyCommand`, a review below `minReviewScore` or rework by the lead is a quality failure. When more than 10% of a category's runs on a tier failed quality, new agents of that category start one tier higher, from the first failure, with no minimum number of runs. A single failure keeps that in force for about one `learningHalfLifeDays`; until it fades, neither exploration nor the cost rule goes back to that tier. Escalations are not quality failures (a stronger model finished the job): they only count toward the 40% rule.
 
 Some features are off by default because they change cost or behaviour in ways the A/B evals have not yet confirmed:
 
 - `effortStep`: a higher effort costs more output tokens, and changing it rewrites the prompt cache.
 - `deescalateAfter`: returning to a cheaper model rewrites the prompt cache and may bring the block back.
 - `explore`: deliberately runs some tasks on a model learning had ruled out; some tasks should not run on a weaker model.
-- `reviewRate`: each sampled review is one senior call.
 - `modelCategories`: adds one background classification call per uncached spawn (the spawn does not wait for it), and its cost is not in the report.
 - `respectExplicitModel`: the mod cannot tell a model you asked for from one the lead chose, and lead agents often name a cheap model; correcting that choice is what learning is for.
 
@@ -142,7 +163,7 @@ These are the subcommands listed by `/escalator help`:
 
 ### Cheaper model suggestions
 
-Learning never starts an agent below the model its Agent call asked for, so a category that always asks for Opus keeps paying Opus prices. `/escalator stats` and the stats panel list the categories that look like they could run one tier lower; you decide, by asking for the cheaper model in the Agent call or the agent's definition.
+Learning never starts an agent below its start tier: the model named in the Agent call, or with `startTier: auto` the tier of its category (reviews and other tasks keep the model asked). So a category whose Agent calls always name Opus, or a review category, keeps paying Opus prices. `/escalator stats` and the stats panel list the categories that look like they could run one tier lower; you decide, by asking for the cheaper model in the Agent call or the agent's definition.
 
 A suggestion only means the current model **did not get stuck** on that category (enough runs, almost no escalations, failed checks or rework). It is not a comparison with the cheaper model, and the savings are estimates from list prices. Whether the cheaper model would do the work *as well* is a separate question. Checks passed by the current model (its reviews, its `verifyCommand` runs, no rework of its files) describe the current model only: they appear as context, never as evidence. Each suggestion falls in one of three kinds:
 
@@ -174,7 +195,7 @@ Options are set from `/config` or under `pluginConfigs` in your settings (key `m
 | `stallMinutes` | 10 | Minutes without any event after which a running agent is reported as stalled (log, status line, toast in active mode); its next tool call gets the next ladder note. A tool call still running counts as activity for three times this long. Nothing is reported while the session is closed or the account is at its usage limit |
 | `verifyCommand` | empty (off) | Check run at the end of each tracked agent's run, for example `npm test`. Split on spaces, quotes group, no shell: no pipes or redirects. A non-zero exit counts as a failed run for learning. See the note below |
 | `verifyTimeoutSeconds` | 120 | How long the check may run before it is abandoned and ignored (at most 600) |
-| `reviewRate` | 0 (off) | Share of the finished runs of cheaper models that a senior model reviews, from 0 to 1 (`0.1` is about one run in ten). Each review is one senior call |
+| `reviewRate` | 0.25 | Share of the finished runs of cheaper models that a senior model reviews, from 0 to 1 (`0.25` is about one run in four). Only runs that edited files are reviewed. Each review is one senior call; `0` turns reviews off |
 | `reviewModel` | empty (senior) | Model that reviews a sampled run, alias or full id |
 | `seniorModel` | `opus` | Model asked for advice at the consult level, alias or full id |
 | `levels` | `nudge,consult,swap,human` | Comma-separated enabled levels; disabled ones are skipped (`nudge,swap,human` turns the consult off) |
@@ -193,7 +214,8 @@ Options are set from `/config` or under `pluginConfigs` in your settings (key `m
 | `learningHalfLifeDays` | 30 | Days after which learned evidence counts half; `0` never forgets |
 | `learnByCost` | true | Once a category has enough priced runs, start it on the model with the lowest cost per accepted run, if that beats the failure-rate choice by more than 10%. Off keeps the failure-rate rule only |
 | `minReviewScore` | 3 | From 1 to 5: a sampled run reviewed below this score counts as not accepted for learning |
-| `explore` | 0 (off) | From 0 to 1: how often a task starts on a cheaper model that learning had ruled out, to check whether it became good enough. Never below the model the task asked for. `observe` only logs it |
+| `explore` | 0 (off) | From 0 to 1: how often a task starts on a cheaper model that learning had ruled out, to check whether it became good enough. Never below the task's start tier, and never on a tier the quality rule climbed over. `observe` only logs it |
+| `startTier` | `auto` | `auto`: an agent whose Agent call names no model starts on the model its task category needs (explore on haiku; code, tests, docs, data and UI on sonnet; reviews and other tasks as asked), never above the model it would have run on. `requested`: every agent starts on the model asked. See [Start tier](#start-tier) |
 | `respectExplicitModel` | false | When on and the Agent call names a model, learning and exploration do not change the starting model. The ladder still applies |
 | `modelCategories` | false | Refines the task category of each new subagent with one short call to a small model (Haiku) on top of the keyword category (agent type, description and the start of the prompt). The agent starts at once on the keyword category; the label is cached and used for recording the run and for later spawns. A failed call keeps the keywords |
 | `reworkWindowMinutes` | 30 | Minutes after a cheaper run during which an edit by the lead to a file that run wrote counts as rework: the run is moved to not accepted once. `0` turns it off. Only edits made through Claude Code are seen |
@@ -227,7 +249,7 @@ Real spend comes from the token usage each model request reports, priced at API 
 
 A consult sends one dossier to the senior model, through the same provider as your session. It contains: the task (first 2000 characters), the agent's tier and interventions so far, its recent attempts (up to 12, oldest first, each with the tool, a short summary of its input and the outcome; error text capped), the files it touched (up to 20), the output of `git diff --stat` in the project folder, and, when the agent asked for help itself, the problem and the attempts it described. The whole dossier is capped at 12000 characters; a retry after a refused call uses a shorter cap (6000). Obvious secrets are redacted by pattern matching first: private key blocks, `Authorization` headers, `password`, `token`, `secret` and `api key` assignments, well-known key prefixes, and long hex or base64 runs. This is a heuristic, not a guarantee; review what would leave your machine before you enable the mod on a project with secrets in its output.
 
-A sampled review (`reviewRate`) sends the task and the diff of the files the agent edited (`git diff HEAD`, capped at 12000 characters, at most 50 files; above that, the whole working tree diff) with a short rubric, and gets back a 1 to 5 score.
+A sampled review (`reviewRate`) sends the task and the diff of the files the agent edited (`git diff HEAD`, capped at 12000 characters, at most 50 files; above that, the whole working tree diff) with a short rubric, and gets back a 1 to 5 score. A run that edited no file is not reviewed.
 
 ## What it touches
 

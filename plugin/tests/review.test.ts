@@ -2,17 +2,18 @@ import { expect, mock, test } from 'claude-code/testing'
 import { resetState } from '../hooks/register'
 import { parseConfig } from '../hooks/config'
 import { record, recordReview, type Stats } from '../hooks/learning'
-import { buildReviewPrompt, diffArgv, editedPath, formatReviews, isCheaper, parseReview, REVIEW_SYSTEM, sampleRun } from '../hooks/review'
+import { buildReviewPrompt, diffArgv, editedPath, formatReviews, isCheaper, parseReview, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun } from '../hooks/review'
 
 // ---------- pure helpers ----------
 
-test('config: review is off by default, rate between 0 and 1, model defaults to the senior', () => {
+test('config: one run in four is reviewed by default, rate between 0 and 1, model defaults to the senior', () => {
   const d = parseConfig({})
-  expect(d.reviewRate).toBe(0)
+  expect(d.reviewRate).toBe(0.25)
+  expect(parseConfig({ reviewRate: 0 }).reviewRate).toBe(0)
   expect(d.reviewModel).toBe('')
   expect(parseConfig({ reviewRate: 0.25 }).reviewRate).toBe(0.25)
   expect(parseConfig({ reviewRate: '1' }).reviewRate).toBe(1)
-  for (const bad of [2, -0.1, 'x', '', null]) expect(parseConfig({ reviewRate: bad }).reviewRate).toBe(0)
+  for (const bad of [2, -0.1, 'x', '', null]) expect(parseConfig({ reviewRate: bad }).reviewRate).toBe(0.25)
   expect(parseConfig({ reviewModel: ' sonnet ' }).reviewModel).toBe('sonnet')
   expect(parseConfig({ reviewModel: 'x'.repeat(101) }).reviewModel).toBe('')
 })
@@ -163,7 +164,7 @@ const command = async ($: any, args: string): Promise<string> =>
 
 const RATE = { reviewRate: 1 }
 
-test('off by default: a cheap run is never reviewed', async ($, on) => {
+test('reviewRate 0: a cheap run is never reviewed', { options: { reviewRate: 0 } }, async ($, on) => {
   const h = wire(on, {})
   await $.session.start({ cwd: '/work' } as never)
   const id = await spawn($)
@@ -214,10 +215,24 @@ test('reviewModel overrides the senior; a low score shows a toast', { options: {
   expect(h.toasts[0]!).toContain('review 2/5')
 })
 
-test('without tracked edits the whole working tree diff is reviewed', { options: RATE }, async ($, on) => {
+test('a run that edited no file is never reviewed: no git, no call, no score', { options: RATE }, async ($, on) => {
   const h = wire(on, {})
   await $.session.start({ cwd: '/work' } as never)
   const id = await spawn($)
+  await $.tool.call({ tool: 'Read', file_path: 'src/a.ts', agentId: id } as never)
+  await finish($, id)
+  await sleep(80)
+  expect(h.runs.length).toBe(0)
+  expect(h.calls.length).toBe(0)
+  expect(await command($, 'report')).toContain('senior consults: 0')
+  expect(await command($, 'stats')).not.toContain('average')
+})
+
+test('too many edited files to list: the whole working tree diff is reviewed', { options: RATE }, async ($, on) => {
+  const h = wire(on, {})
+  await $.session.start({ cwd: '/work' } as never)
+  const id = await spawn($)
+  for (let i = 0; i <= REVIEW_LIMITS.maxPaths; i++) await edit($, id, `src/f${i}.ts`)
   await finish($, id)
   await until(() => h.calls.length > 0)
   expect(h.runs[0]!.argv).not.toContain('--')

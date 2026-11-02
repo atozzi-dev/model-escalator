@@ -89,10 +89,14 @@ test('too few or too poor runs on the cheaper tier are not evidence', async () =
   let st = runs({}, 'w:feature', 'opus', 20)
   st = runs(st, 'w:feature', 'sonnet', LEARN.minRuns - 1)
   expect(one(st).quality).toBe('guarded')
-  // 2 of 10 not accepted: 20%, above the 10% bar but below the 25% block
+  // 2 of 10 not accepted (escalated): 20%, above the 10% bar but below the 25% block
   let poor = runs({}, 'w:feature', 'opus', 20)
-  poor = runs(poor, 'w:feature', 'sonnet', 10, undefined, 2)
+  for (let i = 0; i < 10; i++) poor = record(poor, 'w:feature', 'sonnet', i < 2, 0, false, T0)
   expect(one(poor, { verify: true }).quality).toBe('guarded')
+  // 2 of 10 failing verification: the quality rule of learning climbs over sonnet, so there is no suggestion at all
+  let failing = runs({}, 'w:feature', 'opus', 20)
+  failing = runs(failing, 'w:feature', 'sonnet', 10, undefined, 2)
+  expect(downshiftAdvice(failing, { now: T0, verify: true }).length).toBe(0)
 })
 
 test('cheaper runs without any active signal are not measured', async () => {
