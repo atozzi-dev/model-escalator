@@ -4,6 +4,10 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Fixed
+
+- Session recordings no longer take a slot for sessions in which no agent ran. Such recordings already in the store are dropped at the next save, so `recordSessions` keeps the most recent sessions that have something to replay.
+
 ## [1.3.0] - 2026-10-17
 
 ### Added
