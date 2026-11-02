@@ -214,9 +214,10 @@ export function parseRecordings(v: unknown): Recording[] {
 }
 
 // What goes back to the store: the stored recordings with `current` in place of its older copy (or appended),
-// the newest `keep` of them, then the oldest dropped until the total fits TOTAL_MAX_BYTES. `current` always stays.
+// the newest `keep` of them, then the oldest dropped until the total fits TOTAL_MAX_BYTES. Stored recordings in which
+// no agent ran have nothing to replay: they are dropped and never count toward `keep`. `current` always stays.
 export function mergeRecordings(stored: unknown, current: Recording, keep: number): Recording[] {
-  const list = [...parseRecordings(stored).filter((r) => r.id !== current.id), current].slice(-Math.max(1, keep))
+  const list = [...parseRecordings(stored).filter((r) => r.id !== current.id && r.agents.length > 0), current].slice(-Math.max(1, keep))
   const sizes = list.map(sizeOf)
   let total = sizes.reduce((n, s) => n + s, 0)
   while (total > TOTAL_MAX_BYTES && list.length > 1) {
