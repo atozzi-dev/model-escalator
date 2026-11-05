@@ -178,7 +178,8 @@ test('an edit by another agent is not the lead: no rework', async ($, on) => {
   expect(cell(h)!.reworked).toBeUndefined()
 })
 
-test('an agent on the baseline tier is not tracked', async ($, on) => {
+// respectExplicitModel keeps the opus named in the call (otherwise it is a ceiling and a code task starts on sonnet).
+test('an agent on the baseline tier is not tracked', { options: { respectExplicitModel: true } }, async ($, on) => {
   const h = wire(on)
   await $.session.start({ cwd: '/work' } as never)
   const id = await spawn($, 'opus')

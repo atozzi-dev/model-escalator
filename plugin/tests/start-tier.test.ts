@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import { DEFAULT_CONFIG, describeConfig, parseConfig } from '../hooks/config'
-import { AGENT_TYPES_LIMIT, type AgentTypes, AUTO_START, autoStartTier, categorize, categoryLabel, formatLoweredStarts, ownTierOf, parseAgentTypes, rememberAgentType, storedOwnTier } from '../hooks/learning'
+import { AGENT_TYPES_LIMIT, type AgentTypes, AUTO_START, autoStartTier, categorize, categoryLabel, formatLoweredStarts, isEngineType, ownTierOf, parseAgentTypes, rememberAgentType, startChoice, storedOwnTier } from '../hooks/learning'
 import { resetState } from '../hooks/register'
 import { parseSnapshot } from '../hooks/state'
 
@@ -52,7 +52,36 @@ test('auto start with the tier the agent type runs on by itself: lowered from th
   expect(autoStartTier('scout:bugfix', 'opus', null)).toBe('opus')
 })
 
-test('ownTierOf: the parent tier for general-purpose, the latest tier seen for other types, else unknown', () => {
+test('isEngineType: only a provider named engine is Claude Code itself', () => {
+  expect(isEngineType({ provider: { plugin: 'engine', tier: 'core' } })).toBe(true)
+  for (const provider of [undefined, null, 'engine', { plugin: 'acme-agents', tier: 'user' }, { tier: 'core' }]) expect(isEngineType({ provider })).toBe(false)
+  expect(isEngineType({})).toBe(false)
+})
+
+test('startChoice: a model named in the call is a ceiling with startTier auto, kept with respectExplicitModel or requested', () => {
+  const base = { parentTier: 'opus' as const, engine: true, startTier: 'auto' as const, respectExplicit: false }
+  expect(startChoice({ ...base, category: 'general-purpose:bugfix', called: 'opus' })).toEqual({ asked: 'opus', floor: 'sonnet', learn: true, lowers: 'ceiling' })
+  expect(startChoice({ ...base, category: 'general-purpose:bugfix', called: 'haiku' })).toEqual({ asked: 'haiku', floor: 'haiku', learn: true })
+  expect(startChoice({ ...base, category: 'acme:explore', called: 'sonnet', engine: false })).toEqual({ asked: 'sonnet', floor: 'haiku', learn: true, lowers: 'ceiling' })
+  expect(startChoice({ ...base, category: 'general-purpose:bugfix', called: 'opus', respectExplicit: true })).toEqual({ asked: 'opus', floor: 'opus', learn: false })
+  expect(startChoice({ ...base, category: 'general-purpose:bugfix', called: 'opus', startTier: 'requested' })).toEqual({ asked: 'opus', floor: 'opus', learn: true })
+})
+
+test('startChoice: no model in the call, an engine type starts on its category tier, a definition decides for any other', () => {
+  const base = { parentTier: 'opus' as const, startTier: 'auto' as const, respectExplicit: false }
+  expect(startChoice({ ...base, category: 'general-purpose:bugfix', engine: true, own: 'opus' })).toEqual({ asked: 'opus', floor: 'sonnet', learn: true, lowers: 'auto' })
+  expect(startChoice({ ...base, category: 'general-purpose:review', engine: true, own: 'opus' })).toEqual({ asked: 'opus', floor: 'opus', learn: true })
+  // an engine type whose own tier is not known yet: only haiku is a safe lower start
+  expect(startChoice({ ...base, category: 'scout:bugfix', engine: true })).toEqual({ asked: 'opus', floor: 'opus', learn: true })
+  expect(startChoice({ ...base, category: 'scout:bugfix', engine: true, own: 'haiku' })).toEqual({ asked: 'haiku', floor: 'haiku', learn: true })
+  expect(startChoice({ ...base, category: 'general-purpose:bugfix', engine: true, own: 'opus', startTier: 'requested' })).toEqual({ asked: 'opus', floor: 'opus', learn: true })
+  // a definition: never lowered, learning moves up from its tier once known, nothing at all while it is not
+  expect(startChoice({ ...base, category: 'acme:explore', engine: false, own: 'opus' })).toEqual({ asked: 'opus', floor: 'opus', learn: true })
+  expect(startChoice({ ...base, category: 'acme:explore', engine: false, own: 'sonnet', startTier: 'requested' })).toEqual({ asked: 'sonnet', floor: 'sonnet', learn: true })
+  expect(startChoice({ ...base, category: 'acme:explore', engine: false })).toEqual({ asked: 'opus', floor: 'opus', learn: false })
+})
+
+test('ownTierOf: the parent tier for an inheriting type, the latest tier seen for other types, else unknown', () => {
   const seen = [
     { category: 'scout:explore', ownTier: 'sonnet' as const },
     { category: 'plug:scout:bugfix', ownTier: 'opus' as const },
@@ -60,6 +89,10 @@ test('ownTierOf: the parent tier for general-purpose, the latest tier seen for o
     { category: 'scout:docs', ownTier: 'haiku' as const },
   ]
   expect(ownTierOf('general-purpose', 'opus', seen)).toBe('opus')
+  expect(ownTierOf('Explore', 'opus', seen)).toBe('opus')
+  expect(ownTierOf('Plan', 'sonnet', seen)).toBe('sonnet')
+  // a definition that takes the name of a built-in is not known to inherit
+  expect(ownTierOf('general-purpose', 'opus', seen, undefined, false)).toBeUndefined()
   expect(ownTierOf('scout', 'opus', seen)).toBe('haiku')
   expect(ownTierOf('plug:scout', 'opus', seen)).toBe('opus')
   expect(ownTierOf('other', 'opus', seen)).toBeUndefined()
@@ -126,7 +159,7 @@ test('formatLoweredStarts: runs started lower, escalated (swapped once or above 
 
 const NOW = 1_000_000_000_000
 
-type H = { spawned: (string | undefined)[]; logs: string[]; data: Record<string, unknown> }
+type H = { spawned: (string | undefined)[]; logs: string[]; data: Record<string, unknown>; providers: unknown[] }
 
 // The fake core resolves a spawn without a model to the agent definition's model (`defs`) or the parent's.
 function wire(on: any, env: Record<string, string> = {}, defs: Record<string, string> = {}, stats: unknown = {}): H {
@@ -134,7 +167,7 @@ function wire(on: any, env: Record<string, string> = {}, defs: Record<string, st
   mock.clock(on, { now: NOW })
   mock.env(on, env)
   const data: Record<string, unknown> = { stats }
-  const h: H = { spawned: [], logs: [], data }
+  const h: H = { spawned: [], logs: [], data, providers: [] }
   on('store.get', (_$: unknown, e: any) => ({ value: data[e.key] }))
   on('store.set', (_$: unknown, e: any) => { data[e.key] = e.value; return { value: undefined } })
   on('store.delete', (_$: unknown, e: any) => { delete data[e.key]; return { value: undefined } })
@@ -143,6 +176,7 @@ function wire(on: any, env: Record<string, string> = {}, defs: Record<string, st
   let n = 0
   on('agent.spawn', (_$: unknown, e: any) => {
     h.spawned.push(e.model)
+    h.providers.push(e.provider)
     return { model: e.model ?? defs[e.subagentType] ?? e.parentModel, agentId: 'a' + ++n }
   })
   on('turn.complete', () => ({ text: 'done' }) as never)
@@ -156,9 +190,16 @@ function wire(on: any, env: Record<string, string> = {}, defs: Record<string, st
   return h
 }
 
-const spawn = async ($: any, description: string, opts: { model?: string; type?: string; parent?: string } = {}): Promise<string> =>
+// Who provides an agent type: Claude Code itself for its built-ins and teammates, a plugin or the user's settings for a
+// definition file.
+const ENGINE = { plugin: 'engine', tier: 'core' }
+const CUSTOM = { plugin: 'acme-agents', tier: 'user' }
+
+// `provider: null` leaves the provider out of the spawn.
+const spawn = async ($: any, description: string, opts: { model?: string; type?: string; parent?: string; provider?: object | null } = {}): Promise<string> =>
   ((await $.agent.spawn({
     prompt: 'p', description, subagentType: opts.type ?? 'general-purpose', parentModel: opts.parent ?? 'claude-opus-5-5',
+    ...(opts.provider === null ? {} : { provider: opts.provider ?? ENGINE }),
     ...(opts.model !== undefined ? { model: opts.model } : {}),
   } as never)) as { agentId: string }).agentId
 
@@ -176,13 +217,94 @@ test('a spawn without a model starts on the category tier and the log says so', 
   expect(h.logs.some((l) => l.includes('started on haiku, asked opus (startTier auto)'))).toBe(true)
 })
 
-test('an explicit model in the Agent call is always kept by this rule', async ($, on) => {
+test('a model named in the Agent call is a ceiling: the start is the category tier, never above the named model', async ($, on) => {
   const h = wire(on)
   await $.session.start({ cwd: '/work' } as never)
   await spawn($, 'fix the login bug', { model: 'opus' })
   await spawn($, 'find where the cache is built', { model: 'claude-opus-5-5' })
-  expect(h.spawned).toEqual(['opus', 'claude-opus-5-5'])
+  await spawn($, 'review the patch', { model: 'opus' })
+  await spawn($, 'fix the logout bug', { model: 'haiku' })
+  await spawn($, 'find where the token is read', { model: 'sonnet' })
+  expect(h.spawned).toEqual(['sonnet', 'haiku', 'opus', 'haiku', 'haiku'])
+  expect(h.logs.some((l) => l.includes('started on sonnet, asked opus (startTier auto, model in the call is a ceiling)'))).toBe(true)
+  expect(h.logs.some((l) => l.includes('started on haiku, asked sonnet (startTier auto, model in the call is a ceiling)'))).toBe(true)
+  expect(await report($)).toContain('Started lower by startTier: 3 runs')
+})
+
+test('a model named in the call overrides a definition: a custom type is lowered from it like any other', async ($, on) => {
+  const h = wire(on, {}, { 'acme-worker': 'claude-haiku-5-5' })
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'fix the login bug', { model: 'opus', type: 'acme-worker', provider: CUSTOM })
+  expect(h.spawned).toEqual(['sonnet'])
+})
+
+test('with respectExplicitModel a model named in the call is kept exactly', { options: { respectExplicitModel: true } }, async ($, on) => {
+  const h = wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'fix the login bug', { model: 'opus' })
+  await spawn($, 'find where the cache is built', { model: 'claude-opus-5-5' })
+  await spawn($, 'fix the logout bug', { model: 'opus', type: 'acme-worker', provider: CUSTOM })
+  expect(h.spawned).toEqual(['opus', 'claude-opus-5-5', 'opus'])
   expect(h.logs.some((l) => l.includes('startTier'))).toBe(false)
+})
+
+test('a custom agent type with no model in the call runs as its definition says, explore included', async ($, on) => {
+  const h = wire(on, {}, { 'acme-worker': 'claude-opus-5-5' })
+  // even a tier remembered from earlier sessions does not lower it
+  h.data.agentTypes = { 'acme-worker': { tier: 'opus', seenAt: NOW - 1 } }
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'fix the login bug', { type: 'acme-worker', provider: CUSTOM })
+  await spawn($, 'find where the cache is built', { type: 'acme-worker', provider: CUSTOM })
+  await spawn($, 'fix the logout bug', { type: 'acme-worker', provider: CUSTOM })
+  expect(h.spawned).toEqual([undefined, undefined, undefined])
+  expect(h.logs.some((l) => l.includes('startTier'))).toBe(false)
+  expect(await report($)).not.toContain('Started lower')
+})
+
+test('a spawn whose provider is missing is treated as a definition and left as it is', async ($, on) => {
+  const h = wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'fix the login bug', { provider: null })
+  await spawn($, 'find where the cache is built', { provider: null })
+  await spawn($, 'fix the logout bug', { provider: { tier: 'core' } })
+  expect(h.spawned).toEqual([undefined, undefined, undefined])
+})
+
+test('the built-in Explore and Plan types inherit the parent model and are lowered from their first spawn', async ($, on) => {
+  const h = wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'find where the cache is built', { type: 'Explore' })
+  await spawn($, 'fix the login bug', { type: 'Plan' })
+  expect(h.spawned).toEqual(['haiku', 'sonnet'])
+})
+
+test('learning raises a custom type from the tier its definition runs on, never below it', async ($, on) => {
+  const cat = categorize('acme-worker', 'fix the login bug')
+  // haiku escalated 3 of 5 runs for this category: learning climbs to sonnet
+  const h = wire(on, {}, { 'acme-worker': 'claude-haiku-5-5' }, { [cat]: { haiku: { runs: 5, escalated: 3, tokens: 0, notAccepted: 3 } } })
+  await $.session.start({ cwd: '/work' } as never)
+  // the first spawn of the session: the definition's tier is not known yet, the spawn is left alone and its tier seen
+  await spawn($, 'fix the login bug', { type: 'acme-worker', provider: CUSTOM })
+  await spawn($, 'fix the login bug', { type: 'acme-worker', provider: CUSTOM })
+  expect(h.spawned).toEqual([undefined, 'sonnet'])
+  expect(h.logs.some((l) => l.includes('startTier'))).toBe(false)
+})
+
+test('the tier a custom type runs on, remembered from earlier sessions, lets learning raise it from its first spawn', async ($, on) => {
+  const cat = categorize('acme-worker', 'fix the login bug')
+  const h = wire(on, {}, { 'acme-worker': 'claude-haiku-5-5' }, { [cat]: { haiku: { runs: 5, escalated: 3, tokens: 0, notAccepted: 3 } } })
+  h.data.agentTypes = { 'acme-worker': { tier: 'haiku', seenAt: NOW - 1 } }
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'fix the login bug', { type: 'acme-worker', provider: CUSTOM })
+  expect(h.spawned).toEqual(['sonnet'])
+})
+
+test('exploration never goes below the tier a custom definition runs on', { options: { explore: 1 } }, async ($, on) => {
+  const cat = categorize('acme-worker', 'fix the login bug')
+  const h = wire(on, {}, { 'acme-worker': 'claude-sonnet-5-5' }, { [cat]: { haiku: { runs: 0, escalated: 0, tokens: 0 }, sonnet: { runs: 5, escalated: 3, tokens: 0, notAccepted: 3 } } })
+  await $.session.start({ cwd: '/work' } as never)
+  for (let i = 0; i < 20; i++) await spawn($, 'fix the login bug', { type: 'acme-worker', provider: CUSTOM })
+  expect(h.spawned.includes('haiku')).toBe(false)
 })
 
 test('an empty model counts as no model', async ($, on) => {
@@ -192,12 +314,15 @@ test('an empty model counts as no model', async ($, on) => {
   expect(h.spawned).toEqual(['sonnet'])
 })
 
-test('startTier requested keeps the old start', { options: { startTier: 'requested' } }, async ($, on) => {
+test('startTier requested keeps the old start, a model named in the call included', { options: { startTier: 'requested' } }, async ($, on) => {
   const h = wire(on)
   await $.session.start({ cwd: '/work' } as never)
   await spawn($, 'fix the login bug')
   await spawn($, 'find where the cache is built')
-  expect(h.spawned).toEqual([undefined, undefined])
+  await spawn($, 'fix the logout bug', { model: 'opus' })
+  await spawn($, 'find where the token is read', { model: 'claude-opus-5-5' })
+  expect(h.spawned).toEqual([undefined, undefined, 'opus', 'claude-opus-5-5'])
+  expect(h.logs.some((l) => l.includes('startTier'))).toBe(false)
 })
 
 test('baseline mode never lowers the start', async ($, on) => {
@@ -225,7 +350,7 @@ test('a fork is never touched', async ($, on) => {
   expect(h.spawned).toEqual([undefined])
 })
 
-test('an agent type with its own model: the first code task runs as defined, later ones never above that model', async ($, on) => {
+test('an engine type with its own model: the first code task runs as defined, later ones never above that model', async ($, on) => {
   const h = wire(on, {}, { 'cheap-worker': 'claude-haiku-5-5', 'mid-worker': 'claude-sonnet-5-5' })
   await $.session.start({ cwd: '/work' } as never)
   await spawn($, 'fix the login bug', { type: 'cheap-worker' })

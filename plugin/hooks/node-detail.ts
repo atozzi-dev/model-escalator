@@ -100,11 +100,12 @@ function failedAttempts(a: AgentState): string[] {
   })
 }
 
-// The tier row: the tier now, what it was asked to start on, and the lower start of startTier auto when it happened.
+// The tier row: the tier now, the tier it started on (what the call, the definition or the mod's start chose), and the
+// tier asked when startTier auto started it lower.
 function tierValue(a: AgentState & { lowered?: Tier }): string {
-  const lower = a.lowered === undefined ? undefined : `started lower: asked ${a.lowered}, startTier auto`
-  if (a.tier === a.startTier) return lower === undefined ? `${a.tier} (as requested)` : `${a.tier} (${lower})`
-  return lower === undefined ? `${a.tier} (requested ${a.startTier})` : `${a.tier} (requested ${a.startTier}, ${lower})`
+  const asked = a.lowered === undefined ? undefined : `asked ${a.lowered}, startTier auto`
+  if (a.tier === a.startTier) return asked === undefined ? `${a.tier} (since the start)` : `${a.tier} (started lower: ${asked})`
+  return asked === undefined ? `${a.tier} (started on ${a.startTier})` : `${a.tier} (started on ${a.startTier}, ${asked})`
 }
 
 export type DetailInput = {

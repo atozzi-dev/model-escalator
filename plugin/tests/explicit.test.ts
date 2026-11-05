@@ -38,7 +38,7 @@ function wire(on: any, env: Record<string, string> = {}): H {
 }
 
 const spawn = ($: any, model?: string) =>
-  $.agent.spawn({ prompt: 'p', description: 'fix db test', subagentType: 'general-purpose', parentModel: 'haiku', ...(model ? { model } : {}) } as never)
+  $.agent.spawn({ prompt: 'p', description: 'fix db test', subagentType: 'general-purpose', provider: { plugin: 'engine', tier: 'core' }, parentModel: 'haiku', ...(model ? { model } : {}) } as never)
 
 test('config: respectExplicitModel defaults to false, invalid values fall back', () => {
   expect(parseConfig({}).respectExplicitModel).toBe(false)

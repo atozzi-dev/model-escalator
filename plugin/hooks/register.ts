@@ -9,7 +9,7 @@ import { parseReplayArgs, replayReport, sweep, sweepGrid, sweepReport } from './
 import { addAgent as addRecAgent, indexOf as recIndexOf, mergeRecordings, parseRecordings, push as recPush, recordedOptions, relTime, resumeRecording, startRecording, stepEvent, toolEvent, type Live, type RecEvent, type RecordedMode, type Recording } from './recorder'
 import { buildDossier, inputFromState } from './dossier'
 import { cacheGet, cachePut, cacheKey, classifierInput, combineCategory, LABELS, parseCache } from './classify'
-import { autoStartTier, categorize, costPerAccepted, formatLoweredStarts, formatStats, INHERITING_TYPES, isAccepted, mulberry32, ownTierOf, parseAgentTypes, parseProjects, projectKey, recommendScopedWithExploration, recordReviewScoped, recordReworkScoped, recordScoped, rememberAgentType, scopedStats, storedOwnTier, type Projects, type Stats } from './learning'
+import { categorize, costPerAccepted, formatLoweredStarts, formatStats, INHERITING_TYPES, isAccepted, isEngineType, mulberry32, ownTierOf, parseAgentTypes, parseProjects, projectKey, recommendScopedWithExploration, recordReviewScoped, recordReworkScoped, recordScoped, rememberAgentType, scopedStats, startChoice, storedOwnTier, type Projects, type Stats } from './learning'
 import { emptyGraph, LEAD_ID, reduce, SENIOR_ID, type GraphInput, type GraphState } from './graph'
 import { layoutGraph, type LayoutMemory } from './layout'
 import { renderSvgSized } from './render-svg'
@@ -982,18 +982,23 @@ export const register: Register = (on, options) => {
     let ev = e
     const plan = await taskCategory($, e)
     const category = plan.category
-    // `model` is what the Agent call asked for; when it is absent the agent definition or the parent decides, and
-    // the types give no way to tell those two apart: only a present `model` counts as an explicit choice.
+    // `model` is what the Agent call asked for: the lead's choice. When it is absent the agent definition or the parent
+    // decides; `provider` tells the two apart (Claude Code's own types inherit, any other type has a definition file).
     const named = typeof e.model === 'string' && e.model !== ''
-    const parentTier = tierOf(named ? e.model : e.parentModel)
+    const type = e.subagentType ?? ''
+    const engine = isEngineType(e)
+    const parentTier = tierOf(e.parentModel)
     const explicit = config.respectExplicitModel && mode !== 'baseline' && named
-    // startTier auto: a call that names no model starts on its category's tier, never above what the agent type runs
-    // on by itself (the parent's model for general-purpose, else the model its definition was seen to resolve to).
-    const auto = config.startTier === 'auto' && mode !== 'baseline' && !named
-    const own = auto ? ownTierOf(e.subagentType ?? '', parentTier, agents.values(), await rememberedOwnTier($, e.subagentType ?? '')) : undefined
+    const own = named ? undefined : ownTierOf(type, parentTier, agents.values(), await rememberedOwnTier($, type, engine), engine)
+    // Who chose the model decides where the agent may start (see `startChoice`); baseline mode starts everyone the same.
+    const start = mode === 'baseline'
+      ? { asked: tierOf(named ? e.model : e.parentModel), floor: tierOf(named ? e.model : e.parentModel), learn: true }
+      : startChoice({ category, parentTier, ...(named ? { called: tierOf(e.model) } : {}), engine, ...(own !== undefined ? { own } : {}),
+        startTier: config.startTier, respectExplicit: config.respectExplicitModel })
     // The tier the agent would run on without the mod: the reference for the lower start and for every rewrite.
-    const asked = own ?? parentTier
-    const floor = auto ? autoStartTier(category, parentTier, own === undefined ? null : own) : asked
+    const asked = start.asked
+    const floor = start.floor
+    const fixed = !start.learn
     // Set when the model stays as the call left it (no model named, none rewritten): the result tells the type's own tier.
     let untouched = !named
     let lowered: Tier | undefined
@@ -1004,24 +1009,25 @@ export const register: Register = (on, options) => {
         ? { tier: baseline, reason: 'requested' as const, learned: baseline }
         : recommendScopedWithExploration(stats, projects, projectId, category, floor, {
           now: await clockNow($), halfLifeMs: halfLifeMs(), explore: config.explore, byCost: config.learnByCost,
-          ...(config.explore > 0 && !explicit ? { rand: explorationRandom() } : {}),
+          ...(config.explore > 0 && !fixed ? { rand: explorationRandom() } : {}),
         })
       // In observe mode the model stays as asked: exploring is only logged, the learned tier is what "would" happen.
-      const exploring = !explicit && choice.reason === 'explore'
-      const best = explicit ? asked : exploring && mode === 'observe' ? choice.learned : choice.tier
+      const exploring = !fixed && choice.reason === 'explore'
+      const best = fixed ? asked : exploring && mode === 'observe' ? choice.learned : choice.tier
       const label = spawnName(e) ?? category
       if (best !== asked) {
         if (mode !== 'observe') { ev = { ...e, model: best }; untouched = false }
         const would = mode === 'observe'
-        if (auto && floor !== asked && LADDER.indexOf(best) < LADDER.indexOf(asked)) {
+        if (start.lowers !== undefined && LADDER.indexOf(best) < LADDER.indexOf(asked)) {
           if (!would) lowered = asked
-          await $.ui.log(`${label}: ${would ? 'would start' : 'started'} on ${best}, asked ${asked} (startTier auto)`)
+          const why = start.lowers === 'ceiling' ? 'startTier auto, model in the call is a ceiling' : 'startTier auto'
+          await $.ui.log(`${label}: ${would ? 'would start' : 'started'} on ${best}, asked ${asked} (${why})`)
         } else {
           await $.ui.log(`${label}: ${asked} -> ${best}${would ? ' (would)' : ''}`)
         }
       }
       if (explicit && choice.learned !== asked) await $.ui.log(`${label}: kept the requested ${asked} (explicit), learning suggested ${choice.learned}`)
-      if (!explicit && choice.basis === 'cost') await $.ui.log(`${label}: chosen by cost per accepted run (${costLine(scopedStats(stats, projects, projectId, category, await clockNow($), halfLifeMs()), category, floor, await clockNow($))})`)
+      if (!fixed && choice.basis === 'cost') await $.ui.log(`${label}: chosen by cost per accepted run (${costLine(scopedStats(stats, projects, projectId, category, await clockNow($), halfLifeMs()), category, floor, await clockNow($))})`)
       if (exploring) {
         await $.ui.log(mode === 'observe'
           ? `${label}: would explore ${choice.tier} for ${category} (learned ${choice.learned})`
@@ -1040,7 +1046,7 @@ export const register: Register = (on, options) => {
         ...(untouched && typeof r.model === 'string' && r.model !== '' ? { ownTier: tierOf(r.model) } : {}),
       }
       agents.set(r.agentId, name === undefined ? fresh : { ...fresh, name })
-      if (fresh.ownTier !== undefined) await rememberOwnTier($, e.subagentType ?? '', fresh.ownTier)
+      if (fresh.ownTier !== undefined) await rememberOwnTier($, type, fresh.ownTier, engine)
       ledger = addAgent(ledger, category)
       if (plan.refine) {
         const id = r.agentId
@@ -1519,15 +1525,15 @@ async function writeStats($: EngineInterface, s: { stats: Stats; projects: Proje
 }
 
 // The own tier of an agent type remembered by earlier sessions (store key `agentTypes`), the fallback of `ownTierOf`
-// until this session has seen the type. Inheriting types and an empty type have none. Never throws.
-async function rememberedOwnTier($: EngineInterface, type: string): Promise<Tier | undefined> {
-  if (type === '' || INHERITING_TYPES.includes(type)) return undefined
+// until this session has seen the type. Claude Code's inheriting types and an empty type have none. Never throws.
+async function rememberedOwnTier($: EngineInterface, type: string, engine: boolean): Promise<Tier | undefined> {
+  if (type === '' || (engine && INHERITING_TYPES.includes(type))) return undefined
   try { return storedOwnTier(parseAgentTypes(await $.store.get(AGENT_TYPES_KEY)), type) } catch { return undefined }
 }
 
 // Remembers the own tier seen for an agent type, when it differs from the one remembered. Never throws.
-async function rememberOwnTier($: EngineInterface, type: string, tier: Tier): Promise<void> {
-  if (type === '' || INHERITING_TYPES.includes(type)) return
+async function rememberOwnTier($: EngineInterface, type: string, tier: Tier, engine: boolean): Promise<void> {
+  if (type === '' || (engine && INHERITING_TYPES.includes(type))) return
   try {
     await storeQueue(async () => {
       const types = parseAgentTypes(await $.store.get(AGENT_TYPES_KEY))

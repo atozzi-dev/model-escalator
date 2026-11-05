@@ -1,12 +1,13 @@
 // Downshift advice: tells the user when a task category runs on a model stronger than it seems to need.
 //
-// Learning (`learning.ts`) only climbs. With `startTier: auto` (the default) a spawn whose Agent call names no model
-// already starts on its category's tier (`AUTO_START`: explore on haiku, code, tests, docs, data and ui on sonnet).
-// What it does not lower is a model named in the Agent call or the agent's definition, reviews and other tasks, and
-// every agent under `startTier: requested`: a category that always asks for opus and never gets stuck keeps paying
-// opus prices there. The mod cannot change that at spawn without overriding an explicit choice; it can only tell
-// the user, who decides. (A suggestion is never pointless under auto: runs on a tier above the category's own
-// came from an explicit model.) This module reads the learned
+// Learning (`learning.ts`) only climbs. With `startTier: auto` (the default) a spawn of a Claude Code agent type with
+// no model in the Agent call, and any spawn whose call names a model, already starts on its category's tier
+// (`AUTO_START`: explore on haiku, code, tests, docs, data and ui on sonnet; see `startChoice`). What it does not
+// lower is a custom agent's definition, reviews and other tasks, and any model under `respectExplicitModel` or
+// `startTier: requested`: a category that always runs on opus and never gets stuck keeps paying opus prices there.
+// The mod cannot change that at spawn without overriding a person's choice; it can only tell the user, who decides.
+// (A suggestion is never pointless under auto: runs on a tier above the category's own came from one of those
+// choices.) This module reads the learned
 // statistics and lists those categories, one suggestion each, one tier down. Pure: no engine calls, never throws.
 //
 // How to wire it (register.ts and stats-view.ts, not done here):
@@ -461,9 +462,10 @@ export function formatAdvice(list: Advice[], opts: FormatOptions = {}): { text: 
         'estimates. Only checks on the cheaper model\'s own runs ("quality: ...") count as measured quality; checks on the ' +
         'current model are context, and only measured suggestions are strong.',
       (opts.startTier === 'requested'
-        ? 'startTier requested is on: the mod starts every agent on the model it asked for. '
-        : 'With startTier auto the mod already starts some categories lower when the Agent call names no model (explore on haiku; bugfix, feature, refactor, tests, docs, data and ui on sonnet). ') +
-        'These suggestions are for what it does not lower: a model named in the Agent call or the agent\'s definition, reviews and other tasks. ' +
+        ? 'startTier requested is on: the mod starts every agent on the model it asked for, so these suggestions cover every category. '
+        : 'With startTier auto the mod already starts some categories lower, also when the Agent call names a stronger model (explore on haiku; bugfix, feature, refactor, tests, docs, data and ui on sonnet). ' +
+          'These suggestions are for what it does not lower: a custom agent\'s definition, reviews and other tasks' +
+          (opts.respectExplicitModel === true ? ', and a model named in the Agent call. ' : '. ')) +
         'Nothing changes on its own: ask for the cheaper model in the Agent call or in the agent\'s definition. ' + how,
     ].join('\n')
     return { text, lines, hint: strong !== undefined ? hintLine(strong) : '' }

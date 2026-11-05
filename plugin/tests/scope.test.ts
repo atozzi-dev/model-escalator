@@ -27,7 +27,7 @@ function wire(on: any, preload: Record<string, unknown> = {}): H {
 }
 
 const spawn = async ($: any): Promise<string> =>
-  ((await $.agent.spawn({ prompt: 'p', description: 'fix db test', subagentType: 'general-purpose', parentModel: 'haiku' } as never)) as { agentId: string }).agentId
+  ((await $.agent.spawn({ prompt: 'p', description: 'fix db test', subagentType: 'general-purpose', provider: { plugin: 'engine', tier: 'core' }, parentModel: 'haiku' } as never)) as { agentId: string }).agentId
 const finish = ($: any, id: string) => $.turn.complete({ turnId: 't-' + id, agentId: id, answer: 'x' } as never)
 const run = async ($: any): Promise<void> => { await finish($, await spawn($)) }
 const command = async ($: any, args: string): Promise<string> =>

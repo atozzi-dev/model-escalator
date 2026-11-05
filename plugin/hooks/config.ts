@@ -35,13 +35,13 @@ export type Config = {
   reviewRate: number                // share (0 to 1) of the runs of cheap models reviewed by a senior model; 0 = off
   reviewModel: string               // model that reviews a sampled run; empty = the senior model
   explore: number                   // weight (0 to 1) of exploring a tier below the learned one at spawn; 0 = off
-  respectExplicitModel: boolean     // a model asked for in the Agent call is never changed at spawn by learning or exploration
+  respectExplicitModel: boolean     // a model named in the Agent call is kept exactly at spawn; off: it is a ceiling for the start
   learnByCost: boolean              // pick the start tier by cost per accepted run once there is enough cost data
   modelCategories: boolean          // classify tasks with a small model (one short call per uncached spawn) instead of keywords only
   minReviewScore: number            // lowest review score (1 to 5) of an accepted run
   reworkWindowMinutes: number       // minutes after a cheap agent's run during which a lead edit of its files counts as rework; 0 = off
   recordSessions: number            // sessions whose observation stream is recorded for /escalator replay (newest kept); 0 = off
-  startTier: StartTier              // auto: a spawn that names no model starts on the tier of its category; requested: as asked
+  startTier: StartTier              // auto: a Claude Code type with no model, or a model named in the call, starts on its category's tier; requested: as asked
 }
 
 export type StartTier = 'auto' | 'requested'

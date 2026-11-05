@@ -101,10 +101,11 @@ export function categorize(subagentType: string, description: string, prompt?: s
 
 // --- Auto start tier (option `startTier: auto`) ---
 //
-// Learning and exploration only move up from the tier they are given, and most agents inherit the lead's model, so
-// without a lower start nothing would ever run on a cheaper model. With `startTier: auto`, a spawn whose Agent call
-// names no model starts on a tier chosen by the category's label: the cheapest model that usually does that kind of
-// work well. The escalation ladder and the quality rule (`QUALITY`) catch the tasks where it does not.
+// Learning and exploration only move up from the tier they are given, and most agents inherit the lead's model (or get
+// the one the lead names, often the strongest), so without a lower start nothing would ever run on a cheaper model.
+// With `startTier: auto`, a spawn of a Claude Code agent type with no model in the call, and any spawn whose call names
+// a model, starts on a tier chosen by the category's label (see `startChoice`): the cheapest model that usually does
+// that kind of work well. The escalation ladder and the quality rule (`QUALITY`) catch the tasks where it does not.
 // - `explore` on haiku: searching, reading and summarising. A read-only run has no diff, so it is judged on its final
 //   report when sampled for review (`reviewRate`), like any other run; a miss costs little, since the lead reads the
 //   findings and acts on them itself. Haiku is the most aggressive start, so `categorize` gives explore only on clear
@@ -138,16 +139,19 @@ export function autoStartTier(category: string, asked: Tier, own: Tier | null = 
   return cheaper(target, ref)
 }
 
-// Agent types known to run on the parent's model when the call names none (their definition names no model).
-export const INHERITING_TYPES: readonly string[] = ['general-purpose']
+// Agent types of Claude Code known to run on the parent's model when the call names none (their definition says
+// `inherit`; seen in the built-in definitions of Claude Code 2.1.295).
+export const INHERITING_TYPES: readonly string[] = ['general-purpose', 'Explore', 'Plan']
 
 // The tier an agent of `type` runs on by itself when the call names no model: the parent's for an inheriting type,
 // else the latest `ownTier` seen on an agent of that type in this session (`agents` in spawn order), else the tier
-// remembered for the type in the store (`remembered`), else undefined. A session observation always wins.
+// remembered for the type in the store (`remembered`), else undefined. A session observation always wins. `engine`
+// says whether Claude Code provides the type: a definition file that takes the name of a built-in is not known to
+// inherit.
 export function ownTierOf(
-  type: string, parentTier: Tier, agents: Iterable<{ category: string; ownTier?: Tier }>, remembered?: Tier,
+  type: string, parentTier: Tier, agents: Iterable<{ category: string; ownTier?: Tier }>, remembered?: Tier, engine = true,
 ): Tier | undefined {
-  if (INHERITING_TYPES.includes(type)) return parentTier
+  if (engine && INHERITING_TYPES.includes(type)) return parentTier
   let seen: Tier | undefined
   for (const a of agents) {
     const i = a.category.lastIndexOf(':')
@@ -156,11 +160,52 @@ export function ownTierOf(
   return seen ?? remembered
 }
 
+// Whether Claude Code itself provides the agent type of a spawn (`provider` is `{ plugin: "engine", ... }` for a
+// built-in or a teammate). A missing or malformed provider counts as a definition: the safe side, never lowered.
+export function isEngineType(e: { provider?: unknown }): boolean {
+  const p = e.provider
+  return typeof p === 'object' && p !== null && (p as { plugin?: unknown }).plugin === 'engine'
+}
+
+// --- Who chose the model of a spawn ---
+//
+// Where a spawn starts depends on who chose its model:
+// - a model named in the Agent call is the lead's choice. With `respectExplicitModel` it is kept exactly. Otherwise,
+//   with `startTier: auto`, it is a ceiling: the start is the category tier (`autoStartTier`), never above the named
+//   model, whatever the agent type (the call overrides the definition).
+// - no model named, and the type is Claude Code's own (a built-in or a teammate): nobody chose the model, the agent
+//   inherits it. `startTier: auto` starts it on its category tier, never above the tier the type runs on by itself.
+// - no model named, and the type comes from a definition file (the user's or a plugin's), or its provider is unknown:
+//   a person chose that model in the file. It is never lowered; learning may only move it up from the tier the
+//   definition runs on, and leaves the spawn alone while that tier is not known.
+// `startTier: requested` turns every lower start off. `own`: the tier the type runs on by itself when known (see
+// `ownTierOf`). The result: `asked`, the tier the agent would run on without the mod (the reference of a rewrite);
+// `floor`, where learning and exploration start (never above `asked`); `learn`, whether they may move the start at
+// all; `lowers`, the rule that starts the agent below `asked`, when it does.
+export type StartChoice = { asked: Tier; floor: Tier; learn: boolean; lowers?: 'auto' | 'ceiling' }
+
+export function startChoice(i: {
+  category: string; parentTier: Tier; called?: Tier; engine: boolean; own?: Tier; startTier: 'auto' | 'requested'; respectExplicit: boolean
+}): StartChoice {
+  const auto = i.startTier === 'auto'
+  if (i.called !== undefined) {
+    if (i.respectExplicit) return { asked: i.called, floor: i.called, learn: false }
+    const floor = auto ? autoStartTier(i.category, i.called) : i.called
+    return floor === i.called ? { asked: i.called, floor, learn: true } : { asked: i.called, floor, learn: true, lowers: 'ceiling' }
+  }
+  if (!i.engine) return i.own === undefined ? { asked: i.parentTier, floor: i.parentTier, learn: false } : { asked: i.own, floor: i.own, learn: true }
+  if (!auto) return { asked: i.parentTier, floor: i.parentTier, learn: true }
+  const asked = i.own ?? i.parentTier
+  const floor = autoStartTier(i.category, i.parentTier, i.own ?? null)
+  return floor === asked ? { asked, floor, learn: true } : { asked, floor, learn: true, lowers: 'auto' }
+}
+
 // --- Remembered agent types (store key `agentTypes`) ---
 //
-// The own tier of each agent type seen in past sessions, so the first code spawn of a type in a new session already
-// knows it (see `ownTierOf`). One entry per type: the tier and when it was last seen. At most AGENT_TYPES_LIMIT
-// types; the least recently seen go first. Parsed defensively: anything malformed is ignored.
+// The own tier of each agent type seen in past sessions, so the first spawn of a type in a new session already knows
+// it (see `ownTierOf`): an engine type that does not inherit can start on sonnet for code, and a definition can be
+// moved up by learning from the tier it runs on. One entry per type: the tier and when it was last seen. At most
+// AGENT_TYPES_LIMIT types; the least recently seen go first. Parsed defensively: anything malformed is ignored.
 export const AGENT_TYPES_LIMIT = 100
 const MAX_TYPE_CHARS = 200
 

@@ -308,7 +308,11 @@ test('formatAdvice lists suggestions, says the figures are estimates and gives a
 test('the closing text says what startTier auto already lowers and that nothing changes on its own', async () => {
   const auto = formatAdvice([sample()], { startTier: 'auto' }).text
   expect(auto).toContain('startTier auto')
-  expect(auto).toContain('names no model')
+  expect(auto).toContain('also when the Agent call names a stronger model')
+  expect(auto).toContain("what it does not lower: a custom agent's definition, reviews and other tasks. ")
+  // with respectExplicitModel on, a model named in the call is not lowered either
+  expect(formatAdvice([sample()], { startTier: 'auto', respectExplicitModel: true }).text)
+    .toContain("what it does not lower: a custom agent's definition, reviews and other tasks, and a model named in the Agent call. ")
   expect(auto).toContain('Nothing changes on its own')
   expect(auto).not.toContain('never starts an agent below')
 })
@@ -316,6 +320,7 @@ test('the closing text says what startTier auto already lowers and that nothing 
 test('with startTier requested the text says the mod starts agents as asked', async () => {
   const req = formatAdvice([sample()], { startTier: 'requested' }).text
   expect(req).toContain('startTier requested')
+  expect(req).toContain('these suggestions cover every category')
   expect(req).toContain('Nothing changes on its own')
   expect(req).not.toContain('never starts an agent below')
   expect(formatAdvice([sample()]).text).not.toContain('never starts an agent below')
