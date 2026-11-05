@@ -130,18 +130,27 @@ test('a guarded suggestion is no hint', { options: { verifyCommand: 'npm test' }
 
 // --- quality ---
 
-// The same evidence for read-only work: no reviews, tests or rework can tell whether sonnet would do as well.
+// The same evidence for read-only work: only reviews of the reports of sonnet runs can tell whether it would do as well.
 const READ_ONLY = { 'security-reviewer:review': { opus: OPUS } }
 
-test('read-only work is listed in /escalator stats with its limit and never hinted', async ($, on) => {
+test('read-only work is listed in /escalator stats, guarded by report reviews, and never hinted', async ($, on) => {
   wire(on)
   await $.session.start({ cwd: '/work' } as never)
   data.stats = READ_ONLY
   expect(await run($, '')).not.toContain('never got stuck')
   const stats = await run($, 'stats')
   expect(stats).toContain('security-reviewer:review never got stuck in 18 runs on opus. On sonnet it would cost about $0.47')
-  expect(stats).toContain('cannot tell whether it would find the same issues')
+  expect(stats).toContain('sampled senior reviews of its reports (reviewRate) would show it')
   expect(stats).toContain('not on a comparison with the cheaper model')
+})
+
+test('read-only work with reviewRate 0 says what the mod cannot tell', { options: { reviewRate: 0 } }, async ($, on) => {
+  wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  data.stats = READ_ONLY
+  const stats = await run($, 'stats')
+  expect(stats).toContain('cannot tell whether it would find the same issues')
+  expect(stats).toContain('Turn on reviewRate to review the reports of sonnet runs')
 })
 
 test('the stats name the signal that measures a suggestion', async ($, on) => {

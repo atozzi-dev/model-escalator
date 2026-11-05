@@ -36,11 +36,12 @@
 // - `measured`: evidence from the cheaper tier's own runs of this category: at least `LEARN.minRuns` of them within
 //   `maxNotAcceptedRate`, with at least one active check on them: 3 or more senior reviews (their mean below the bar
 //   already dropped the suggestion), a `verifyCommand` for code, lead rework tracking for written files. Only measured
-//   suggestions are strong and can become the hint.
+//   suggestions are strong and can become the hint. Read-only work (`review`, `explore`: nothing to test or rework)
+//   counts reviews only, which judge its final reports.
 // - `guarded`: no such evidence yet, but a check would catch a drop after the switch: the `verifyCommand` for code
-//   (`tests`), sampled reviews (`reviews`), lead rework for written files (`rework`).
-// - `unmeasured`: read-only work (`review`, `explore`: no diff to review, nothing to test or rework), or work of
-//   unknown kind or with no check at all.
+//   (`tests`), sampled reviews (`reviews`, of the reports for read-only work), lead rework for written files (`rework`).
+// - `unmeasured`: work of unknown kind or with no check at all (read-only work with reviewRate off or not below the
+//   lead's model).
 // Reviews and rework are tracked only on runs that start below the lead's model. Reviews on the current tier appear
 // in the text as context only. Guarded and unmeasured suggestions stay in `/escalator stats` and the panel, worded
 // so they do not vouch for the cheaper model.
@@ -262,16 +263,14 @@ const enough = (x: Seen | undefined): x is Seen & { reviews: number; reviewMean:
 type QualityPart = { quality: Quality; signal?: QualitySignal; guard?: Guard; qualityNote: string }
 
 // The quality of the cheaper tier on this category (see "Quality" at the top). `s` is the current tier, read only to
-// keep it out of the evidence; `c` the cheaper tier. Checks per kind of work: reviews for any work that is not
-// read-only, the verifyCommand for code, rework for written files; reviews and rework only when the cheaper tier is
+// keep it out of the evidence; `c` the cheaper tier. Checks per kind of work: reviews for any work (of the report for
+// read-only work), the verifyCommand for code, rework for written files; reviews and rework only when the cheaper tier is
 // below the lead's model, the only runs they are tracked on.
 function qualityFor(category: string, suggested: Tier, c: Seen | undefined, x: Ctx): QualityPart {
   const label = categoryLabel(category)
   const n = (v: number): number => Math.round(v)
-  if (READ_ONLY_LABELS.includes(label)) {
-    return { quality: 'unmeasured', qualityNote: 'read-only work: no files to review, test or rework' }
-  }
   const tracked = below(suggested, x.baseline)
+  if (READ_ONLY_LABELS.includes(label)) return readOnlyQuality(suggested, c, x, tracked)
   const tests = x.verify && CODE_LABELS.includes(label)
   const rework = x.rework && tracked && WRITE_LABELS.includes(label)
   const sampled = x.reviewRate > 0 && tracked
@@ -302,6 +301,22 @@ function qualityFor(category: string, suggested: Tier, c: Seen | undefined, x: C
   return { quality: 'unmeasured', qualityNote: tracked
     ? 'no verifyCommand or reviewRate, and rework tracking is off'
     : 'no verifyCommand, and reviews and rework are tracked only on models below the lead\'s' }
+}
+
+// Read-only work (`review`, `explore`) changes no file: nothing to test or rework, and its reviews judge the agent's
+// final report, not the repository. Reviews of the cheaper tier's reports are its only evidence and sampled report
+// reviews its only guard.
+function readOnlyQuality(suggested: Tier, c: Seen | undefined, x: Ctx, tracked: boolean): QualityPart {
+  if (c !== undefined && c.runs >= LEARN.minRuns - 1e-9 && rate(c.notAccepted, c.runs) <= ADVICE.maxNotAcceptedRate && enough(c)) {
+    return { quality: 'measured', signal: 'reviews', qualityNote: `reviews of the reports of ${suggested} runs average ${c.reviewMean.toFixed(1)}` }
+  }
+  if (x.reviewRate > 0 && tracked) {
+    return { quality: 'guarded', guard: 'reviews',
+      qualityNote: `if ${suggested} does worse, sampled senior reviews of its reports (reviewRate) would show it and learning would move this category back up` }
+  }
+  return { quality: 'unmeasured', qualityNote: tracked
+    ? 'read-only work: only its reports can be reviewed, and reviewRate is off'
+    : 'read-only work: only its reports can be reviewed, and reviews are tracked only on models below the lead\'s' }
 }
 
 function adviseTier(view: Stats, row: Partial<Record<Tier, Cell>>, category: string, tier: Tier, x: Ctx): Advice | undefined {
@@ -389,14 +404,16 @@ function line(a: Advice): string {
 // An unmeasured suggestion in full sentences that do not vouch for the cheaper model: "security-reviewer:review never
 // got stuck in 18 runs on opus. On sonnet it would cost about $0.47 instead of $0.94 per run, but the mod cannot tell
 // whether it would find the same issues (read-only work: ...). Try sonnet on a few runs and compare the results
-// yourself." Reviews look at the agent's diff, so they cannot measure read-only work.
+// yourself." Read-only work is reviewed on its reports only, and only with reviewRate on.
 function unmeasuredLine(a: Advice, reviewRate: number): string {
   const label = categoryLabel(a.category)
   const cost = costText(a)
   const goal = label === 'review' ? 'find the same issues' : label === 'explore' ? 'find the same answers' : 'do the work as well'
   const why = note(a) !== '' ? ` (${note(a)})` : ''
   const how = READ_ONLY_LABELS.includes(label)
-    ? `Try ${a.suggested} on a few runs and compare the results yourself.`
+    ? reviewRate > 0
+      ? `Try ${a.suggested} on a few runs and compare the results yourself.`
+      : `Turn on reviewRate to review the reports of ${a.suggested} runs, or try ${a.suggested} on a few runs and compare the results yourself.`
     : WRITE_LABELS.includes(label)
       ? 'Set verifyCommand or turn on reviewRate to measure it.'
       : reviewRate > 0

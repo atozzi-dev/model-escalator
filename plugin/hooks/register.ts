@@ -16,7 +16,7 @@ import { renderTree } from './render-text'
 import { createQueue } from './queue'
 import { buildDetail, consultGate, findAgent, selectorChips, swapGate } from './node-detail'
 import { buildStatsView, columnWidths, fitView, type ViewCell } from './stats-view'
-import { buildReviewPrompt, diffArgv, editedPath, formatReviews, isCheaper, parseReview, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun } from './review'
+import { buildReportReviewPrompt, buildReviewPrompt, diffArgv, editedPath, formatReviews, handbackReport, isCheaper, parseReview, REPORT_REVIEW_SYSTEM, reportText, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun } from './review'
 import { parseSnapshot, type Snapshot, type TrackedAgent } from './state'
 import { addAgent, addConsult, addEscalation, addIntervention, addStep, asUsage, cost as stepCost, emptyLedger, planBlock, report, reportByCategory, savings, statusLine, claudeCostLine, claudeCostUsd, type Ledger, type Usage } from './savings'
 
@@ -57,6 +57,11 @@ const pendingReviews = new Set<Promise<void>>()
 // Files each tracked agent edited during its current run, as it named them: the review diff is limited to them.
 // Module state only: after a reload the review falls back to the whole working tree diff.
 const editedFiles = new Map<string, string[]>()
+// The report each tracked agent handed back to the lead during its current run (its last SubagentHandback message,
+// capped): a run that edited no file is reviewed on it. Module state only, like the edited files; at most
+// MAX_REPORTS agents, the oldest dropped first.
+const reports = new Map<string, string>()
+const MAX_REPORTS = 50
 
 // What is known, in memory only, of each sampled run (key `agentId:turnId`) between its recording and its review,
 // which land in either order: the score when the review came first, whether the run was counted as accepted (and
@@ -398,6 +403,7 @@ export function resetState(): void {
   reviewQueue = createQueue()
   pendingReviews.clear()
   editedFiles.clear()
+  reports.clear()
   reviewRuns.clear()
   writtenFiles.clear()
   reworkRuns.clear()
@@ -1069,7 +1075,10 @@ export const register: Register = (on, options) => {
       const queued = takeNotes(id)
       if (queued.length > 0) r = { ...r, context: [...(r.context ?? []), ...queued] } as typeof r
     }
-    if (tracked && config.reviewRate > 0 && r.isError !== true && r.deny === undefined) noteEdit(id, e as unknown as Record<string, unknown>)
+    if (tracked && config.reviewRate > 0 && r.isError !== true && r.deny === undefined) {
+      noteEdit(id, e as unknown as Record<string, unknown>)
+      noteReport(id, e as unknown as Record<string, unknown>)
+    }
     if (config.reworkWindowMinutes > 0 && r.isError !== true && r.deny === undefined) {
       if (tracked) noteWritten(id, e as unknown as Record<string, unknown>)
       else if (id === undefined) await noteLeadEdit($, e as unknown as Record<string, unknown>)
@@ -1221,11 +1230,11 @@ export const register: Register = (on, options) => {
           const wasEscalated = escalated(a, config.levels)
           const argv = splitCommand(config.verifyCommand)
           // Read loosely: older published types may not declare these fields.
-          const turn = e as { turnId?: unknown; isAborted?: unknown }
+          const turn = e as { turnId?: unknown; isAborted?: unknown; answer?: unknown }
           const key = runKey(id, turn.turnId)
           trackRun(a, key, written, lastNow, turn.isAborted === true)
           // Before the outcome is recorded, so the run is known as sampled when it is.
-          startReview($, a, turn.turnId, turn.isAborted === true)
+          startReview($, a, turn.turnId, turn.isAborted === true, turn.answer)
           if (argv.length === 0) {
             await recordOutcome($, a, wasEscalated, false, key)
           } else {
@@ -1522,6 +1531,18 @@ function noteEdit(id: string, input: Record<string, unknown>): void {
   } catch { /* the review falls back to the whole diff */ }
 }
 
+// Remembers the report a tracked agent hands back with SubagentHandback (the last one wins, capped). The call itself
+// is never touched. Never throws.
+function noteReport(id: string, input: Record<string, unknown>): void {
+  try {
+    const report = reportText(handbackReport(input.tool, input))
+    if (report === undefined) return
+    reports.delete(id)
+    reports.set(id, report)
+    if (reports.size > MAX_REPORTS) reports.delete(reports.keys().next().value as string)
+  } catch { /* the review falls back to the final answer */ }
+}
+
 // Remembers the file a successful edit of a tracked agent wrote, normalised, for the rework check at the end of its run.
 function noteWritten(id: string, input: Record<string, unknown>): void {
   try {
@@ -1592,21 +1613,27 @@ async function flushReviews(): Promise<void> {
 }
 
 // End of a tracked agent's run: draws whether it is reviewed and, if so, queues the review in the background.
-// Only runs that started below the reference tier, in active or observe mode, and that were not aborted. The
-// edited files are taken for this run either way, so the next run of the same agent starts with none. Never throws.
-function startReview($: EngineInterface, a: AgentState, turnId: unknown, aborted: boolean): void {
+// Only runs that started below the reference tier, in active or observe mode, and that were not aborted. A run that
+// edited files is reviewed on its diff; one that edited none on its report: the message it handed back to the lead,
+// else its final answer (`answer`, from turn.complete). The edited files and the report are taken for this run
+// either way, so the next run of the same agent starts with none. Never throws.
+function startReview($: EngineInterface, a: AgentState, turnId: unknown, aborted: boolean, answer?: unknown): void {
   try {
     const files = editedFiles.get(a.id) ?? []
     editedFiles.delete(a.id)
+    const handed = reports.get(a.id)
+    reports.delete(a.id)
     if (!watching() || aborted || config.reviewRate <= 0 || !isCheaper(a.startTier, baseline)) return
     // A run that edited no file (read-only work, or edits made only through the shell) has no diff of its own: the
-    // working tree would show other agents' or the lead's changes. It is not reviewed and costs no call.
-    if (files.length === 0) return
+    // working tree would show other agents' or the lead's changes. Its report is reviewed instead; with no report
+    // (nothing handed back, a reply too short to judge) it is not reviewed and costs no call.
+    const report = files.length === 0 ? handed ?? reportText(answer) : undefined
+    if (files.length === 0 && report === undefined) return
     const key = runKey(a.id, turnId)
     if (!sampleRun(config.reviewRate, sessionTag, key)) return
     reviewRuns.set(key, {})
     if (reviewRuns.size > MAX_REVIEWED_RUNS) reviewRuns.delete(reviewRuns.keys().next().value as string)
-    const p: Promise<void> = reviewQueue(() => reviewRun($, a, files, key))
+    const p: Promise<void> = reviewQueue(() => reviewRun($, a, files, key, report))
       .catch(() => undefined)
       // Without a score there is nothing to wait for: the entry goes (with a score it stays until the run is recorded).
       .finally(() => { if (reviewRuns.get(key)?.score === undefined) reviewRuns.delete(key); pendingReviews.delete(p) })
@@ -1629,10 +1656,10 @@ async function reviewDiff($: EngineInterface, files: readonly string[]): Promise
   }
 }
 
-// One sampled review: the agent's diff and task to the review model with the rubric, its score recorded in the
-// stats of the run's category and start tier, its cost in the ledger like a consult. A refused or unscored reply
-// records nothing. Never throws.
-async function reviewRun($: EngineInterface, a: AgentState, files: readonly string[], key: string): Promise<void> {
+// One sampled review: the agent's diff (or, for a run that edited no file, its `report`) and task to the review model
+// with the matching rubric, its score recorded in the stats of the run's category and start tier, its cost in the
+// ledger like a consult. A refused or unscored reply records nothing. Never throws.
+async function reviewRun($: EngineInterface, a: AgentState, files: readonly string[], key: string, report?: string): Promise<void> {
   try {
     const model = config.reviewModel || config.senior
     if (refusedSeniors.includes(tierOf(model))) return
@@ -1640,18 +1667,26 @@ async function reviewRun($: EngineInterface, a: AgentState, files: readonly stri
       try { await $.ui.log(`${agentLabel(a)} (${a.category}): review skipped: consult budget reached`, { to: 'debug' }) } catch { /* diagnostics only */ }
       return
     }
-    const { diff, scoped } = await reviewDiff($, files)
-    if (!diff) {
-      try { await $.ui.log(`${agentLabel(a)} (${a.category}): review skipped: no diff`, { to: 'debug' }) } catch { /* diagnostics only */ }
-      return
+    const task = a.taskTitle ? `${a.taskTitle}\n\n${a.task}` : a.task
+    const onReport = files.length === 0 && report !== undefined
+    let prompt: string
+    if (onReport) prompt = buildReportReviewPrompt({ task, report })
+    else {
+      const { diff, scoped } = await reviewDiff($, files)
+      if (!diff) {
+        try { await $.ui.log(`${agentLabel(a)} (${a.category}): review skipped: no diff`, { to: 'debug' }) } catch { /* diagnostics only */ }
+        return
+      }
+      prompt = buildReviewPrompt({ task, diff, scoped })
     }
-    const prompt = buildReviewPrompt({ task: a.taskTitle ? `${a.taskTitle}\n\n${a.task}` : a.task, diff, scoped })
+    const system = onReport ? REPORT_REVIEW_SYSTEM : REVIEW_SYSTEM
+    const what = onReport ? 'report review' : 'review'
     let text = ''
     let why = 'no reply'
     const costBefore = ledger.consultCost
     try {
       // The engine answers { isAnswered, text, usage }; the published 2.1.277 types still say string.
-      const reply = await $.model.complete({ model, system: REVIEW_SYSTEM, prompt, maxTokens: 400 }) as ModelReply
+      const reply = await $.model.complete({ model, system, prompt, maxTokens: 400 }) as ModelReply
       text = typeof reply === 'string' ? reply : reply.isAnswered ? reply.text : ''
       if (typeof reply !== 'string' && !reply.isAnswered) {
         why = reply.reason ?? 'refused'
@@ -1659,7 +1694,7 @@ async function reviewRun($: EngineInterface, a: AgentState, files: readonly stri
         if (reply.reason === 'api-error' && isModelRefusal({ status: reply.status, error: reply.error })) refusedSeniors = refuseTier(refusedSeniors, tierOf(model))
       }
       const usage = typeof reply === 'string' ? undefined : asUsage(reply.usage)
-      ledger = addConsult(ledger, { usage, promptChars: prompt.length + REVIEW_SYSTEM.length, replyChars: text.length }, tierOf(model), config, a.category)
+      ledger = addConsult(ledger, { usage, promptChars: prompt.length + system.length, replyChars: text.length }, tierOf(model), config, a.category)
       await save($)
     } catch (err) {
       why = String((err as { message?: unknown } | undefined)?.message ?? err).slice(0, 200)
@@ -1668,7 +1703,7 @@ async function reviewRun($: EngineInterface, a: AgentState, files: readonly stri
     const reviewCost = Math.max(0, ledger.consultCost - costBefore)
     recFor(a.id, (ra, at) => ({ k: 'review', a: ra, at, score: review?.score ?? 0, c: Math.round(reviewCost * 1e6) / 1e6 }))
     if (!review) {
-      try { await $.ui.log(`${agentLabel(a)} (${a.category}): review gave no score (${text ? 'no SCORE line' : why})`) } catch { /* best effort */ }
+      try { await $.ui.log(`${agentLabel(a)} (${a.category}): ${what} gave no score (${text ? 'no SCORE line' : why})`) } catch { /* best effort */ }
       return
     }
     await storeQueue(async () => {
@@ -1695,8 +1730,8 @@ async function reviewRun($: EngineInterface, a: AgentState, files: readonly stri
     if (review.score < config.minReviewScore) markQualityFailed(a.id)
     try {
       const reasons = review.reasons.length > 0 ? `: ${review.reasons.join('; ')}` : ''
-      await $.ui.log(`${agentLabel(a)} (${a.category}): review ${review.score}/5${reasons}`.slice(0, 600))
-      if (review.score <= 2) await $.ui.toast(`${shortName(a)}: review ${review.score}/5`)
+      await $.ui.log(`${agentLabel(a)} (${a.category}): ${what} ${review.score}/5${reasons}`.slice(0, 600))
+      if (review.score <= 2) await $.ui.toast(`${shortName(a)}: ${what} ${review.score}/5`)
     } catch { /* the note is best effort */ }
   } catch { /* a failing review must never disturb the session */ }
 }

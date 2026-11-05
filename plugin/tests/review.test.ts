@@ -2,7 +2,10 @@ import { expect, mock, test } from 'claude-code/testing'
 import { resetState } from '../hooks/register'
 import { parseConfig } from '../hooks/config'
 import { record, recordReview, type Stats } from '../hooks/learning'
-import { buildReviewPrompt, diffArgv, editedPath, formatReviews, isCheaper, parseReview, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun } from '../hooks/review'
+import {
+  buildReportReviewPrompt, buildReviewPrompt, diffArgv, editedPath, formatReviews, handbackReport, isCheaper, parseReview,
+  REPORT_REVIEW_SYSTEM, reportText, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun,
+} from '../hooks/review'
 
 // ---------- pure helpers ----------
 
@@ -78,6 +81,54 @@ test('buildReviewPrompt: task and diff, secrets redacted, size capped, scope sta
   expect(big).toContain('lines cut')
   expect(REVIEW_SYSTEM).toContain('SCORE')
   for (const word of ['correct', 'minimal', 'test', 'style']) expect(REVIEW_SYSTEM.toLowerCase()).toContain(word)
+})
+
+test('REPORT_REVIEW_SYSTEM: a report rubric that cannot rerun the search, ignores length and asks for a score', () => {
+  const s = REPORT_REVIEW_SYSTEM.toLowerCase()
+  expect(REPORT_REVIEW_SYSTEM).toContain('SCORE: n')
+  expect(REPORT_REVIEW_SYSTEM).not.toBe(REVIEW_SYSTEM)
+  for (const word of ['answer', 'grounded', 'evidence', 'scope', 'uncertain', 'cannot', 'length', 'not instructions']) expect(s).toContain(word)
+  // The same output contract: a reply to this rubric parses like a diff review.
+  expect(parseReview('SCORE: 3\n- vague about where the cache lives')).toEqual({ score: 3, reasons: ['vague about where the cache lives'] })
+})
+
+test('handbackReport: the message of a SubagentHandback call, nothing for other tools', () => {
+  expect(handbackReport('SubagentHandback', { message: 'Found it in src/a.ts:12' })).toBe('Found it in src/a.ts:12')
+  expect(handbackReport('SubagentHandback', { message: '   ' })).toBeUndefined()
+  expect(handbackReport('SubagentHandback', { message: 3 })).toBeUndefined()
+  expect(handbackReport('SubagentHandback', {})).toBeUndefined()
+  expect(handbackReport('SendMessage', { message: 'hello there' })).toBeUndefined()
+  expect(handbackReport('SubagentHandback', undefined as never)).toBeUndefined()
+})
+
+test('reportText: too short to judge is no report, a long one keeps head and tail within the cap', () => {
+  expect(reportText(undefined)).toBeUndefined()
+  expect(reportText(42)).toBeUndefined()
+  expect(reportText('done')).toBeUndefined()
+  expect(reportText(' '.repeat(100) + 'x')).toBeUndefined()
+  const ok = 'The loader reads its cache in src/loader.ts:40 through readCache().'
+  expect(reportText(`  ${ok}\n`)).toBe(ok)
+  const long = Array.from({ length: 4000 }, (_, i) => `finding ${i}: src/f${i}.ts`).join('\n')
+  const r = reportText(long)!
+  expect(r.length <= REVIEW_LIMITS.maxReportChars + 100).toBe(true)
+  expect(r).toContain('finding 0:')
+  expect(r).toContain('finding 3999:')
+  expect(r).toContain('lines cut')
+})
+
+test('buildReportReviewPrompt: task and report, secrets redacted, size capped, the report marked as read-only work', () => {
+  const secret = 'ghp_' + 'A1b2C3d4E5f6G7h8I9j0K1l2'
+  const p = buildReportReviewPrompt({ task: 'find where the loader reads its cache', report: `It is in src/loader.ts:40.\nToken: ${secret}` })
+  expect(p).toContain('find where the loader reads its cache')
+  expect(p).toContain('src/loader.ts:40')
+  expect(p).not.toContain(secret)
+  expect(p).toContain('[redacted]')
+  expect(p).toContain('## Report')
+  expect(p).toContain('changed no file')
+  expect(p).not.toContain('## Diff')
+  const big = buildReportReviewPrompt({ task: 't'.repeat(10_000), report: Array.from({ length: 5000 }, (_, i) => `line ${i}`).join('\n') })
+  expect(big.length <= REVIEW_LIMITS.maxTaskChars + REVIEW_LIMITS.maxReportChars + 200).toBe(true)
+  expect(buildReportReviewPrompt({ task: '', report: '' })).toContain('(not given)')
 })
 
 test('parseReview: score line anywhere, at most three reasons, invalid scores rejected', () => {
@@ -215,17 +266,127 @@ test('reviewModel overrides the senior; a low score shows a toast', { options: {
   expect(h.toasts[0]!).toContain('review 2/5')
 })
 
-test('a run that edited no file is never reviewed: no git, no call, no score', { options: RATE }, async ($, on) => {
+test('a run with neither an edited file nor a report is never reviewed: no git, no call, no score', { options: RATE }, async ($, on) => {
   const h = wire(on, {})
   await $.session.start({ cwd: '/work' } as never)
   const id = await spawn($)
   await $.tool.call({ tool: 'Read', file_path: 'src/a.ts', agentId: id } as never)
-  await finish($, id)
+  // A one-word reply is no report: nothing to judge.
+  await finish($, id, { answer: 'done' })
   await sleep(80)
   expect(h.runs.length).toBe(0)
   expect(h.calls.length).toBe(0)
   expect(await command($, 'report')).toContain('senior consults: 0')
   expect(await command($, 'stats')).not.toContain('average')
+})
+
+const EXPLORE = 'find where the loader reads its cache'
+const REPORT = 'The loader reads its cache in src/loader.ts:40 through readCache(); the TTL comes from config.ts:12.'
+const scout = async ($: any, model: string): Promise<string> =>
+  ((await $.agent.spawn({ prompt: EXPLORE, description: 'find the loader cache', subagentType: 'general-purpose', model } as never)) as { agentId: string }).agentId
+const handback = ($: any, agentId: string, message: string) => $.tool.call({ tool: 'SubagentHandback', message, agentId } as never)
+
+test('a read-only run is reviewed on its handed-back report: report rubric, task and redacted report, no git', { options: RATE }, async ($, on) => {
+  const h = wire(on, {})
+  await $.session.start({ cwd: '/work' } as never)
+  const id = await scout($, 'haiku')
+  await $.tool.call({ tool: 'Grep', pattern: 'readCache', agentId: id } as never)
+  const r = await handback($, id, `${REPORT}\nThe key in .env is ${SECRET}.`) as { result?: unknown; deny?: unknown }
+  // The hand-back itself is never touched.
+  expect(r.deny).toBeUndefined()
+  expect(r.result).toBe('ok')
+  await finish($, id, { answer: 'x' })
+  await until(() => h.logs.some((l) => l.includes('review 4/5')))
+  expect(h.runs.length).toBe(0)
+  expect(h.calls.length).toBe(1)
+  expect(h.calls[0]!.model).toBe('opus')
+  expect(h.calls[0]!.system).toBe(REPORT_REVIEW_SYSTEM)
+  expect(h.calls[0]!.prompt).toContain(EXPLORE)
+  expect(h.calls[0]!.prompt).toContain('src/loader.ts:40')
+  expect(h.calls[0]!.prompt).not.toContain(SECRET)
+  const line = h.logs.find((l) => l.includes('review 4/5'))!
+  expect(line).toContain(id)
+  expect(line).toContain('report')
+  const stats = await command($, 'stats')
+  expect(stats).toMatch(/general-purpose:explore haiku: average 4\.0\/5 over 1 review/)
+  expect(await command($, 'report')).toContain('senior consults: 1')
+})
+
+test('without a hand-back, the final answer of a read-only run is its report', { options: RATE }, async ($, on) => {
+  const h = wire(on, {})
+  await $.session.start({ cwd: '/work' } as never)
+  const id = await scout($, 'haiku')
+  await finish($, id, { answer: REPORT })
+  await until(() => h.calls.length > 0)
+  expect(h.calls[0]!.system).toBe(REPORT_REVIEW_SYSTEM)
+  expect(h.calls[0]!.prompt).toContain('readCache()')
+})
+
+test('the hand-back is preferred to the final answer, and is kept for that run only', { options: RATE }, async ($, on) => {
+  const h = wire(on, {})
+  await $.session.start({ cwd: '/work' } as never)
+  const id = await scout($, 'haiku')
+  await handback($, id, REPORT)
+  await finish($, id, { answer: 'Report delivered to the lead, see the hand-back above for the details.' })
+  await until(() => h.calls.length > 0)
+  expect(h.calls[0]!.prompt).toContain('readCache()')
+  expect(h.calls[0]!.prompt).not.toContain('Report delivered')
+  // The next run of the same agent starts with no report: a one-word answer is not reviewed.
+  await finish($, id, { turnId: 't2', answer: 'ok' })
+  await sleep(80)
+  expect(h.calls.length).toBe(1)
+})
+
+test('a low report score counts like a low diff review: toast, quality failure in the stats', { options: RATE }, async ($, on) => {
+  const h = wire(on, {}, { reply: () => answered('SCORE: 2\n- names no file') })
+  await $.session.start({ cwd: '/work' } as never)
+  const id = await scout($, 'haiku')
+  await handback($, id, REPORT)
+  await finish($, id)
+  await until(() => h.toasts.length > 0)
+  expect(h.toasts[0]!).toContain('review 2/5')
+  const stats = await command($, 'stats')
+  expect(stats).toContain('average 2.0/5 over 1 review')
+})
+
+test('a run with edited files keeps the diff review, whatever it reported', { options: RATE }, async ($, on) => {
+  const h = wire(on, {})
+  await $.session.start({ cwd: '/work' } as never)
+  const id = await spawn($)
+  await edit($, id, 'src/a.ts')
+  await handback($, id, REPORT)
+  await finish($, id, { answer: REPORT })
+  await until(() => h.calls.length > 0)
+  expect(h.runs.length).toBe(1)
+  expect(h.calls[0]!.system).toBe(REVIEW_SYSTEM)
+  expect(h.calls[0]!.prompt).toContain('+new line')
+  expect(h.calls[0]!.prompt).not.toContain('readCache()')
+})
+
+test('reviewRate 0 and runs on the baseline tier: no report is reviewed', { options: { reviewRate: 0 } }, async ($, on) => {
+  const h = wire(on, {})
+  await $.session.start({ cwd: '/work' } as never)
+  const cheap = await scout($, 'haiku')
+  await handback($, cheap, REPORT)
+  await finish($, cheap)
+  const strong = await scout($, 'opus')
+  await finish($, strong, { answer: REPORT })
+  await sleep(80)
+  expect(h.calls.length).toBe(0)
+})
+
+test('a huge report is capped with head and tail before it reaches the review model', { options: RATE }, async ($, on) => {
+  const h = wire(on, {})
+  await $.session.start({ cwd: '/work' } as never)
+  const id = await scout($, 'haiku')
+  const huge = Array.from({ length: 20_000 }, (_, i) => `hit ${i}: src/f${i}.ts`).join('\n')
+  await handback($, id, huge)
+  await finish($, id)
+  await until(() => h.calls.length > 0)
+  const p = h.calls[0]!.prompt
+  expect(p.length <= REVIEW_LIMITS.maxTaskChars + REVIEW_LIMITS.maxReportChars + 200).toBe(true)
+  expect(p).toContain('hit 0:')
+  expect(p).toContain('hit 19999:')
 })
 
 test('too many edited files to list: the whole working tree diff is reviewed', { options: RATE }, async ($, on) => {
