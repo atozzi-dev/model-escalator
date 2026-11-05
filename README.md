@@ -137,6 +137,25 @@ Do not delegate questions, explanations, changes to one or two files, or tightly
 
 The rule applies to every request in that project, so keep the last paragraph: without it, small requests get split into subagents too, which costs more than doing them directly.
 
+### Delegation hint
+
+When the main conversation writes a large job by itself, the mod tells you once per session, in a toast and in the log. The lead never reads it: the mod does not change the lead's prompt or what Claude does, and the hint costs no tokens and no model call.
+
+It counts the lead's successful writes (Edit, Write, MultiEdit, NotebookEdit) over its last three turns, and only those that ended within the last 30 minutes. It shows when the lead started no subagent that writes (Explore, Plan and forks do not count) and either:
+
+- wrote at least four files, 300 lines or more, in two or more folders (or at least six files), or
+- spent at least 1.5 USD on its own requests and wrote at least three files.
+
+These thresholds are a first guess and may change. After the hint, `/escalator` shows a line about it for as long as no subagent that writes has been started. Once the lead starts one, the hint never comes back in that session. Option `delegationHint` turns it off; in observe mode it is only written to the log.
+
+Known misses:
+
+- It looks back: it speaks after the turn, not while the work is going on.
+- Files written through shell commands are not counted.
+- A single large file does not fire it.
+- Mechanical changes across many files (renames, import updates) fire it although a subagent may not help; read the hint as a question, not a verdict.
+- Work that you asked the lead to do itself still fires it.
+
 ## Commands
 
 These are the subcommands listed by `/escalator help`:
@@ -208,6 +227,7 @@ Options are set from `/config` or under `pluginConfigs` in your settings (key `m
 | `consultBudgetUsd` | 0 | Dollars the senior calls (consults and reviews) may cost in the session; `0` means no dollar limit |
 | `pauseAtHuman` | true | Refuses all further tool calls of an agent at the human level, until you resume it. Off keeps the note only. Active mode only |
 | `notifyLead` | true | Adds a short notice to the main conversation (read by the lead) when an agent is swapped up, cannot be swapped, or needs a human. At most 10 per session. Active mode only |
+| `delegationHint` | true | Tells you once per session, in a toast and the log, when the lead writes a large multi-file job by itself and starts no subagent that writes. Never changes what Claude does; costs no tokens. Observe mode logs it only. See "Delegation hint" |
 | `deescalateAfter` | 0 (off) | Progress signals (failing tests dropping or reaching 0) after which a swapped agent goes back one tier, once per run. `observe` only logs it |
 | `effortStep` | false | Adds an effort level between the consult and the swap: the agent keeps its model and its requests carry a higher effort until its next swap. `observe` only logs it |
 | `effortBoost` | `high` | Lowest effort the effort level raises a request to: `low`, `medium`, `high`, `xhigh` or `max`. A request always goes at least one step up |

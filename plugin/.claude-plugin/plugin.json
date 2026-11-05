@@ -189,6 +189,12 @@
       "description": "Add a short notice to the main conversation, read by the lead, whenever an agent is swapped to a stronger model, cannot be (the model is not available) or needs a human. At most 10 messages per session; active mode only. Off keeps the log and the toasts only.",
       "default": true
     },
+    "delegationHint": {
+      "type": "boolean",
+      "title": "Hint when the lead works alone",
+      "description": "Tells you once per session, in a toast and the log, when the main conversation writes many files by itself and starts no subagent that writes. The mod never changes what Claude does. Zero tokens. In observe mode the hint is only logged.",
+      "default": true
+    },
     "effortBoost": {
       "type": "string",
       "title": "Effort boost",

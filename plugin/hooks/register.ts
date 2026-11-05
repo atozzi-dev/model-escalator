@@ -4,6 +4,7 @@ import { DEFAULT_CONFIG, describeConfig, parseConfig, splitCommand, type Config 
 import { LADDER, afterHelp, agentHead, beginRequest, endRequest, limitReached, restartSilence, sessionClosed, startCall, agentLabel, allowedMax, nextTier, canAskForHelp, classifyFailure, consultLimit, countStep, EFFORTS, endRun, escalated, features, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_LEAD_NOTICES, newAgent, noteProgress, normalizePath, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, spawnName, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type Features, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
 import { downshiftAdvice, formatAdvice, markHinted, pickHint, type Advice } from './advice'
 import { exportCsv } from './export'
+import { emptyLeadTurn, hintText, isWritingSpawn, leadWork, noteLeadCall, pushTurn, shouldHint, type LeadTurn } from './lead-work'
 import { parseReplayArgs, replayReport, sweep, sweepGrid, sweepReport } from './replay'
 import { addAgent as addRecAgent, indexOf as recIndexOf, mergeRecordings, parseRecordings, push as recPush, recordedOptions, relTime, resumeRecording, startRecording, stepEvent, toolEvent, type Live, type RecEvent, type RecordedMode, type Recording } from './recorder'
 import { buildDossier, inputFromState } from './dossier'
@@ -94,6 +95,15 @@ const MAX_REWORK_FILES = 50
 // Messages to the lead sent this session (capped by MAX_LEAD_NOTICES) and the sends still in flight.
 let leadNotices = 0
 const pendingNotices = new Set<Promise<void>>()
+
+// The delegation hint (option delegationHint, DELEGA-ANALISI 1.3). The lead's calls of the turn in progress, its last
+// turns (the window), the lead cost the window has already counted, the root the folders are read from, and the flags
+// that live in the snapshot: shown once, and never again once a subagent that writes was started. Memory only otherwise.
+let leadTurnNow: LeadTurn = emptyLeadTurn()
+let leadWindow: LeadTurn[] = []
+let leadMark = 0
+let leadHint: { hinted: boolean; delegated: boolean } = { hinted: false, delegated: false }
+let leadRoot: string | undefined
 
 const agents = new Map<string, TrackedAgent>()
 // Agents for which a consult limit was already logged (one line per agent).
@@ -365,6 +375,11 @@ function noteTask(id: string | undefined, e: Record<string, unknown>, r: unknown
 export function resetState(): void {
   sessionTag = newTag()
   projectId = ''
+  leadTurnNow = emptyLeadTurn()
+  leadWindow = []
+  leadMark = 0
+  leadHint = { hinted: false, delegated: false }
+  leadRoot = undefined
   adviceHintShown = false
   exploreRandom = undefined
   agents.clear()
@@ -424,7 +439,7 @@ export function resetState(): void {
 function snapshot(): Snapshot {
   return {
     agents: [...agents.values()], ledger, seenModels, sessionTag, mode, baseline, baselinePinned, blockedTiers, refusedSeniors,
-    graph, ...(layoutMem ? { layout: layoutMem } : {}), drawnSeq,
+    graph, ...(layoutMem ? { layout: layoutMem } : {}), drawnSeq, leadHint: { ...leadHint },
   }
 }
 
@@ -726,6 +741,11 @@ export const register: Register = (on, options) => {
       graph = saved.graph ?? emptyGraph(baseline)
       layoutMem = saved.layout
       drawnSeq = saved.drawnSeq ?? 0
+      // The hint's flags come back; the window of the last turns is not kept, so it starts again from the ledger's cost now.
+      leadHint = saved.leadHint ? { ...saved.leadHint } : { hinted: false, delegated: false }
+      leadMark = ledger.leadCost ?? 0
+      leadWindow = []
+      leadTurnNow = emptyLeadTurn()
       // A map pane left open across the reload keeps being redrawn.
       try {
         const open = await $.ui.panes()
@@ -736,6 +756,10 @@ export const register: Register = (on, options) => {
       graph = emptyGraph(baseline)
       layoutMem = undefined
       drawnSeq = 0
+      leadHint = { hinted: false, delegated: false }
+      leadMark = ledger.leadCost ?? 0
+      leadWindow = []
+      leadTurnNow = emptyLeadTurn()
       stopMapTimer()
       stopStatsTimer()
       try {
@@ -761,7 +785,11 @@ export const register: Register = (on, options) => {
       } catch { /* no stall detection, everything else works */ }
     }
     const r = await next(e)
-    try { projectId = projectKey((r as { cwd?: unknown } | undefined)?.cwd) } catch { projectId = '' }
+    try {
+      const cwd = (r as { cwd?: unknown } | undefined)?.cwd
+      projectId = projectKey(cwd)
+      leadRoot = typeof cwd === 'string' ? cwd : undefined
+    } catch { projectId = '' }
     if (watching()) {
       try {
         await $.tool.register({
@@ -837,10 +865,14 @@ export const register: Register = (on, options) => {
     const planText = plan ? '\n\n' + plan : ''
     const reported = claudeCostLine(await readClaudeCost($), ledger)
     const lowered = formatLoweredStarts(agents.values())
+    // While the delegation hint applies: shown, and no subagent that writes has been started since.
+    const leadNote = mode === 'active' && leadHint.hinted && !leadHint.delegated
+      ? 'Delegation hint: shown this session. The lead wrote a large job by itself; asking it to split the work into subagents lets the ladder start parts on cheaper models (option delegationHint).'
+      : ''
     const pausedText = paused.length === 0 ? '' : '\n\nPaused (resume with /escalator resume <id>|all):\n' +
       paused.map((a) => `- ${agentLabel(a)} (${a.category}, ${a.tier})`).join('\n')
     const hint = await adviceHint($, await currentAdvice($))
-    return { text: `Mode: ${mode}\n` + report(ledger, baseline) + (reported ? '\n' + reported : '') + (lowered ? '\n' + lowered : '') + planText + pausedText + (hint ? '\n\n' + hint : '') +
+    return { text: `Mode: ${mode}\n` + report(ledger, baseline) + (reported ? '\n' + reported : '') + (lowered ? '\n' + lowered : '') + (leadNote ? '\n' + leadNote : '') + planText + pausedText + (hint ? '\n\n' + hint : '') +
       '\n\nMore: /escalator stats, /escalator map (live agent network), /escalator history, /escalator config, /escalator help' }
   })
 
@@ -1085,6 +1117,10 @@ export const register: Register = (on, options) => {
       if (tracked) noteWritten(id, e as unknown as Record<string, unknown>)
       else if (id === undefined) await noteLeadEdit($, e as unknown as Record<string, unknown>)
     }
+    // The lead's own successful calls feed the delegation hint (the lead has no agentId).
+    if (id === undefined && (mode === 'active' || mode === 'observe') && config.delegationHint && r.isError !== true && r.deny === undefined) {
+      await noteLeadWork($, e as unknown as Record<string, unknown>)
+    }
     if (noteTask(tracked ? id : undefined, e as unknown as Record<string, unknown>, r)) await save($)
     // What the detector reads from the result, read once: the recorder keeps it and observe scores it.
     let feats: Features | undefined
@@ -1219,6 +1255,7 @@ export const register: Register = (on, options) => {
   // 4. End of an agent's run: learn from it and refresh the running report.
   on('turn.complete', async ($, e, next) => {
     const id = e.agentId
+    if (id === undefined) await leadTurnEnd($)
     if (id !== undefined && labelPending.has(id)) await settleLabel($, id)
     const a = id ? agents.get(id) : undefined
     feed($, { type: 'complete', ...(id ? { agentId: id } : {}) })
@@ -1627,6 +1664,43 @@ async function noteLeadEdit($: EngineInterface, input: Record<string, unknown>):
     }
     try { await $.ui.log(`${run.label}: lead reworked ${raw.split(/[\/]/).pop()}`) } catch { /* the note is best effort */ }
   } catch { /* the check must never disturb the lead */ }
+}
+
+// A successful call of the lead for the delegation hint: its writes join the turn in progress, and a subagent that
+// writes ends the hint for the session (saved at once: the flag must survive a reload). Never throws.
+async function noteLeadWork($: EngineInterface, input: Record<string, unknown>): Promise<void> {
+  try {
+    leadTurnNow = noteLeadCall(leadTurnNow, input.tool, input, leadRoot)
+    if (leadHint.delegated || !isWritingSpawn(input.tool, input)) return
+    leadHint = { ...leadHint, delegated: true }
+    await save($)
+  } catch { /* the hint is optional */ }
+}
+
+// The lead's turn ended: the turn joins the window with the cost its requests added, and the hint is shown once when the
+// window qualifies (DELEGA-ANALISI 1.3). Only the main loop calls it. Shown to the user only: a toast in active mode and
+// a log line, never a message to the lead. Never throws.
+async function leadTurnEnd($: EngineInterface): Promise<void> {
+  try {
+    const turn = leadTurnNow
+    const total = ledger.leadCost ?? 0
+    const spent = Math.max(0, total - leadMark)
+    leadMark = total
+    leadTurnNow = emptyLeadTurn()
+    if (!config.delegationHint || (mode !== 'active' && mode !== 'observe') || leadHint.hinted || leadHint.delegated) return
+    const now = await clockNow($)
+    if (now === undefined) return
+    leadWindow = pushTurn(leadWindow, { ...turn, cost: spent }, now)
+    const work = leadWork(leadWindow)
+    if (!shouldHint(work)) return
+    const text = hintText(work)
+    leadHint = { ...leadHint, hinted: true }
+    await save($)
+    try {
+      if (mode === 'active') await $.ui.toast(text)
+      await $.ui.log(mode === 'observe' ? `delegation hint (observe mode, not shown): ${text}` : `delegation hint: ${text}`)
+    } catch { /* the hint is best effort */ }
+  } catch { /* the hint must never disturb the lead */ }
 }
 
 async function flushReviews(): Promise<void> {

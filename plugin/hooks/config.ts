@@ -31,6 +31,7 @@ export type Config = {
   effortBoost: Effort               // lowest effort the effort level raises a request to (it always goes at least one step up)
   learningHalfLifeDays: number      // days after which learned evidence counts half; 0 = never fades
   notifyLead: boolean               // message the lead (main conversation) when an agent is swapped up or needs a human
+  delegationHint: boolean           // tell the user once per session when the lead does a large multi-file job alone
   reviewRate: number                // share (0 to 1) of the runs of cheap models reviewed by a senior model; 0 = off
   reviewModel: string               // model that reviews a sampled run; empty = the senior model
   explore: number                   // weight (0 to 1) of exploring a tier below the learned one at spawn; 0 = off
@@ -89,6 +90,8 @@ export const DEFAULT_CONFIG: Config = {
   effortStep: false,
   effortBoost: 'high',
   notifyLead: true,
+  // Zero tokens and no change to the lead: a notice to the user only, so on by default.
+  delegationHint: true,
   learningHalfLifeDays: 30,
   modelOverrides: {},
   verifyCommand: '',
@@ -247,6 +250,7 @@ function optionValues(c: Config): [string, unknown][] {
     ['verifyCommand', c.verifyCommand], ['verifyTimeoutSeconds', c.verifyTimeoutSeconds],
     ['maxConsultsPerAgent', c.maxConsultsPerAgent], ['maxConsultsPerSession', c.maxConsultsPerSession],
     ['consultBudgetUsd', c.consultBudgetUsd], ['pauseAtHuman', c.pauseAtHuman], ['notifyLead', c.notifyLead],
+    ['delegationHint', c.delegationHint],
     ['deescalateAfter', c.deescalateAfter], ['learningHalfLifeDays', c.learningHalfLifeDays],
     ['reviewRate', c.reviewRate], ['reviewModel', c.reviewModel], ['explore', c.explore],
     ['respectExplicitModel', c.respectExplicitModel], ['learnByCost', c.learnByCost], ['modelCategories', c.modelCategories],
@@ -332,6 +336,7 @@ export function parseConfig(raw: Raw | undefined, fallback: Config = DEFAULT_CON
       effortStep,
       effortBoost: parseEffort(o.effortBoost, d.effortBoost),
       notifyLead: bool(o.notifyLead, d.notifyLead),
+      delegationHint: bool(o.delegationHint, d.delegationHint),
       learningHalfLifeDays: halfLife !== undefined && halfLife >= 0 ? halfLife : d.learningHalfLifeDays,
       reviewRate: rate !== undefined && rate >= 0 && rate <= 1 ? rate : d.reviewRate,
       explore: explore !== undefined && explore >= 0 && explore <= 1 ? explore : d.explore,

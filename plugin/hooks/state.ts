@@ -24,6 +24,9 @@ export type Snapshot = {
   graph?: GraphState        // the agent network of the map (absent in snapshots saved before the map)
   layout?: LayoutMemory     // the slots the map's nodes were given, kept so they do not jump after a reload
   drawnSeq?: number         // the last graph event the map drew
+  // The delegation hint of this session (absent before it existed): shown once, and never again once the lead spawned
+  // a subagent that writes.
+  leadHint?: { hinted: boolean; delegated: boolean }
 }
 
 const MODES = ['active', 'observe', 'baseline', 'off']
@@ -94,14 +97,16 @@ export function parseSnapshot(v: unknown): Snapshot | undefined {
   })
   // Snapshots saved before blocked models existed have no such lists; a malformed one counts as empty.
   const tiers = (x: unknown): Tier[] => (Array.isArray(x) ? [...new Set(x.filter((t): t is Tier => TIERS.includes(t as string)))] : [])
-  const { graph: _g, layout: _l, drawnSeq: _d, ledger: _led, ...restKeys } = v
+  const { graph: _g, layout: _l, drawnSeq: _d, leadHint: _h, ledger: _led, ...restKeys } = v
   const rest = { ...restKeys, ledger: parseLedger(v.ledger as Record<string, unknown>) }
   const graph = parseGraph(v.graph)
   const layout = parseLayout(v.layout)
   const drawnSeq = typeof v.drawnSeq === 'number' && Number.isInteger(v.drawnSeq) && v.drawnSeq >= 0 ? v.drawnSeq : undefined
+  const leadHint = isObj(v.leadHint) ? { hinted: v.leadHint.hinted === true, delegated: v.leadHint.delegated === true } : undefined
   return {
     ...rest, agents, blockedTiers: tiers(v.blockedTiers), refusedSeniors: tiers(v.refusedSeniors),
     ...(graph ? { graph } : {}), ...(layout ? { layout } : {}), ...(drawnSeq !== undefined ? { drawnSeq } : {}),
+    ...(leadHint ? { leadHint } : {}),
   } as unknown as Snapshot
 }
 
