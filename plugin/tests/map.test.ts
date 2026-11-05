@@ -170,6 +170,9 @@ test('the pane draws an escaped Svg on desktop, vscode and mobile', async ($, on
     expect(source).toContain('a&lt;b&gt;&amp;&quot;c')
     expect(source).not.toContain('a<b>')
     expect(svg.props.isInteractive).toBe(true)
+    // The frame is as tall as the drawing at scale 1 (the viewBox height); the width is the slot's.
+    expect(svg.props.height).toBe(Number(source.match(/viewBox="0 0 [\d.]+ ([\d.]+)"/)?.[1]))
+    expect(svg.props.width).toBeUndefined()
     expect(String(svg.props.alt)).toBe('Agent network: 2 workers')
     await ui.unmount()
   }

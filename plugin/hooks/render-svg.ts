@@ -16,8 +16,11 @@
 // opts.recentMs keep flowing too. Pure CSS keyframes; prefers-reduced-motion stops all of them and keeps the
 // static highlight (halo, dashed edge, thicker border).
 //
-// Fit. The drawing is as wide as the layout (a side pane's width) and declares max-width:100% with height:auto,
-// so a narrower pane scales it down with its proportions instead of scrolling. Worker cards are full-width rows
+// Fit. The frame's size is not ours to know and its stylesheet may size the svg on its own, so the root does not
+// depend on it: width and height are 100% (also inline, to win over a frame stylesheet), the viewBox stays at the
+// layout size and preserveAspectRatio is "xMidYMin meet". Whatever the frame is, the whole drawing shows: a narrow
+// pane scales it down, a wide one never grows it past the frame, pinned to the top. renderSvgSized also reports the
+// natural size so the caller can give the frame that height. Worker cards are full-width rows
 // with room for a typical name; a name cut on a card ends with an ellipsis and the node's tooltip always carries
 // it whole (every detail level but 'bare'). Activity words that say nothing ("thinks", "starts", "idle") are
 // left out of the card. The legend is a short footer under the drawing.
@@ -536,7 +539,9 @@ function drawNode(n: NodeView, detail: Detail, motion: boolean, labels: Map<stri
   return s + '</g>'
 }
 
-function draw(m: Model, detail: Detail): string {
+type Drawn = { readonly source: string; readonly width: number; readonly height: number }
+
+function draw(m: Model, detail: Detail): Drawn {
   const motion = detail === 'full' || detail === 'short'
   const nodes = detail === 'lead' ? m.nodes.filter((n) => n.id === LEAD_ID) : m.nodes
   const bottom = Math.max(...nodes.map((n) => n.y + n.h), LAYOUT.margin + LAYOUT.nodeH)
@@ -546,20 +551,21 @@ function draw(m: Model, detail: Detail): string {
   const labels = new Map(m.nodes.map((n) => [n.id, n.label]))
   const senior = m.nodes.some((n) => n.id === SENIOR_ID) ? ', a senior' : ''
   const summary = `Agent network: ${m.workers} worker${m.workers === 1 ? '' : 's'}${senior}`
-  let s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${m.width} ${height}" width="${m.width}" height="${height}" style="max-width:100%;height:auto" role="img" aria-label="${summary}" data-detail="${detail}">`
+  let s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${m.width} ${height}" width="100%" height="100%" preserveAspectRatio="xMidYMin meet" style="display:block;width:100%;height:100%" role="img" aria-label="${summary}" data-detail="${detail}">`
   s += `<title>${summary}</title><style>${css(m.theme, motion)}</style>${DEFS}`
   s += `<rect class="bg" width="${m.width}" height="${height}"/>`
   if (detail !== 'lead') s += '<g class="edges">' + m.edges.map((e) => drawEdge(e, labels, detail, motion)).join('') + '</g>'
   s += '<g class="nodes">' + nodes.map((n) => drawNode(n, detail, motion, labels)).join('') + '</g>'
   if (detail !== 'lead') s += legend(m.width, legendY)
   if (detail === 'lead') s += `<text class="note" x="${LAYOUT.margin}" y="${f(bottom + 20)}">${m.workers} agents: too many details to draw here</text>`
-  return s + '</svg>'
+  return { source: s + '</svg>', width: m.width, height }
 }
 
 const DETAILS: readonly Detail[] = ['full', 'short', 'static', 'bare']
 
-// Renders the whole network as one SVG document. Never throws: malformed input draws the lead alone.
-export function renderSvg(graph: GraphState, layout: Layout, opts: RenderOptions = {}): string {
+// Renders the whole network as one SVG document, with its natural size (the viewBox, in CSS pixels).
+// Never throws: malformed input draws the lead alone.
+export function renderSvgSized(graph: GraphState, layout: Layout, opts: RenderOptions = {}): Drawn {
   const o: RenderOptions = isRecord(opts) ? opts : {}
   const budget = Math.min(SVG_MAX - 1, Math.max(0, finite(o.budget, SVG_BUDGET)))
   let model: Model
@@ -569,8 +575,12 @@ export function renderSvg(graph: GraphState, layout: Layout, opts: RenderOptions
     model = buildModel(undefined, undefined, {})
   }
   for (const d of DETAILS) {
-    const svg = draw(model, d)
-    if (svg.length <= budget) return svg
+    const drawn = draw(model, d)
+    if (drawn.source.length <= budget) return drawn
   }
   return draw(model, 'lead')
+}
+
+export function renderSvg(graph: GraphState, layout: Layout, opts: RenderOptions = {}): string {
+  return renderSvgSized(graph, layout, opts).source
 }
