@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import { DEFAULT_CONFIG, describeConfig, parseConfig } from '../hooks/config'
-import { AUTO_START, autoStartTier, categorize, categoryLabel, formatLoweredStarts, ownTierOf } from '../hooks/learning'
+import { AGENT_TYPES_LIMIT, type AgentTypes, AUTO_START, autoStartTier, categorize, categoryLabel, formatLoweredStarts, ownTierOf, parseAgentTypes, rememberAgentType, storedOwnTier } from '../hooks/learning'
 import { resetState } from '../hooks/register'
 import { parseSnapshot } from '../hooks/state'
 
@@ -63,6 +63,37 @@ test('ownTierOf: the parent tier for general-purpose, the latest tier seen for o
   expect(ownTierOf('scout', 'opus', seen)).toBe('haiku')
   expect(ownTierOf('plug:scout', 'opus', seen)).toBe('opus')
   expect(ownTierOf('other', 'opus', seen)).toBeUndefined()
+})
+
+test('ownTierOf: a tier remembered in the store is the fallback, and a tier seen in the session wins over it', () => {
+  expect(ownTierOf('scout', 'opus', [], 'haiku')).toBe('haiku')
+  expect(ownTierOf('scout', 'opus', [{ category: 'scout:bugfix', ownTier: 'sonnet' }], 'haiku')).toBe('sonnet')
+  expect(ownTierOf('general-purpose', 'opus', [], 'haiku')).toBe('opus')
+})
+
+test('agent types in the store: parsed defensively, one tier and time per type', () => {
+  expect(parseAgentTypes(undefined)).toEqual({})
+  expect(parseAgentTypes('scout')).toEqual({})
+  expect(parseAgentTypes([{ tier: 'haiku', seenAt: 1 }])).toEqual({})
+  expect(parseAgentTypes({
+    scout: { tier: 'haiku', seenAt: 5 },
+    wrongTier: { tier: 'gpt', seenAt: 5 },
+    notRecord: 'opus',
+    badTime: { tier: 'opus', seenAt: 'x' },
+    '': { tier: 'opus', seenAt: 1 },
+  })).toEqual({ scout: { tier: 'haiku', seenAt: 5 } })
+  expect(storedOwnTier({ scout: { tier: 'haiku', seenAt: 1 } }, 'scout')).toBe('haiku')
+  expect(storedOwnTier({}, 'scout')).toBeUndefined()
+})
+
+test('agent types in the store: at most AGENT_TYPES_LIMIT types, the least recently seen go first', () => {
+  expect(AGENT_TYPES_LIMIT).toBe(100)
+  let m: AgentTypes = {}
+  for (let i = 0; i < AGENT_TYPES_LIMIT + 5; i++) m = rememberAgentType(m, `type-${i}`, 'sonnet', i)
+  expect(Object.keys(m).length).toBe(AGENT_TYPES_LIMIT)
+  expect(m['type-0']).toBeUndefined()
+  expect(m[`type-${AGENT_TYPES_LIMIT + 4}`]).toEqual({ tier: 'sonnet', seenAt: AGENT_TYPES_LIMIT + 4 })
+  expect(rememberAgentType(m, 'type-10', 'opus', 9999)['type-10']).toEqual({ tier: 'opus', seenAt: 9999 })
 })
 
 test('snapshot: the start fields of an agent are kept when well formed and dropped otherwise', () => {
@@ -257,4 +288,60 @@ test('a lowered run that fails verification counts in the report and as a qualit
   for (let i = 0; i < 200 && cell()?.runs !== 1; i++) await sleep(10)
   expect(cell()!.qualityFailed).toBe(1)
   expect(await report($)).toContain('Started lower by startTier: 1 run (0 escalated, 1 failed a quality check)')
+})
+
+test('a type whose own tier is remembered in the store starts lowered from its first spawn', async ($, on) => {
+  const h = wire(on)
+  // the type runs on opus by itself (remembered): a code task is lowered to sonnet from its first spawn
+  h.data.agentTypes = { scout: { tier: 'opus', seenAt: NOW - 1 } }
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'fix the login bug', { type: 'scout' })
+  expect(h.spawned).toEqual(['sonnet'])
+  expect(h.logs.some((l) => l.includes('started on sonnet, asked opus (startTier auto)'))).toBe(true)
+})
+
+test('without a remembered tier the first spawn of an unseen type is not lowered', async ($, on) => {
+  const h = wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'fix the login bug', { type: 'scout' })
+  expect(h.spawned).toEqual([undefined])
+})
+
+test('the own tier seen at a spawn is written to the store, and not written again when unchanged', async ($, on) => {
+  const h = wire(on, {}, { 'mid-worker': 'claude-sonnet-5-5' })
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'fix the cache bug', { type: 'mid-worker' })
+  const types = h.data.agentTypes as Record<string, { tier: string; seenAt: number }>
+  expect(types['mid-worker']?.tier).toBe('sonnet')
+  const before = types['mid-worker']
+  await spawn($, 'fix the cache bug again', { type: 'mid-worker' })
+  expect(h.data.agentTypes).toEqual({ 'mid-worker': before })
+})
+
+test('the store never records general-purpose, whose tier is the parent one', async ($, on) => {
+  const h = wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'review the patch')
+  expect(h.data.agentTypes).toBeUndefined()
+})
+
+test('a tier seen in the session wins over the stored one', async ($, on) => {
+  const h = wire(on, {}, { 'mid-worker': 'claude-sonnet-5-5' })
+  h.data.agentTypes = { 'mid-worker': { tier: 'opus', seenAt: NOW - 1 } }
+  await $.session.start({ cwd: '/work' } as never)
+  // review keeps the asked tier (opus, the stored one): the definition's sonnet is seen and stored
+  await spawn($, 'review the patch', { type: 'mid-worker' })
+  expect(h.spawned).toEqual([undefined])
+  // the store now says something else (another session's older value): this session's sonnet still decides
+  h.data.agentTypes = { 'mid-worker': { tier: 'opus', seenAt: NOW - 1 } }
+  await spawn($, 'fix the cache bug', { type: 'mid-worker' })
+  expect(h.spawned).toEqual([undefined, undefined])
+})
+
+test('/escalator reset forgets the remembered agent types with the stats', async ($, on) => {
+  const h = wire(on)
+  h.data.agentTypes = { scout: { tier: 'haiku', seenAt: NOW } }
+  await $.session.start({ cwd: '/work' } as never)
+  await $.command.run({ command: 'escalator', args: 'reset', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as never)
+  expect(h.data.agentTypes).toBeUndefined()
 })

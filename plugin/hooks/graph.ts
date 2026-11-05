@@ -4,7 +4,7 @@
 // renderer is responsible for escaping every text field (nothing is escaped here, only length-capped).
 //
 // Wiring map (hook event -> input record):
-//   agent.spawn                      -> { type: 'spawn', agentId, label, model }
+//   agent.spawn                      -> { type: 'spawn', agentId, label, model, lowered? }   lowered: the tier asked, when startTier started it lower
 //   tool.call (before the call)      -> { type: 'tool-start', agentId?, tool, summary? }   summary: path or command
 //   tool.call (result)               -> { type: 'tool-end', agentId?, tool }
 //   turn.step (result with usage)    -> { type: 'step', agentId?, model, cost }            cost: USD of that request
@@ -17,7 +17,7 @@
 //   turn.complete                    -> { type: 'complete', agentId? }
 // `agentId` absent means the main loop (the lead). Every record carries `at`, a millisecond timestamp.
 
-import { tierOf, type Tier } from './detector'
+import { LADDER, tierOf, type Tier } from './detector'
 
 export const LEAD_ID = 'lead'
 export const SENIOR_ID = 'senior'
@@ -44,6 +44,8 @@ export type GraphNode = {
   readonly interventions: number   // nudges, consults, effort raises, swaps and human stops received
   readonly consults: number        // consults completed for this node
   readonly since: number           // timestamp of the last status change
+  readonly lowered?: Tier          // the tier asked, when startTier auto started the worker below it
+  readonly startTier?: Tier        // the tier it started on, set with `lowered`
 }
 
 export type GraphEdge = {
@@ -76,7 +78,7 @@ export type GraphState = {
 export type LadderAction = 'nudge' | 'consult' | 'effort' | 'swap' | 'human'
 
 export type GraphInput =
-  | { type: 'spawn'; at: number; agentId: string; label: string; model: string }
+  | { type: 'spawn'; at: number; agentId: string; label: string; model: string; lowered?: string }
   | { type: 'tool-start'; at: number; agentId?: string; tool: string; summary?: string }
   | { type: 'tool-end'; at: number; agentId?: string; tool?: string }
   | { type: 'step'; at: number; agentId?: string; model: string; cost: number }
@@ -173,7 +175,9 @@ function applySpawn(s: GraphState, i: Extract<GraphInput, { type: 'spawn' }>): G
       collapsed: cur.collapsed + 1,
     }
   }
-  cur = { ...cur, nodes: [...cur.nodes, newNode(i.agentId, 'worker', i.label, i.model, num(i.at))] }
+  const lowered = typeof i.lowered === 'string' && LADDER.includes(i.lowered as Tier) ? (i.lowered as Tier) : undefined
+  const fresh = newNode(i.agentId, 'worker', i.label, i.model, num(i.at))
+  cur = { ...cur, nodes: [...cur.nodes, lowered === undefined ? fresh : { ...fresh, lowered, startTier: fresh.tier }] }
   cur = addEdge(cur, 'spawn', LEAD_ID, i.agentId, num(i.at))
   return addEvent(cur, { kind: 'spawn', at: num(i.at), nodes: [LEAD_ID, i.agentId] })
 }

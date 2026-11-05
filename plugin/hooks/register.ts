@@ -8,7 +8,7 @@ import { parseReplayArgs, replayReport, sweep, sweepGrid, sweepReport } from './
 import { addAgent as addRecAgent, indexOf as recIndexOf, mergeRecordings, parseRecordings, push as recPush, recordedOptions, relTime, resumeRecording, startRecording, stepEvent, toolEvent, type Live, type RecEvent, type RecordedMode, type Recording } from './recorder'
 import { buildDossier, inputFromState } from './dossier'
 import { cacheGet, cachePut, cacheKey, classifierInput, combineCategory, LABELS, parseCache } from './classify'
-import { autoStartTier, categorize, costPerAccepted, formatLoweredStarts, formatStats, isAccepted, mulberry32, ownTierOf, parseProjects, projectKey, recommendScopedWithExploration, recordReviewScoped, recordReworkScoped, recordScoped, scopedStats, type Projects, type Stats } from './learning'
+import { autoStartTier, categorize, costPerAccepted, formatLoweredStarts, formatStats, INHERITING_TYPES, isAccepted, mulberry32, ownTierOf, parseAgentTypes, parseProjects, projectKey, recommendScopedWithExploration, recordReviewScoped, recordReworkScoped, recordScoped, rememberAgentType, scopedStats, storedOwnTier, type Projects, type Stats } from './learning'
 import { emptyGraph, LEAD_ID, reduce, SENIOR_ID, type GraphInput, type GraphState } from './graph'
 import { layoutGraph, type LayoutMemory } from './layout'
 import { renderSvgSized } from './render-svg'
@@ -23,6 +23,7 @@ import { addAgent, addConsult, addEscalation, addIntervention, addStep, asUsage,
 export const HELP_TOOL = 'mcp__model-escalator__ask_for_help'
 const STATS_KEY = 'stats'
 const PROJECTS_KEY = 'projects'
+const AGENT_TYPES_KEY = 'agentTypes'
 const ADVICE_HINTED_KEY = 'adviceHinted'
 const SESSIONS_KEY = 'sessions'
 const CATEGORIES_KEY = 'categories'
@@ -803,8 +804,8 @@ export const register: Register = (on, options) => {
     if (arg === 'reset') {
       // The category cache is kept: it maps task text to a label, which is a fact about the text, not something learned
       // from outcomes, and clearing it would only cost new classification calls.
-      await storeQueue(async () => { await $.store.delete(STATS_KEY); await $.store.delete(PROJECTS_KEY) })
-      return { text: 'Learned stats cleared (per-category and per-project statistics). The session history and the task category cache are kept.' }
+      await storeQueue(async () => { await $.store.delete(STATS_KEY); await $.store.delete(PROJECTS_KEY); await $.store.delete(AGENT_TYPES_KEY) })
+      return { text: 'Learned stats cleared (per-category and per-project statistics, remembered agent types). The session history and the task category cache are kept.' }
     }
     if (arg === 'reset history') {
       await storeQueue(async () => { await $.store.delete(SESSIONS_KEY) })
@@ -957,7 +958,7 @@ export const register: Register = (on, options) => {
     // startTier auto: a call that names no model starts on its category's tier, never above what the agent type runs
     // on by itself (the parent's model for general-purpose, else the model its definition was seen to resolve to).
     const auto = config.startTier === 'auto' && mode !== 'baseline' && !named
-    const own = auto ? ownTierOf(e.subagentType ?? '', parentTier, agents.values()) : undefined
+    const own = auto ? ownTierOf(e.subagentType ?? '', parentTier, agents.values(), await rememberedOwnTier($, e.subagentType ?? '')) : undefined
     // The tier the agent would run on without the mod: the reference for the lower start and for every rewrite.
     const asked = own ?? parentTier
     const floor = auto ? autoStartTier(category, parentTier, own === undefined ? null : own) : asked
@@ -1007,6 +1008,7 @@ export const register: Register = (on, options) => {
         ...(untouched && typeof r.model === 'string' && r.model !== '' ? { ownTier: tierOf(r.model) } : {}),
       }
       agents.set(r.agentId, name === undefined ? fresh : { ...fresh, name })
+      if (fresh.ownTier !== undefined) await rememberOwnTier($, e.subagentType ?? '', fresh.ownTier)
       ledger = addAgent(ledger, category)
       if (plan.refine) {
         const id = r.agentId
@@ -1022,7 +1024,7 @@ export const register: Register = (on, options) => {
           recFor(r.agentId, (_a, at) => ({ k: 'spawn', a, at, asked, tier: fresh.startTier, ...(explicit ? { x: 1 as const } : {}) }))
         }
       } catch { /* the recording is optional */ }
-      feed($, { type: 'spawn', agentId: r.agentId, label: name ?? category, model: String(r.model ?? '') })
+      feed($, { type: 'spawn', agentId: r.agentId, label: name ?? category, model: String(r.model ?? ''), ...(lowered !== undefined ? { lowered } : {}) })
       await save($)
     }
     return r
@@ -1479,6 +1481,25 @@ async function writeStats($: EngineInterface, s: { stats: Stats; projects: Proje
   if (Object.keys(s.projects).length > 0) await $.store.set(PROJECTS_KEY, s.projects)
 }
 
+// The own tier of an agent type remembered by earlier sessions (store key `agentTypes`), the fallback of `ownTierOf`
+// until this session has seen the type. Inheriting types and an empty type have none. Never throws.
+async function rememberedOwnTier($: EngineInterface, type: string): Promise<Tier | undefined> {
+  if (type === '' || INHERITING_TYPES.includes(type)) return undefined
+  try { return storedOwnTier(parseAgentTypes(await $.store.get(AGENT_TYPES_KEY)), type) } catch { return undefined }
+}
+
+// Remembers the own tier seen for an agent type, when it differs from the one remembered. Never throws.
+async function rememberOwnTier($: EngineInterface, type: string, tier: Tier): Promise<void> {
+  if (type === '' || INHERITING_TYPES.includes(type)) return
+  try {
+    await storeQueue(async () => {
+      const types = parseAgentTypes(await $.store.get(AGENT_TYPES_KEY))
+      if (storedOwnTier(types, type) === tier) return
+      await $.store.set(AGENT_TYPES_KEY, rememberAgentType(types, type, tier, (await clockNow($)) ?? 0))
+    })
+  } catch { /* the memory is optional */ }
+}
+
 // Records one finished run: its cost (the agent's requests and consults of the run, not the review), and whether it
 // was accepted. A review that already landed counts in the acceptance here; one that has not is told how the run
 // was counted (see reviewRun), so a late low score moves the run to not accepted exactly once.
@@ -1821,7 +1842,7 @@ const COMMAND_HELP = [
   '/escalator resume <id>|all: resume agents paused at the human level',
   '/escalator replay [option=value ...]: replay the recorded sessions with other options (thresholds, graceSteps, levels, ...) and compare, without any model call',
   '/escalator replay sweep option=values ...: replay the recorded sessions over a grid of options (ranges lo..hi or lo..hi:step, lists a,b,c, alternatives of levels separated by |; at most 200 combinations) and rank them by false positives and stuck agents caught',
-  '/escalator reset: forget the learned stats (history and category cache are kept)',
+  '/escalator reset: forget the learned stats and the remembered agent types (history and category cache are kept)',
   '/escalator reset history: clear the recorded session history',
   '/escalator reset recordings: clear the sessions recorded for replay (option recordSessions)',
   '/escalator help: this list',

@@ -145,6 +145,8 @@ function nodeLine(
   line.push({ text: ' ' })
   line.push({ text: `[${badgeWord}]`, color, bold: true })
   if (n.kind !== 'worker') line.push({ text: ` ${n.tier}`, color: TIER_COLORS[n.tier] ?? MUTED })
+  // startTier auto started this worker lower: the tier asked stays visible (the arrow of a swap means something else).
+  if (n.lowered) line.push({ text: ` asked ${n.lowered}`, color: TIER_COLORS[n.lowered] ?? MUTED, dim: true })
   if (label && !(n.kind !== 'worker' && label === n.kind)) line.push({ text: ` ${label}` })
   line.push({ text: ` ${STATUS_WORD[n.status] ?? n.status}`, dim: true })
   if (action && shape.action > 0 && action !== STATUS_WORD[n.status]) line.push({ text: ` · ${action}`, dim: true })

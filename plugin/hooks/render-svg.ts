@@ -150,6 +150,8 @@ type NodeView = {
   flash: boolean
   ping: boolean
   swapFrom?: Tier
+  lowered?: Tier               // the tier asked, when startTier auto started the worker below it
+  startTier?: Tier             // the tier it started on, with `lowered`
   mark?: Mark
   markNew: boolean
 }
@@ -247,6 +249,10 @@ function buildModel(graph: unknown, layout: unknown, opts: RenderOptions): Model
       consults: Math.max(0, Math.floor(finite(gn.consults))), history: [],
       appear: false, flash: false, ping: false, markNew: false,
     }
+    if (kind === 'worker' && TIERS.includes(gn.lowered as Tier)) {
+      base.lowered = gn.lowered as Tier
+      base.startTier = pick(gn.startTier, TIERS, base.tier)
+    }
     if (kind === 'group') {
       base.group = ln.group === 'more' ? 'more' : 'done'
       base.count = Math.max(0, Math.floor(finite(ln.count)))
@@ -336,7 +342,7 @@ const STATIC_CSS = [
   '.card{fill:var(--card);stroke:var(--c);stroke-width:1.5}.bar{fill:var(--c)}',
   '.lbl{font-size:13.5px;font-weight:600}.stt{font-size:12px;fill:var(--muted)}.sw{font-weight:600}',
   '.cost{font-size:12px;font-variant-numeric:tabular-nums}.lvt{font-size:11px;fill:var(--muted)}',
-  '.mid{text-anchor:middle}.end{text-anchor:end}.tbt{font-size:10.5px;font-weight:700;fill:var(--on)}.lv{fill:none;stroke:var(--line)}',
+  '.mid{text-anchor:middle}.end{text-anchor:end}.tbt{font-size:10.5px;font-weight:700;fill:var(--on)}.lv{fill:none;stroke:var(--line)}.lowt{font-size:12px;font-weight:700;fill:var(--muted)}',
   '.sd{fill:var(--muted)}.st-active .sd{fill:var(--c)}.st-stuck .sd{fill:var(--stuck)}.st-paused .sd{fill:var(--paused)}',
   '.st-stuck .sw{fill:var(--stuck)}.st-paused .sw{fill:var(--paused)}',
   '.st-done{opacity:.6}.st-waiting .card,.group .card{stroke-dasharray:4 3}.group .card{fill:var(--group);stroke:var(--line)}',
@@ -396,9 +402,12 @@ function legend(width: number, y: number): string {
   const level: Item = {
     w: 28 + word('ladder level'), draw: (x, y) => `<rect class="lv" x="${x}" y="${y - 12}" width="24" height="15" rx="3"/><text class="mid" x="${x + 12}" y="${y}">L2</text><text x="${x + 28}" y="${y}">ladder level</text>`,
   }
+  const lowered: Item = {
+    w: 12 + word('started lower'), draw: (x, y) => `<text class="lowt" x="${x}" y="${y}">↓</text><text x="${x + 12}" y="${y}">started lower</text>`,
+  }
   const lines: Item[][] = [
     [swatch('f-haiku', 'haiku'), swatch('f-sonnet', 'sonnet'), swatch('f-opus', 'opus'), swatch('f-lead', 'lead'), swatch('f-senior', 'senior')],
-    EDGE_KINDS.map(edge),
+    [...EDGE_KINDS.map(edge), lowered],
     [mark('mkc-stall', '!', 'stalled'), mark('mkc-human', '?', 'needs a human'), mark('mkc-pause', 'II', 'paused'), level],
   ]
   const room = width - 2 * LAYOUT.margin
@@ -476,10 +485,11 @@ function tooltip(n: NodeView, detail: Detail, labels: Map<string, string>): stri
     if (detail !== 'full' || !n.members?.length) return `<title>${head}</title>`
     return `<title>${head}: ${t(n.members.map((m) => clip(labels.get(m) ?? m, 40)).join(', '), 600)}</title>`
   }
-  if (detail !== 'full') return `<title>${t(n.label, 40)} (${n.tier}, ${statusWord(n)})</title>`
+  if (detail !== 'full') return `<title>${t(n.label, 40)} (${n.tier}, ${statusWord(n)}${n.lowered ? ', started lower' : ''})</title>`
   const lines = [
     `${t(n.label, 40)} (${n.kind})`,
     `model ${t(n.model || n.tier, 100)}`,
+    ...(n.lowered ? [`started on ${t(n.startTier ?? n.tier, 20)}, asked ${t(n.lowered, 20)} (startTier auto)`] : []),
     `status ${statusWord(n)}: ${t(n.action, 60)}`,
     `level L${n.level} · score ${f(n.score)} · cost ${escapeXml(money(n.cost))}`,
     `interventions ${n.interventions} · consults ${n.consults}`,
@@ -513,8 +523,10 @@ function drawNode(n: NodeView, detail: Detail, motion: boolean, labels: Map<stri
     s += `<g class="swapfrom t-${n.swapFrom}"><rect class="ol" width="${f(w)}" height="${f(h)}" rx="8"/><rect class="bar" x="1.5" y="8" width="3" height="${f(h - 16)}" rx="1.5"/></g>`
   }
   const pill = 50
-  const nameRoom = w - 14 - pill - 14
+  // A worker that startTier auto started lower carries a small down arrow left of its tier pill (the tooltip says from what).
+  const nameRoom = w - 14 - pill - 14 - (n.lowered ? 14 : 0)
   s += `<text class="lbl" x="14" y="21">${t(n.label, Math.max(4, Math.floor(nameRoom / CHAR_LABEL)))}</text>`
+  if (n.lowered) s += `<text class="lowt end" x="${f(w - pill - 12)}" y="20.5">↓</text>`
   s += `<rect class="f-${n.tier}" x="${f(w - pill - 8)}" y="8" width="${pill}" height="17" rx="8.5"/><text class="tbt mid" x="${f(w - pill / 2 - 8)}" y="20.5">${n.tier}</text>`
   const ladder = n.kind === 'worker'
   const right = ladder ? 96 : 58

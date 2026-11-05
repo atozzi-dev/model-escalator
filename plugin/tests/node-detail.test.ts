@@ -32,6 +32,14 @@ test('a tier as requested says so, and a paused agent says paused', () => {
   expect(text).toContain('State: paused')
 })
 
+test('a tier lowered by startTier says what was asked, also after an escalation', () => {
+  const tierRow = (over: Partial<AgentState>) => buildDetail({
+    agent: { ...agent(over), lowered: 'opus' } as AgentState, node: node({ tier: 'sonnet' }), events: [], consult: { ok: true }, swap: { ok: true },
+  }).rows.find((r) => r.label === 'Tier')?.value
+  expect(tierRow({ startTier: 'sonnet', tier: 'sonnet' })).toBe('sonnet (started lower: asked opus, startTier auto)')
+  expect(tierRow({ startTier: 'sonnet', tier: 'opus' })).toBe('opus (requested sonnet, started lower: asked opus, startTier auto)')
+})
+
 test('interventions are counted per kind from the events that name the agent', () => {
   const d = buildDetail({
     agent: agent(), node: node({ interventions: 4 }),

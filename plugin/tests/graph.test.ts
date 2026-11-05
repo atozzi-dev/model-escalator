@@ -219,3 +219,27 @@ test('malformed input never throws and leaves the state alone', () => {
   }
   expect(reduce(s0, { type: 'tool-start', at: 1, agentId: 'ghost', tool: 'Read' })).toEqual(s0)
 })
+
+test('a spawn lowered by startTier keeps the tier asked and the tier it started on', () => {
+  const g = run([{ type: 'spawn', at: 1, agentId: 'w', label: 'fix', model: 'claude-sonnet-5-5', lowered: 'opus' }])
+  expect(node(g, 'w')?.lowered).toBe('opus')
+  expect(node(g, 'w')?.startTier).toBe('sonnet')
+  expect(node(g, 'w')?.tier).toBe('sonnet')
+})
+
+test('a spawn that was not lowered has no lowered mark, and a bogus tier asked is ignored', () => {
+  const g = run([spawn('a'), { type: 'spawn', at: 2, agentId: 'b', label: 'x', model: 'claude-sonnet-5-5', lowered: 'gpt' }])
+  expect(node(g, 'a')?.lowered).toBeUndefined()
+  expect(node(g, 'a')?.startTier).toBeUndefined()
+  expect(node(g, 'b')?.lowered).toBeUndefined()
+})
+
+test('an escalation keeps the lowered mark and moves the tier', () => {
+  const g = run([
+    { type: 'spawn', at: 1, agentId: 'w', label: 'fix', model: 'claude-sonnet-5-5', lowered: 'opus' },
+    { type: 'ladder', at: 2, agentId: 'w', action: 'swap', toModel: 'claude-opus-5-5' },
+  ])
+  expect(node(g, 'w')?.lowered).toBe('opus')
+  expect(node(g, 'w')?.startTier).toBe('sonnet')
+  expect(node(g, 'w')?.tier).toBe('opus')
+})

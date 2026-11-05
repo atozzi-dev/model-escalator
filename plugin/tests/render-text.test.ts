@@ -211,6 +211,16 @@ test('truncation marks the cut with an ellipsis and keeps the label first', () =
   expect(line).toContain('…')
 })
 
+test('a worker lowered by startTier says what was asked, and only that worker does', () => {
+  const g = run([
+    { type: 'spawn', at: 1, agentId: 'w', label: 'fix login', model: 'claude-sonnet-5-5', lowered: 'opus' },
+    spawn('x', 2, 'claude-sonnet-5-5', 'fix cache'),
+  ])
+  const lines = text(g, { width: 120 })
+  expect(lines.find((l) => l.includes('fix login'))).toContain('asked opus')
+  expect(lines.find((l) => l.includes('fix cache'))).not.toContain('asked')
+})
+
 test('rendering is deterministic', () => {
   const g = run([spawn('a'), spawn('b'), { type: 'ladder', at: 2, agentId: 'a', action: 'swap', toModel: 'sonnet' }])
   expect(JSON.stringify(draw(g, { frame: 3, lastSeq: 0 }))).toBe(JSON.stringify(draw(g, { frame: 3, lastSeq: 0 })))

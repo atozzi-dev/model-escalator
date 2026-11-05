@@ -99,11 +99,13 @@ export function categorize(subagentType: string, description: string, prompt?: s
 // without a lower start nothing would ever run on a cheaper model. With `startTier: auto`, a spawn whose Agent call
 // names no model starts on a tier chosen by the category's label: the cheapest model that usually does that kind of
 // work well. The escalation ladder and the quality rule (`QUALITY`) catch the tasks where it does not.
-// - `explore` on haiku: searching, reading and summarising. Its quality is not measured either (no diff), but a miss
-//   costs little: the lead reads the findings and acts on them itself.
+// - `explore` on haiku: searching, reading and summarising. A read-only run has no diff, so it is judged on its final
+//   report when sampled for review (`reviewRate`), like any other run; a miss costs little, since the lead reads the
+//   findings and acts on them itself.
 // - code, tests, docs, data and ui on sonnet: work that verification, sampled reviews and rework can check.
-// - `review`, `other` and any other label start as asked: a review's findings are the result, and no verification,
-//   diff review or rework can tell a review that missed an issue; an unknown kind of task has no evidence at all.
+// - `review`, `other` and any other label start as asked: a review's findings are the result. A sampled review is
+//   judged on its report like any read-only run, but a review that missed an issue still looks fine to the checks,
+//   so reviews are not lowered; an unknown kind of task has no evidence at all.
 export const AUTO_START: Readonly<Record<string, Tier>> = {
   explore: 'haiku', bugfix: 'sonnet', feature: 'sonnet', refactor: 'sonnet', tests: 'sonnet', docs: 'sonnet', data: 'sonnet', ui: 'sonnet',
 }
@@ -133,15 +135,54 @@ export function autoStartTier(category: string, asked: Tier, own: Tier | null = 
 export const INHERITING_TYPES: readonly string[] = ['general-purpose']
 
 // The tier an agent of `type` runs on by itself when the call names no model: the parent's for an inheriting type,
-// else the latest `ownTier` seen on an agent of that type in this session (`agents` in spawn order), else undefined.
-export function ownTierOf(type: string, parentTier: Tier, agents: Iterable<{ category: string; ownTier?: Tier }>): Tier | undefined {
+// else the latest `ownTier` seen on an agent of that type in this session (`agents` in spawn order), else the tier
+// remembered for the type in the store (`remembered`), else undefined. A session observation always wins.
+export function ownTierOf(
+  type: string, parentTier: Tier, agents: Iterable<{ category: string; ownTier?: Tier }>, remembered?: Tier,
+): Tier | undefined {
   if (INHERITING_TYPES.includes(type)) return parentTier
   let seen: Tier | undefined
   for (const a of agents) {
     const i = a.category.lastIndexOf(':')
     if (a.ownTier !== undefined && i >= 0 && a.category.slice(0, i) === type) seen = a.ownTier
   }
-  return seen
+  return seen ?? remembered
+}
+
+// --- Remembered agent types (store key `agentTypes`) ---
+//
+// The own tier of each agent type seen in past sessions, so the first code spawn of a type in a new session already
+// knows it (see `ownTierOf`). One entry per type: the tier and when it was last seen. At most AGENT_TYPES_LIMIT
+// types; the least recently seen go first. Parsed defensively: anything malformed is ignored.
+export const AGENT_TYPES_LIMIT = 100
+const MAX_TYPE_CHARS = 200
+
+export type AgentTypes = Record<string, { tier: Tier; seenAt: number }>
+
+export function parseAgentTypes(raw: unknown): AgentTypes {
+  const out: AgentTypes = {}
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return out
+  for (const [type, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (type === '' || type === '__proto__' || type.length > MAX_TYPE_CHARS || typeof v !== 'object' || v === null) continue
+    const { tier, seenAt } = v as { tier?: unknown; seenAt?: unknown }
+    if (!LADDER.includes(tier as Tier) || typeof seenAt !== 'number' || !Number.isFinite(seenAt)) continue
+    out[type] = { tier: tier as Tier, seenAt }
+  }
+  return out
+}
+
+// The map with `type` set to `tier` as seen at `seenAt`, bounded to AGENT_TYPES_LIMIT by dropping the oldest.
+export function rememberAgentType(types: AgentTypes, type: string, tier: Tier, seenAt: number): AgentTypes {
+  const next: AgentTypes = { ...types, [type]: { tier, seenAt } }
+  const keys = Object.keys(next)
+  if (keys.length <= AGENT_TYPES_LIMIT) return next
+  const oldest = keys.sort((a, b) => next[a]!.seenAt - next[b]!.seenAt).slice(0, keys.length - AGENT_TYPES_LIMIT)
+  for (const k of oldest) delete next[k]
+  return next
+}
+
+export function storedOwnTier(types: AgentTypes, type: string): Tier | undefined {
+  return Object.prototype.hasOwnProperty.call(types, type) ? types[type]!.tier : undefined
 }
 
 // One line for the session report: how many runs `startTier: auto` started below the asked tier, and how many of them
