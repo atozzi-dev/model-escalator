@@ -160,11 +160,21 @@ export function ownTierOf(
   return seen ?? remembered
 }
 
-// Whether Claude Code itself provides the agent type of a spawn (`provider` is `{ plugin: "engine", ... }` for a
-// built-in or a teammate). A missing or malformed provider counts as a definition: the safe side, never lowered.
-export function isEngineType(e: { provider?: unknown }): boolean {
+// Claude Code's own agent types (its built-in definitions). The list may need updating with new versions of Claude
+// Code: an unknown new built-in is treated as a definition, the safe side (never started lower).
+export const BUILTIN_TYPES: readonly string[] = ['general-purpose', 'Explore', 'Plan', 'statusline-setup', 'claude-code-guide', 'web-fetch', 'claude']
+const BUILTIN_LOWER = new Set(BUILTIN_TYPES.map((t) => t.toLowerCase()))
+
+// Whether the agent type of a spawn is Claude Code's own: a built-in type (matched without case) or an in-process
+// teammate, unless `provider` names a plugin other than the engine (a plugin's agent that takes a built-in name). The
+// provider alone is not enough: the engine also loads the user's own definitions (`.claude/agents/`), which may report
+// it as well, so any other type name counts as a definition. A missing or malformed provider does not block a built-in.
+export function isEngineType(e: { subagentType?: unknown; isTeammate?: unknown; provider?: unknown }): boolean {
+  const type = typeof e.subagentType === 'string' ? e.subagentType.toLowerCase() : ''
+  if (e.isTeammate !== true && !BUILTIN_LOWER.has(type)) return false
   const p = e.provider
-  return typeof p === 'object' && p !== null && (p as { plugin?: unknown }).plugin === 'engine'
+  const plugin = typeof p === 'object' && p !== null ? (p as { plugin?: unknown }).plugin : undefined
+  return !(typeof plugin === 'string' && plugin !== 'engine')
 }
 
 // --- Who chose the model of a spawn ---
@@ -173,10 +183,11 @@ export function isEngineType(e: { provider?: unknown }): boolean {
 // - a model named in the Agent call is the lead's choice. With `respectExplicitModel` it is kept exactly. Otherwise,
 //   with `startTier: auto`, it is a ceiling: the start is the category tier (`autoStartTier`), never above the named
 //   model, whatever the agent type (the call overrides the definition).
-// - no model named, and the type is Claude Code's own (a built-in or a teammate): nobody chose the model, the agent
-//   inherits it. `startTier: auto` starts it on its category tier, never above the tier the type runs on by itself.
-// - no model named, and the type comes from a definition file (the user's or a plugin's), or its provider is unknown:
-//   a person chose that model in the file. It is never lowered; learning may only move it up from the tier the
+// - no model named, and the type is Claude Code's own (a built-in or a teammate, see `isEngineType`): nobody chose the
+//   model, the agent inherits it. `startTier: auto` starts it on its category tier, never above the tier the type
+//   runs on by itself.
+// - no model named, and the type comes from a definition file (the user's or a plugin's), or is not known to be
+//   Claude Code's own: a person chose that model in the file. It is never lowered; learning may only move it up from the tier the
 //   definition runs on, and leaves the spawn alone while that tier is not known.
 // `startTier: requested` turns every lower start off. `own`: the tier the type runs on by itself when known (see
 // `ownTierOf`). The result: `asked`, the tier the agent would run on without the mod (the reference of a rewrite);

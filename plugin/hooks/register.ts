@@ -983,7 +983,7 @@ export const register: Register = (on, options) => {
     const plan = await taskCategory($, e)
     const category = plan.category
     // `model` is what the Agent call asked for: the lead's choice. When it is absent the agent definition or the parent
-    // decides; `provider` tells the two apart (Claude Code's own types inherit, any other type has a definition file).
+    // decides; `isEngineType` tells the two apart (Claude Code's own types inherit, any other has a definition file).
     const named = typeof e.model === 'string' && e.model !== ''
     const type = e.subagentType ?? ''
     const engine = isEngineType(e)

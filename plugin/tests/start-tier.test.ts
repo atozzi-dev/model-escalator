@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import { DEFAULT_CONFIG, describeConfig, parseConfig } from '../hooks/config'
-import { AGENT_TYPES_LIMIT, type AgentTypes, AUTO_START, autoStartTier, categorize, categoryLabel, formatLoweredStarts, isEngineType, ownTierOf, parseAgentTypes, rememberAgentType, startChoice, storedOwnTier } from '../hooks/learning'
+import { AGENT_TYPES_LIMIT, type AgentTypes, AUTO_START, BUILTIN_TYPES, autoStartTier, categorize, categoryLabel, formatLoweredStarts, isEngineType, ownTierOf, parseAgentTypes, rememberAgentType, startChoice, storedOwnTier } from '../hooks/learning'
 import { resetState } from '../hooks/register'
 import { parseSnapshot } from '../hooks/state'
 
@@ -52,10 +52,19 @@ test('auto start with the tier the agent type runs on by itself: lowered from th
   expect(autoStartTier('scout:bugfix', 'opus', null)).toBe('opus')
 })
 
-test('isEngineType: only a provider named engine is Claude Code itself', () => {
-  expect(isEngineType({ provider: { plugin: 'engine', tier: 'core' } })).toBe(true)
-  for (const provider of [undefined, null, 'engine', { plugin: 'acme-agents', tier: 'user' }, { tier: 'core' }]) expect(isEngineType({ provider })).toBe(false)
+test('isEngineType: a built-in type or a teammate, unless a plugin other than the engine provides it', () => {
+  const engine = { plugin: 'engine', tier: 'core' }
+  for (const type of BUILTIN_TYPES) expect(isEngineType({ subagentType: type, provider: engine })).toBe(true)
+  // the name is matched without case, and a missing or malformed provider does not block a built-in
+  expect(isEngineType({ subagentType: 'explore' })).toBe(true)
+  for (const provider of [undefined, null, 'engine', { tier: 'core' }, { plugin: 3 }]) expect(isEngineType({ subagentType: 'general-purpose', provider })).toBe(true)
+  expect(isEngineType({ subagentType: 'backend-dev', isTeammate: true })).toBe(true)
+  // a user's or a plugin's definition: never Claude Code's own, whatever the provider says
+  expect(isEngineType({ subagentType: 'task-worker-opus', provider: engine })).toBe(false)
+  expect(isEngineType({ subagentType: 'general-purpose', provider: { plugin: 'superpowers', tier: 'user' } })).toBe(false)
+  expect(isEngineType({ subagentType: 'backend-dev', isTeammate: true, provider: { plugin: 'acme-agents', tier: 'user' } })).toBe(false)
   expect(isEngineType({})).toBe(false)
+  expect(BUILTIN_TYPES).toEqual(['general-purpose', 'Explore', 'Plan', 'statusline-setup', 'claude-code-guide', 'web-fetch', 'claude'])
 })
 
 test('startChoice: a model named in the call is a ceiling with startTier auto, kept with respectExplicitModel or requested', () => {
@@ -195,11 +204,12 @@ function wire(on: any, env: Record<string, string> = {}, defs: Record<string, st
 const ENGINE = { plugin: 'engine', tier: 'core' }
 const CUSTOM = { plugin: 'acme-agents', tier: 'user' }
 
-// `provider: null` leaves the provider out of the spawn.
-const spawn = async ($: any, description: string, opts: { model?: string; type?: string; parent?: string; provider?: object | null } = {}): Promise<string> =>
+// `provider: null` leaves the provider out of the spawn. `teammate` starts an in-process teammate of that role.
+const spawn = async ($: any, description: string, opts: { model?: string; type?: string; parent?: string; provider?: object | null; teammate?: boolean } = {}): Promise<string> =>
   ((await $.agent.spawn({
     prompt: 'p', description, subagentType: opts.type ?? 'general-purpose', parentModel: opts.parent ?? 'claude-opus-5-5',
     ...(opts.provider === null ? {} : { provider: opts.provider ?? ENGINE }),
+    ...(opts.teammate === true ? { isTeammate: true } : {}),
     ...(opts.model !== undefined ? { model: opts.model } : {}),
   } as never)) as { agentId: string }).agentId
 
@@ -261,13 +271,33 @@ test('a custom agent type with no model in the call runs as its definition says,
   expect(await report($)).not.toContain('Started lower')
 })
 
-test('a spawn whose provider is missing is treated as a definition and left as it is', async ($, on) => {
+test('a built-in type is lowered whatever the provider says, unless a plugin provides it', async ($, on) => {
   const h = wire(on)
   await $.session.start({ cwd: '/work' } as never)
   await spawn($, 'fix the login bug', { provider: null })
-  await spawn($, 'find where the cache is built', { provider: null })
-  await spawn($, 'fix the logout bug', { provider: { tier: 'core' } })
-  expect(h.spawned).toEqual([undefined, undefined, undefined])
+  await spawn($, 'find where the cache is built', { provider: { tier: 'core' } })
+  // a plugin's agent that takes a built-in name has a definition of its own
+  await spawn($, 'fix the logout bug', { provider: { plugin: 'superpowers', tier: 'user' } })
+  expect(h.spawned).toEqual(['sonnet', 'haiku', undefined])
+})
+
+test('a user agent type is left as its definition says even when the engine is reported as its provider', async ($, on) => {
+  const h = wire(on, {}, { 'task-worker-opus': 'claude-opus-5-5' })
+  await $.session.start({ cwd: '/work' } as never)
+  await spawn($, 'fix the login bug', { type: 'task-worker-opus' })
+  await spawn($, 'find where the cache is built', { type: 'task-worker-opus' })
+  expect(h.spawned).toEqual([undefined, undefined])
+  expect(h.logs.some((l) => l.includes('startTier'))).toBe(false)
+})
+
+test('a teammate inherits the lead model and is lowered like a built-in', async ($, on) => {
+  const h = wire(on)
+  await $.session.start({ cwd: '/work' } as never)
+  // a role name the engine does not know: the first code task runs as is and its tier is seen, then it is lowered
+  await spawn($, 'find where the cache is built', { type: 'backend-dev', teammate: true })
+  await spawn($, 'fix the login bug', { type: 'backend-dev', teammate: true })
+  await spawn($, 'fix the logout bug', { type: 'backend-dev', teammate: true })
+  expect(h.spawned).toEqual(['haiku', undefined, 'sonnet'])
 })
 
 test('the built-in Explore and Plan types inherit the parent model and are lowered from their first spawn', async ($, on) => {
@@ -353,12 +383,12 @@ test('a fork is never touched', async ($, on) => {
 test('an engine type with its own model: the first code task runs as defined, later ones never above that model', async ($, on) => {
   const h = wire(on, {}, { 'cheap-worker': 'claude-haiku-5-5', 'mid-worker': 'claude-sonnet-5-5' })
   await $.session.start({ cwd: '/work' } as never)
-  await spawn($, 'fix the login bug', { type: 'cheap-worker' })
-  await spawn($, 'fix the logout bug', { type: 'cheap-worker' })
+  await spawn($, 'fix the login bug', { type: 'cheap-worker', teammate: true })
+  await spawn($, 'fix the logout bug', { type: 'cheap-worker', teammate: true })
   // explore goes to haiku from the first spawn: haiku is never above any definition
-  await spawn($, 'find where the cache is built', { type: 'mid-worker' })
-  await spawn($, 'fix the cache bug', { type: 'mid-worker' })
-  await spawn($, 'fix the cache bug again', { type: 'mid-worker' })
+  await spawn($, 'find where the cache is built', { type: 'mid-worker', teammate: true })
+  await spawn($, 'fix the cache bug', { type: 'mid-worker', teammate: true })
+  await spawn($, 'fix the cache bug again', { type: 'mid-worker', teammate: true })
   expect(h.spawned).toEqual([undefined, undefined, 'haiku', undefined, undefined])
   expect(h.logs.filter((l) => l.includes('startTier')).length).toBe(1)
 })
@@ -420,7 +450,7 @@ test('a type whose own tier is remembered in the store starts lowered from its f
   // the type runs on opus by itself (remembered): a code task is lowered to sonnet from its first spawn
   h.data.agentTypes = { scout: { tier: 'opus', seenAt: NOW - 1 } }
   await $.session.start({ cwd: '/work' } as never)
-  await spawn($, 'fix the login bug', { type: 'scout' })
+  await spawn($, 'fix the login bug', { type: 'scout', teammate: true })
   expect(h.spawned).toEqual(['sonnet'])
   expect(h.logs.some((l) => l.includes('started on sonnet, asked opus (startTier auto)'))).toBe(true)
 })
@@ -428,7 +458,7 @@ test('a type whose own tier is remembered in the store starts lowered from its f
 test('without a remembered tier the first spawn of an unseen type is not lowered', async ($, on) => {
   const h = wire(on)
   await $.session.start({ cwd: '/work' } as never)
-  await spawn($, 'fix the login bug', { type: 'scout' })
+  await spawn($, 'fix the login bug', { type: 'scout', teammate: true })
   expect(h.spawned).toEqual([undefined])
 })
 
@@ -455,11 +485,11 @@ test('a tier seen in the session wins over the stored one', async ($, on) => {
   h.data.agentTypes = { 'mid-worker': { tier: 'opus', seenAt: NOW - 1 } }
   await $.session.start({ cwd: '/work' } as never)
   // review keeps the asked tier (opus, the stored one): the definition's sonnet is seen and stored
-  await spawn($, 'review the patch', { type: 'mid-worker' })
+  await spawn($, 'review the patch', { type: 'mid-worker', teammate: true })
   expect(h.spawned).toEqual([undefined])
   // the store now says something else (another session's older value): this session's sonnet still decides
   h.data.agentTypes = { 'mid-worker': { tier: 'opus', seenAt: NOW - 1 } }
-  await spawn($, 'fix the cache bug', { type: 'mid-worker' })
+  await spawn($, 'fix the cache bug', { type: 'mid-worker', teammate: true })
   expect(h.spawned).toEqual([undefined, undefined])
 })
 
