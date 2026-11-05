@@ -412,3 +412,13 @@ test('malformed input never throws and still gives a valid svg', () => {
   expectWellFormed(weird)
   expect(weird).not.toMatch(/\son\w+\s*=\s*"/i)
 })
+
+test('a card lowered by startTier shows a mark, its tooltip says what was asked, and the legend names it', () => {
+  const g = run([{ type: 'spawn', at: 1, agentId: 'w', label: 'fix login', model: 'claude-sonnet-5-5', lowered: 'opus' }, spawn('x')])
+  const svg = draw(g)
+  expect(svg).toContain('class="lowt end"')
+  expect(svg).toContain('started on sonnet, asked opus (startTier auto)')
+  const legend = svg.slice(svg.indexOf('class="legend"'), svg.indexOf('</g>', svg.indexOf('class="legend"')))
+  expect(legend).toContain('started lower')
+  expect(draw(run([spawn('x')]))).not.toContain('class="lowt end"')
+})

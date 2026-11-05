@@ -69,7 +69,8 @@ test('a Sonnet agent swaps once to opus, then a human is asked', async ($, on) =
   expect(r.swapModels).toEqual(['claude-opus-5-5'])
 })
 
-test('an Opus agent never gets a swap note', async ($, on) => {
+// respectExplicitModel keeps the opus named in the call (otherwise it is a ceiling and a code task starts on sonnet).
+test('an Opus agent never gets a swap note', { options: { respectExplicitModel: true } }, async ($, on) => {
   const h = wire(on)
   await $.session.start({ cwd: '/work' } as never)
   const r = await climb($, h, 'opus')

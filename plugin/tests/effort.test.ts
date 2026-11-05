@@ -154,7 +154,8 @@ test('after a swap the boost is dropped: the new model gets the request\'s own e
   expect(h.steps.at(-1)!.effort).toBe('medium')
 })
 
-test('an Opus agent gets effort as its only extra lever before a human', ON, async ($, on) => {
+// respectExplicitModel keeps the opus named in the call (otherwise it is a ceiling and a code task starts on sonnet).
+test('an Opus agent gets effort as its only extra lever before a human', { options: { ...ON.options, respectExplicitModel: true } }, async ($, on) => {
   const h = wire(on)
   await $.session.start({ cwd: '/work' } as never)
   const id = await spawn($, 'opus')

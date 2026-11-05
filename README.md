@@ -76,24 +76,30 @@ Learning is separate from the ladder. A run is accepted when it was not escalate
 
 ### Start tier
 
-Most subagents inherit the lead's model, and learning only ever raises a start, so without a lower start nearly all the work would stay on the lead's model. With `startTier: auto` (the default), an agent whose Agent call names no model starts on the model its kind of task usually needs:
+Most subagents inherit the lead's model or get the one the lead names in the Agent call (often the strongest), and learning only ever raises a start, so without a lower start nearly all the work would stay on the lead's model. Where an agent starts depends on who chose its model:
+
+- **A model named in the Agent call** is the lead's choice. With `startTier: auto` (the default) it is a ceiling: the agent starts on the model its kind of task usually needs (the table below), never above the named model, whatever the agent type (the call overrides the definition). With `respectExplicitModel` on, the named model is kept exactly.
+- **No model in the call, and an agent type of Claude Code itself** (the built-ins `general-purpose`, `Explore`, `Plan`, `statusline-setup`, `claude-code-guide`, `web-fetch` and `claude`, and in-process teammates): the agent inherits the lead's model, nobody chose it. With `startTier: auto` it starts on the model its kind of task usually needs. A plugin's agent that takes one of these names counts as a definition.
+- **No model in the call, and an agent type from a definition file** (yours in `.claude/agents/`, or one shipped by a plugin): the definition decides. The mod never starts it lower; learning can only move it up from the model its definition runs on, once the mod has seen that model (in the session, or remembered from an earlier one). A built-in type that a newer Claude Code adds and the mod does not know yet is treated the same way.
+
+The start tiers by task category:
 
 | Task category | Starts on |
 |---|---|
 | explore (searching, reading, summarising) | haiku |
 | bugfix, feature, refactor, tests, docs, data, ui | sonnet |
-| review, other | the model asked (the lead's, or the agent definition's) |
+| review, other | the model asked (named in the call, or the lead's) |
 
-- A model named in the Agent call is always kept by this rule, whatever `respectExplicitModel` says.
-- The start is never above the model the agent would have run on: an agent definition that names haiku stays on haiku. For agent types other than `general-purpose` the mod cannot read the definition's model in advance, so the first code task of each such type in a session runs on what its definition picks, and the mod remembers it; explore tasks go to haiku from the first one.
-- Reviews and tasks of unknown kind stay on the model asked: their quality cannot be checked by tests, a review of a diff or rework.
+- Exploration starts on haiku only when the description or the agent type says the task is read-only work: in the description any other category wins over explore, and the start of the prompt never makes a task explore (a brief that opens with "Read the spec, then ..." is not read-only work).
+- The start is never above the model the agent would have run on. A Claude Code agent type that runs on a model of its own (not the lead's) is lowered only to haiku until the mod has seen that model: its first code task runs as defined, and the mod remembers its model.
+- Reviews and tasks of unknown kind stay on the model asked: tests, a review of a diff or rework cannot check them, and a review of a report (below) judges the report, not what it missed.
 - Learning raises the start from there as usual, the ladder still moves a stuck agent up, and `explore` never goes below it. Savings are still compared with the lead's model.
-- The spawn log line says when a start was lowered, for example `started on sonnet, asked opus (startTier auto)`, and `/escalator` shows how many runs of the session started lower and how many of them escalated or failed a quality check.
-- `startTier: requested` starts every agent on the model asked, as before. `observe` only logs the lower start; `baseline` never lowers it.
+- The spawn log line says when a start was lowered, for example `started on sonnet, asked opus (startTier auto)`, or `started on sonnet, asked opus (startTier auto, model in the call is a ceiling)` when the call named the model. The map marks such a card with a small `↓` beside its tier, its detail says what was asked, and the terminal map shows `asked opus` after the tier. `/escalator` shows how many runs of the session started lower and how many of them escalated or failed a quality check. The model each agent type runs on by itself is remembered between sessions (store key `agentTypes`; not for `general-purpose`, `Explore` and `Plan`, which inherit the lead's).
+- `startTier: requested` starts every agent on the model asked, as before, a model named in the call included. `observe` only logs the lower start; `baseline` never lowers it.
 
 Quality guards that come with it:
 
-- One run in four of a cheaper model is reviewed by the senior model (`reviewRate` 0.25). Only runs that edited files are reviewed: a read-only run has no diff of its own and costs no call.
+- One run in four of a cheaper model is reviewed by the senior model (`reviewRate` 0.25). A run that edited files is reviewed on its diff; a read-only run (an exploration, a search) on the report it handed back to the lead, against the task. A run with neither, or whose final reply is too short to judge, costs no call.
 - A quality rule apart from the 40% rule: a failed `verifyCommand`, a review below `minReviewScore` or rework by the lead is a quality failure. When more than 10% of a category's runs on a tier failed quality, new agents of that category start one tier higher, from the first failure, with no minimum number of runs. A single failure keeps that in force for about one `learningHalfLifeDays`; until it fades, neither exploration nor the cost rule goes back to that tier. Escalations are not quality failures (a stronger model finished the job): they only count toward the 40% rule.
 
 Some features are off by default because they change cost or behaviour in ways the A/B evals have not yet confirmed:
@@ -102,7 +108,7 @@ Some features are off by default because they change cost or behaviour in ways t
 - `deescalateAfter`: returning to a cheaper model rewrites the prompt cache and may bring the block back.
 - `explore`: deliberately runs some tasks on a model learning had ruled out; some tasks should not run on a weaker model.
 - `modelCategories`: adds one background classification call per uncached spawn (the spawn does not wait for it), and its cost is not in the report.
-- `respectExplicitModel`: the mod cannot tell a model you asked for from one the lead chose, and lead agents often name a cheap model; correcting that choice is what learning is for.
+- `respectExplicitModel`: the mod cannot tell a model you asked for from one the lead chose, and the lead often names the strongest model for every agent; with it off, a named model is a ceiling for the start, and learning can still correct a cheap choice.
 
 ## Getting work delegated
 
@@ -118,7 +124,7 @@ Not every request is worth delegating. A one-file edit is faster done directly, 
 
 - "Rename `userId` to `accountId` in `src/auth.ts`. Do it yourself, without subagents."
 
-Naming a model in the request is fine: the ladder still escalates a stuck agent. The option `respectExplicitModel` (off by default) only decides whether learning may change the starting model of an agent whose Agent call names one; when it is on, the named model is kept and the ladder still applies.
+Naming a model in the request is fine: the ladder still escalates a stuck agent. With `respectExplicitModel` off (the default), a model named in the Agent call is a ceiling: the agent can start lower when its task category usually needs less (see [Start tier](#start-tier)), and learning can raise it. When it is on, the named model is kept exactly and the ladder still applies. To pin a model for a kind of work, put it in an agent definition: the mod never starts a defined agent lower than its definition.
 
 To make delegation the default for multi-part work in one project, paste this into the project's `CLAUDE.md`. Claude Code reads it when a session starts, so start a new session after the change:
 
@@ -137,6 +143,25 @@ Do not delegate questions, explanations, changes to one or two files, or tightly
 
 The rule applies to every request in that project, so keep the last paragraph: without it, small requests get split into subagents too, which costs more than doing them directly.
 
+### Delegation hint
+
+When the main conversation writes a large job by itself, the mod tells you once per session, in a toast and in the log. The lead never reads it: the mod does not change the lead's prompt or what Claude does, and the hint costs no tokens and no model call.
+
+It counts the lead's successful writes (Edit, Write, MultiEdit, NotebookEdit) over its last three turns, and only those that ended within the last 30 minutes. It shows when the lead started no subagent that writes (Explore, Plan and forks do not count) and either:
+
+- wrote at least four files, 300 lines or more, in two or more folders (or at least six files), or
+- spent at least 1.5 USD on its own requests and wrote at least three files.
+
+These thresholds are a first guess and may change. After the hint, `/escalator` shows a line about it for as long as no subagent that writes has been started. Once the lead starts one, the hint never comes back in that session. Option `delegationHint` turns it off; in observe mode it is only written to the log.
+
+Known misses:
+
+- It looks back: it speaks after the turn, not while the work is going on.
+- Files written through shell commands are not counted.
+- A single large file does not fire it.
+- Mechanical changes across many files (renames, import updates) fire it although a subagent may not help; read the hint as a question, not a verdict.
+- Work that you asked the lead to do itself still fires it.
+
 ## Commands
 
 These are the subcommands listed by `/escalator help`:
@@ -154,7 +179,7 @@ These are the subcommands listed by `/escalator help`:
 | `/escalator swap <id>` | Move an agent one tier up, from its next request (the map's detail buttons do the same). Active mode only |
 | `/escalator resume <id>\|all` | Resume agents paused at the human level |
 | `/escalator replay [option=value ...]`, `/escalator replay sweep option=values ...` | Replay the recorded sessions (`recordSessions`) with other options and compare with what happened, without any model call. See [Replaying sessions](#replaying-sessions) |
-| `/escalator reset` | Forget the learned statistics (the session history and the task category cache are kept) |
+| `/escalator reset` | Forget the learned statistics and the remembered agent-type tiers (the session history and the task category cache are kept) |
 | `/escalator reset history` | Clear the recorded session history |
 | `/escalator reset recordings` | Clear the session recordings kept for replay (`recordSessions`) |
 | `/escalator help` | List the subcommands |
@@ -163,15 +188,15 @@ These are the subcommands listed by `/escalator help`:
 
 ### Cheaper model suggestions
 
-With `startTier: auto` (the default) the mod already starts some categories lower when the Agent call names no model: explore on Haiku, and bugfix, feature, refactor, tests, docs, data and ui on Sonnet. It does not lower an explicit model in the Agent call or the agent's definition, reviews and other tasks, and with `startTier: requested` it lowers nothing. So a category whose Agent calls always name Opus, or a review category, keeps paying Opus prices. `/escalator stats` and the stats panel list the categories that look like they could run one tier lower; nothing changes on its own, you decide, by asking for the cheaper model in the Agent call or the agent's definition.
+With `startTier: auto` (the default) the mod already starts some categories lower: explore on Haiku, and bugfix, feature, refactor, tests, docs, data and ui on Sonnet, also when the Agent call names a stronger model. It does not lower a custom agent's definition, reviews and other tasks, or any model with `respectExplicitModel` on or `startTier: requested`. So a custom agent whose definition names Opus, or a review category, keeps paying Opus prices. `/escalator stats` and the stats panel list the categories that look like they could run one tier lower; nothing changes on its own, you decide, by asking for the cheaper model in the Agent call or the agent's definition.
 
 A suggestion only means the current model **did not get stuck** on that category (enough runs, almost no escalations, failed checks or rework). It is not a comparison with the cheaper model, and the savings are estimates from list prices. Whether the cheaper model would do the work *as well* is a separate question. Checks passed by the current model (its reviews, its `verifyCommand` runs, no rework of its files) describe the current model only: they appear as context, never as evidence. Each suggestion falls in one of three kinds:
 
-- **Measured**: the cheaper model already ran this category at least 5 times (decayed count) with few failures, under at least one active check: 3 or more senior reviews of its runs (`reviewRate`), your `verifyCommand` for work that writes code, or rework tracking (`reworkWindowMinutes`) for work that writes files (features, fixes, tests, refactors, docs, UI, data). The suggestion names that evidence, for example "verifyCommand passed on 6 sonnet runs", "reviews of sonnet runs average 4.3" or "no rework by the lead in 6 sonnet runs". Only these are marked strong, and only these can become the one-line hint in `/escalator`.
+- **Measured**: the cheaper model already ran this category at least 5 times (decayed count) with few failures, under at least one active check: 3 or more senior reviews of its runs (`reviewRate`; of its reports for read-only work), your `verifyCommand` for work that writes code, or rework tracking (`reworkWindowMinutes`) for work that writes files (features, fixes, tests, refactors, docs, UI, data). The suggestion names that evidence, for example "verifyCommand passed on 6 sonnet runs", "reviews of sonnet runs average 4.3" or "no rework by the lead in 6 sonnet runs". Only these are marked strong, and only these can become the one-line hint in `/escalator`.
 - **Guarded**: no such evidence yet, but a check would catch a drop after the switch: your `verifyCommand` for code (the strongest), sampled senior reviews when `reviewRate` is on, or the lead's edits of the cheaper model's files. The suggestion says quality is not measured yet and which check would notice; learning then moves the category back up.
-- **Unmeasured**: read-only work (reviews, audits, research) leaves nothing to review, test or rework, and work of unknown kind has no check unless `reviewRate` is on. The suggestion says plainly that the mod cannot tell whether the cheaper model would find the same issues.
+- **Unmeasured**: no check at all: read-only work (reviews, audits, research) with `reviewRate` off, since only its reports can be reviewed (it leaves nothing to test or rework), and work of unknown kind unless `reviewRate` is on. The suggestion says plainly that the mod cannot tell whether the cheaper model would find the same issues.
 
-Reviews and rework are only tracked on runs that start below the lead's model. A cheaper security reviewer that quietly misses problems would look like a success to the mod, so for read-only work compare a few runs yourself before switching.
+Reviews and rework are only tracked on runs that start below the lead's model. A review of a report judges whether it answers the task, cites its evidence, covers the scope asked and flags what is uncertain; the reviewer cannot open the repository or rerun the search, so it cannot tell a finding that is wrong but plausible, or an issue nobody mentioned. A cheaper security reviewer that quietly misses problems could still look like a success, so for read-only work compare a few runs yourself before switching.
 
 ### The agent map and the stats panel
 
@@ -195,7 +220,7 @@ Options are set from `/config` or under `pluginConfigs` in your settings (key `m
 | `stallMinutes` | 10 | Minutes without any event after which a running agent is reported as stalled (log, status line, toast in active mode); its next tool call gets the next ladder note. A tool call still running counts as activity for three times this long. Nothing is reported while the session is closed or the account is at its usage limit |
 | `verifyCommand` | empty (off) | Check run at the end of each tracked agent's run, for example `npm test`. Split on spaces, quotes group, no shell: no pipes or redirects. A non-zero exit counts as a failed run for learning. See the note below |
 | `verifyTimeoutSeconds` | 120 | How long the check may run before it is abandoned and ignored (at most 600) |
-| `reviewRate` | 0.25 | Share of the finished runs of cheaper models that a senior model reviews, from 0 to 1 (`0.25` is about one run in four). Only runs that edited files are reviewed. Each review is one senior call; `0` turns reviews off |
+| `reviewRate` | 0.25 | Share of the finished runs of cheaper models that a senior model reviews, from 0 to 1 (`0.25` is about one run in four). A run that edited files is reviewed on its diff, a read-only run on the report it handed back. Each review is one senior call; `0` turns reviews off |
 | `reviewModel` | empty (senior) | Model that reviews a sampled run, alias or full id |
 | `seniorModel` | `opus` | Model asked for advice at the consult level, alias or full id |
 | `levels` | `nudge,consult,swap,human` | Comma-separated enabled levels; disabled ones are skipped (`nudge,swap,human` turns the consult off) |
@@ -208,6 +233,7 @@ Options are set from `/config` or under `pluginConfigs` in your settings (key `m
 | `consultBudgetUsd` | 0 | Dollars the senior calls (consults and reviews) may cost in the session; `0` means no dollar limit |
 | `pauseAtHuman` | true | Refuses all further tool calls of an agent at the human level, until you resume it. Off keeps the note only. Active mode only |
 | `notifyLead` | true | Adds a short notice to the main conversation (read by the lead) when an agent is swapped up, cannot be swapped, or needs a human. At most 10 per session. Active mode only |
+| `delegationHint` | true | Tells you once per session, in a toast and the log, when the lead writes a large multi-file job by itself and starts no subagent that writes. Never changes what Claude does; costs no tokens. Observe mode logs it only. See "Delegation hint" |
 | `deescalateAfter` | 0 (off) | Progress signals (failing tests dropping or reaching 0) after which a swapped agent goes back one tier, once per run. `observe` only logs it |
 | `effortStep` | false | Adds an effort level between the consult and the swap: the agent keeps its model and its requests carry a higher effort until its next swap. `observe` only logs it |
 | `effortBoost` | `high` | Lowest effort the effort level raises a request to: `low`, `medium`, `high`, `xhigh` or `max`. A request always goes at least one step up |
@@ -215,8 +241,8 @@ Options are set from `/config` or under `pluginConfigs` in your settings (key `m
 | `learnByCost` | true | Once a category has enough priced runs, start it on the model with the lowest cost per accepted run, if that beats the failure-rate choice by more than 10%. Off keeps the failure-rate rule only |
 | `minReviewScore` | 3 | From 1 to 5: a sampled run reviewed below this score counts as not accepted for learning |
 | `explore` | 0 (off) | From 0 to 1: how often a task starts on a cheaper model that learning had ruled out, to check whether it became good enough. Never below the task's start tier, and never on a tier the quality rule climbed over. `observe` only logs it |
-| `startTier` | `auto` | `auto`: an agent whose Agent call names no model starts on the model its task category needs (explore on haiku; code, tests, docs, data and UI on sonnet; reviews and other tasks as asked), never above the model it would have run on. `requested`: every agent starts on the model asked. See [Start tier](#start-tier) |
-| `respectExplicitModel` | false | When on and the Agent call names a model, learning and exploration do not change the starting model. The ladder still applies |
+| `startTier` | `auto` | `auto`: an agent of a Claude Code type with no model in the Agent call, or any agent whose call names a model, starts on the model its task category needs (explore on haiku; code, tests, docs, data and UI on sonnet; reviews and other tasks as asked), never above the model it would have run on; an agent from a definition file with no model in the call runs as defined. `requested`: every agent starts on the model asked. See [Start tier](#start-tier) |
+| `respectExplicitModel` | false | Keeps a model named in the Agent call exactly: no lower start, no learning or exploration. Off by default: the named model is a ceiling. The ladder still applies |
 | `modelCategories` | false | Refines the task category of each new subagent with one short call to a small model (Haiku) on top of the keyword category (agent type, description and the start of the prompt). The agent starts at once on the keyword category; the label is cached and used for recording the run and for later spawns. A failed call keeps the keywords |
 | `reworkWindowMinutes` | 30 | Minutes after a cheaper run during which an edit by the lead to a file that run wrote counts as rework: the run is moved to not accepted once. `0` turns it off. Only edits made through Claude Code are seen |
 | `recordSessions` | 0 (off) | Records what the mod observed in each session and keeps the last N sessions in which at least one agent ran (at most 50), so `/escalator replay` can try other options on them. Works in every mode except `off`, `observe` included. See [Session recordings](#session-recordings) |
@@ -249,21 +275,21 @@ Real spend comes from the token usage each model request reports, priced at API 
 
 A consult sends one dossier to the senior model, through the same provider as your session. It contains: the task (first 2000 characters), the agent's tier and interventions so far, its recent attempts (up to 12, oldest first, each with the tool, a short summary of its input and the outcome; error text capped), the files it touched (up to 20), the output of `git diff --stat` in the project folder, and, when the agent asked for help itself, the problem and the attempts it described. The whole dossier is capped at 12000 characters; a retry after a refused call uses a shorter cap (6000). Obvious secrets are redacted by pattern matching first: private key blocks, `Authorization` headers, `password`, `token`, `secret` and `api key` assignments, well-known key prefixes, and long hex or base64 runs. This is a heuristic, not a guarantee; review what would leave your machine before you enable the mod on a project with secrets in its output.
 
-A sampled review (`reviewRate`) sends the task and the diff of the files the agent edited (`git diff HEAD`, capped at 12000 characters, at most 50 files; above that, the whole working tree diff) with a short rubric, and gets back a 1 to 5 score. A run that edited no file is not reviewed.
+A sampled review (`reviewRate`) sends the task and the diff of the files the agent edited (`git diff HEAD`, capped at 12000 characters, at most 50 files; above that, the whole working tree diff) with a short rubric, and gets back a 1 to 5 score. A run that edited no file sends the task and the agent's final report instead (the message it handed back to the lead, else its last reply; capped at 12000 characters, head and tail kept) with a rubric for reports. Diffs and reports go through the same secret redaction as the dossier. A run with neither a diff nor a report of at least 40 characters is not reviewed.
 
 ## What it touches
 
 This section lists what `claude plugin validate plugin` reports for the mod. Nothing else is read, written or called.
 
-- **Hooks:** `session.start`, `session.end`, `agent.spawn`, `tool.call` (all tool calls, to follow the agents, and the `ask_for_help` call), `turn.step` (usage metering, and the model rewrite on a swap), `turn.complete`, `command.run` (`/escalator`), `ui.render` (the map and stats panes), `ui.close`. Hooks that can block an agent catch their own errors and let the call through.
+- **Hooks:** `session.start`, `session.end`, `agent.spawn`, `tool.call` (all tool calls, to follow the agents, and the `ask_for_help` call; a subagent's `SubagentHandback` report is read, never changed or refused), `turn.step` (usage metering, and the model rewrite on a swap), `turn.complete` (also its final reply, for a report review), `command.run` (`/escalator`), `ui.render` (the map and stats panes), `ui.close`. Hooks that can block an agent catch their own errors and let the call through.
 - **Command:** `/escalator`.
 - **Tool:** `ask_for_help`, registered in active and observe mode. Every agent of the session sees it, the lead included; only tracked agents get an answer, and other callers get "Help is not available for this agent."
 - **Panels:** the map and the stats panel (`$.ui.open`, `$.ui.invalidate`, `$.ui.close`, `$.ui.panes`, `$.ui.resolve`, `$.session.surfaces` to tell whether the session draws panels at all).
 - **UI output:** log lines, status line, toasts (`$.ui.log`, `$.ui.status`, `$.ui.toast`), and in active mode short notices in the main conversation (`$.session.append`, `notifyLead`).
 - **Environment variables (read only):** `MODEL_ESCALATOR_MODE`, `MODEL_ESCALATOR_BASELINE`, `EVAL_MODEL_ESCALATOR_MODE`, `EVAL_MODEL_ESCALATOR_BASELINE`.
 - **Session state:** key `model-escalator.session` (`$.state.get`, `$.state.set`): the per-agent snapshot, including recent tool summaries (file paths and command lines) and error text. It is redacted only when it is sent to the senior model.
-- **Store** (`$.store.get`, `$.store.set`, `$.store.delete`): `stats` (learned counters per category and start tier), `projects` (the same per project; the working directory is stored as a hash), `sessions` (session summaries: mode, reference model, cost totals; no prompts), `adviceHinted` (when each cheaper-model hint was last shown, so it is not repeated within a week), `categories` (the classification cache: the subagent type, the first 120 characters of its description and the first 12 words of its prompt, normalised, with the label; at most 200 entries), and with `recordSessions` on, `recordings` (the last N session recordings, only of sessions in which an agent ran: per-agent events as hashed features, redacted error signatures and agent labels; 256 KiB per session and 1.25 MiB in all, see [Session recordings](#session-recordings)). `/escalator reset` clears `stats` and `projects`; `/escalator reset history` clears `sessions`; `/escalator reset recordings` clears `recordings`.
-- **Model calls** (`$.model.complete`, `$.model.classify`): the senior consult; the sampled review (`reviewRate`); a one-token probe of a swap target when a swap fails with an error the mod does not recognise; and the category classification (`modelCategories`, Haiku by default). Model calls go through the provider of your Claude Code session; the mod makes no network calls of its own.
+- **Store** (`$.store.get`, `$.store.set`, `$.store.delete`): `stats` (learned counters per category and start tier), `projects` (the same per project; the working directory is stored as a hash), `sessions` (session summaries: mode, reference model, cost totals; no prompts), `adviceHinted` (when each cheaper-model hint was last shown, so it is not repeated within a week), `categories` (the classification cache: the subagent type, the first 120 characters of its description and the first 12 words of its prompt, normalised, with the label; at most 200 entries), `agentTypes` (the tier each agent type other than `general-purpose`, `Explore` and `Plan` was last seen to run on by itself, with the time it was seen, so that its first task in a new session starts from it: never above a Claude Code type's own model, never below a definition's; the subagent type name only, at most 100 types, the least recently seen dropped first), and with `recordSessions` on, `recordings` (the last N session recordings, only of sessions in which an agent ran: per-agent events as hashed features, redacted error signatures and agent labels; 256 KiB per session and 1.25 MiB in all, see [Session recordings](#session-recordings)). `/escalator reset` clears `stats`, `projects` and `agentTypes`; `/escalator reset history` clears `sessions`; `/escalator reset recordings` clears `recordings`.
+- **Model calls** (`$.model.complete`, `$.model.classify`): the senior consult; the sampled review (`reviewRate`: a diff, or the redacted final report of a run that edited no file); a one-token probe of a swap target when a swap fails with an error the mod does not recognise; and the category classification (`modelCategories`, Haiku by default). Model calls go through the provider of your Claude Code session; the mod makes no network calls of its own.
 - **Processes** (`$.process.run`, no shell): `git diff --stat` in the project folder at each consult; `git diff HEAD`, read only with external diff drivers and text filters off, for a sampled review; and the `verifyCommand` you set, at the end of each tracked run. The agent's output never chooses a command.
 - **Plan usage and session cost** (`$.session.usage`): read only; the plan windows and the total Claude Code reports for the session are only shown by `/escalator` and the panel.
 - **Clock** (`$.clock.now`, `$.clock.after`, `$.clock.every`, `$.clock.sleep`): redraws, stall checks and batched saves.

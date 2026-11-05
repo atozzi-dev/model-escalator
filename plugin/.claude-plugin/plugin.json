@@ -1,6 +1,6 @@
 {
   "name": "model-escalator",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "Run cheap models in parallel and escalate only when they get stuck: nudge, senior consult, hot model swap. Measures savings and learns the right model per task.",
   "author": { "name": "Alessandro Tozzi", "email": "261738626+atozzi-dev@users.noreply.github.com" },
   "repository": "https://github.com/atozzi-dev/model-escalator",
@@ -144,13 +144,13 @@
     "startTier": {
       "type": "string",
       "title": "Start tier",
-      "description": "auto: an agent whose Agent call names no model starts on the model its kind of task needs: explore on haiku; bug fixes, features, refactors, tests, docs, data and UI on sonnet; reviews and other tasks on the model asked. A model named in the Agent call is always kept. Learning and the escalation ladder still move it up. requested: start every agent on the model asked, as before.",
+      "description": "auto: an agent starts on the model its kind of task needs: explore on haiku; bug fixes, features, refactors, tests, docs, data and UI on sonnet; reviews and other tasks on the model asked. This applies to Claude Code's own agent types (general-purpose, Explore, Plan, teammates) when the Agent call names no model, and to any agent whose call names a model, which is then a ceiling. An agent from a definition file with no model in the call runs as its definition says. Learning and the escalation ladder still move it up. requested: start every agent on the model asked, as before.",
       "default": "auto"
     },
     "respectExplicitModel": {
       "type": "boolean",
       "title": "Respect a model asked for explicitly",
-      "description": "When on and the Agent call names a model, the task starts on it: learning and exploration do not change the starting model (the log says what they would have suggested). The ladder still moves the agent up when it is stuck. Off by default: the lead usually names a cheap model itself, and learning is there to correct that choice. Turn it on for strict respect of what was asked.",
+      "description": "When on and the Agent call names a model, the task starts exactly on it: no lower start, and learning and exploration do not change it (the log says what they would have suggested). The ladder still moves the agent up when it is stuck. Off by default: the named model is a ceiling, so a task that usually needs less starts lower (startTier auto), and learning can correct a cheap choice. Turn it on for strict respect of what was asked.",
       "default": false
     },
     "learnByCost": {
@@ -187,6 +187,12 @@
       "type": "boolean",
       "title": "Tell the lead about escalations",
       "description": "Add a short notice to the main conversation, read by the lead, whenever an agent is swapped to a stronger model, cannot be (the model is not available) or needs a human. At most 10 messages per session; active mode only. Off keeps the log and the toasts only.",
+      "default": true
+    },
+    "delegationHint": {
+      "type": "boolean",
+      "title": "Hint when the lead works alone",
+      "description": "Tells you once per session, in a toast and the log, when the main conversation writes many files by itself and starts no subagent that writes. The mod never changes what Claude does. Zero tokens. In observe mode the hint is only logged.",
       "default": true
     },
     "effortBoost": {

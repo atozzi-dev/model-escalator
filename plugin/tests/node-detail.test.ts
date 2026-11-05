@@ -18,18 +18,26 @@ test('the detail names the agent, its tiers, state, difficulty and cost', () => 
   const text = d.rows.map((r) => `${r.label}: ${r.value}`).join('\n')
   expect(d.title).toContain('fixer (a1)')
   expect(text).toContain('Category: tests')
-  expect(text).toContain('Tier: sonnet (requested haiku)')
+  expect(text).toContain('Tier: sonnet (started on haiku)')
   expect(text).toContain('State: stuck')
   expect(text).toContain('Difficulty: level 3, score 1.5')
   expect(text).toContain('Cost: $0.0123')
   expect(text).toContain('Consults: 1')
 })
 
-test('a tier as requested says so, and a paused agent says paused', () => {
+test('a tier unchanged since the start says so, and a paused agent says paused', () => {
   const d = buildDetail({ agent: agent({ paused: true }), node: node({ status: 'paused' }), events: [], consult: { ok: true }, swap: { ok: true } })
   const text = d.rows.map((r) => `${r.label}: ${r.value}`).join('\n')
-  expect(text).toContain('Tier: haiku (as requested)')
+  expect(text).toContain('Tier: haiku (since the start)')
   expect(text).toContain('State: paused')
+})
+
+test('a tier lowered by startTier says what was asked, also after an escalation', () => {
+  const tierRow = (over: Partial<AgentState>) => buildDetail({
+    agent: { ...agent(over), lowered: 'opus' } as AgentState, node: node({ tier: 'sonnet' }), events: [], consult: { ok: true }, swap: { ok: true },
+  }).rows.find((r) => r.label === 'Tier')?.value
+  expect(tierRow({ startTier: 'sonnet', tier: 'sonnet' })).toBe('sonnet (started lower: asked opus, startTier auto)')
+  expect(tierRow({ startTier: 'sonnet', tier: 'opus' })).toBe('opus (started on sonnet, asked opus, startTier auto)')
 })
 
 test('interventions are counted per kind from the events that name the agent', () => {

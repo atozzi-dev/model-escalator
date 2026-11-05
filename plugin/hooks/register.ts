@@ -4,11 +4,12 @@ import { DEFAULT_CONFIG, describeConfig, parseConfig, splitCommand, type Config 
 import { LADDER, afterHelp, agentHead, beginRequest, endRequest, limitReached, restartSilence, sessionClosed, startCall, agentLabel, allowedMax, nextTier, canAskForHelp, classifyFailure, consultLimit, countStep, EFFORTS, endRun, escalated, features, isModelRefusal, isPauseAllowedTool, isSilent, leadMessage, markStall, MAX_LEAD_NOTICES, newAgent, noteProgress, normalizePath, observe, otherSenior, pauseAgent, pickSenior, raiseEffort, refuseTier, rememberModel, resolveModelId, resumeAgent, revertSwap, skipGrace, spawnName, taskClaim, taskOfResult, tierOf, toolEnd, toolStart, touch, usableTier, type Action, type AgentState, type Effort, type Features, type LeadEvent, type ModelFailure, type ObservedModels, type Tier } from './detector'
 import { downshiftAdvice, formatAdvice, markHinted, pickHint, type Advice } from './advice'
 import { exportCsv } from './export'
+import { emptyLeadTurn, hintText, isWritingSpawn, leadWork, noteLeadCall, pushTurn, shouldHint, type LeadTurn } from './lead-work'
 import { parseReplayArgs, replayReport, sweep, sweepGrid, sweepReport } from './replay'
 import { addAgent as addRecAgent, indexOf as recIndexOf, mergeRecordings, parseRecordings, push as recPush, recordedOptions, relTime, resumeRecording, startRecording, stepEvent, toolEvent, type Live, type RecEvent, type RecordedMode, type Recording } from './recorder'
 import { buildDossier, inputFromState } from './dossier'
 import { cacheGet, cachePut, cacheKey, classifierInput, combineCategory, LABELS, parseCache } from './classify'
-import { autoStartTier, categorize, costPerAccepted, formatLoweredStarts, formatStats, isAccepted, mulberry32, ownTierOf, parseProjects, projectKey, recommendScopedWithExploration, recordReviewScoped, recordReworkScoped, recordScoped, scopedStats, type Projects, type Stats } from './learning'
+import { categorize, costPerAccepted, formatLoweredStarts, formatStats, INHERITING_TYPES, isAccepted, isEngineType, mulberry32, ownTierOf, parseAgentTypes, parseProjects, projectKey, recommendScopedWithExploration, recordReviewScoped, recordReworkScoped, recordScoped, rememberAgentType, scopedStats, startChoice, storedOwnTier, type Projects, type Stats } from './learning'
 import { emptyGraph, LEAD_ID, reduce, SENIOR_ID, type GraphInput, type GraphState } from './graph'
 import { layoutGraph, type LayoutMemory } from './layout'
 import { renderSvgSized } from './render-svg'
@@ -16,13 +17,14 @@ import { renderTree } from './render-text'
 import { createQueue } from './queue'
 import { buildDetail, consultGate, findAgent, selectorChips, swapGate } from './node-detail'
 import { buildStatsView, columnWidths, fitView, type ViewCell } from './stats-view'
-import { buildReviewPrompt, diffArgv, editedPath, formatReviews, isCheaper, parseReview, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun } from './review'
+import { buildReportReviewPrompt, buildReviewPrompt, diffArgv, editedPath, formatReviews, handbackReport, isCheaper, parseReview, REPORT_REVIEW_SYSTEM, reportText, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun } from './review'
 import { parseSnapshot, type Snapshot, type TrackedAgent } from './state'
 import { addAgent, addConsult, addEscalation, addIntervention, addStep, asUsage, cost as stepCost, emptyLedger, planBlock, report, reportByCategory, savings, statusLine, claudeCostLine, claudeCostUsd, type Ledger, type Usage } from './savings'
 
 export const HELP_TOOL = 'mcp__model-escalator__ask_for_help'
 const STATS_KEY = 'stats'
 const PROJECTS_KEY = 'projects'
+const AGENT_TYPES_KEY = 'agentTypes'
 const ADVICE_HINTED_KEY = 'adviceHinted'
 const SESSIONS_KEY = 'sessions'
 const CATEGORIES_KEY = 'categories'
@@ -57,6 +59,11 @@ const pendingReviews = new Set<Promise<void>>()
 // Files each tracked agent edited during its current run, as it named them: the review diff is limited to them.
 // Module state only: after a reload the review falls back to the whole working tree diff.
 const editedFiles = new Map<string, string[]>()
+// The report each tracked agent handed back to the lead during its current run (its last SubagentHandback message,
+// capped): a run that edited no file is reviewed on it. Module state only, like the edited files; at most
+// MAX_REPORTS agents, the oldest dropped first.
+const reports = new Map<string, string>()
+const MAX_REPORTS = 50
 
 // What is known, in memory only, of each sampled run (key `agentId:turnId`) between its recording and its review,
 // which land in either order: the score when the review came first, whether the run was counted as accepted (and
@@ -88,6 +95,15 @@ const MAX_REWORK_FILES = 50
 // Messages to the lead sent this session (capped by MAX_LEAD_NOTICES) and the sends still in flight.
 let leadNotices = 0
 const pendingNotices = new Set<Promise<void>>()
+
+// The delegation hint (option delegationHint, DELEGA-ANALISI 1.3). The lead's calls of the turn in progress, its last
+// turns (the window), the lead cost the window has already counted, the root the folders are read from, and the flags
+// that live in the snapshot: shown once, and never again once a subagent that writes was started. Memory only otherwise.
+let leadTurnNow: LeadTurn = emptyLeadTurn()
+let leadWindow: LeadTurn[] = []
+let leadMark = 0
+let leadHint: { hinted: boolean; delegated: boolean } = { hinted: false, delegated: false }
+let leadRoot: string | undefined
 
 const agents = new Map<string, TrackedAgent>()
 // Agents for which a consult limit was already logged (one line per agent).
@@ -359,6 +375,11 @@ function noteTask(id: string | undefined, e: Record<string, unknown>, r: unknown
 export function resetState(): void {
   sessionTag = newTag()
   projectId = ''
+  leadTurnNow = emptyLeadTurn()
+  leadWindow = []
+  leadMark = 0
+  leadHint = { hinted: false, delegated: false }
+  leadRoot = undefined
   adviceHintShown = false
   exploreRandom = undefined
   agents.clear()
@@ -398,6 +419,7 @@ export function resetState(): void {
   reviewQueue = createQueue()
   pendingReviews.clear()
   editedFiles.clear()
+  reports.clear()
   reviewRuns.clear()
   writtenFiles.clear()
   reworkRuns.clear()
@@ -417,7 +439,7 @@ export function resetState(): void {
 function snapshot(): Snapshot {
   return {
     agents: [...agents.values()], ledger, seenModels, sessionTag, mode, baseline, baselinePinned, blockedTiers, refusedSeniors,
-    graph, ...(layoutMem ? { layout: layoutMem } : {}), drawnSeq,
+    graph, ...(layoutMem ? { layout: layoutMem } : {}), drawnSeq, leadHint: { ...leadHint },
   }
 }
 
@@ -719,6 +741,11 @@ export const register: Register = (on, options) => {
       graph = saved.graph ?? emptyGraph(baseline)
       layoutMem = saved.layout
       drawnSeq = saved.drawnSeq ?? 0
+      // The hint's flags come back; the window of the last turns is not kept, so it starts again from the ledger's cost now.
+      leadHint = saved.leadHint ? { ...saved.leadHint } : { hinted: false, delegated: false }
+      leadMark = ledger.leadCost ?? 0
+      leadWindow = []
+      leadTurnNow = emptyLeadTurn()
       // A map pane left open across the reload keeps being redrawn.
       try {
         const open = await $.ui.panes()
@@ -729,6 +756,10 @@ export const register: Register = (on, options) => {
       graph = emptyGraph(baseline)
       layoutMem = undefined
       drawnSeq = 0
+      leadHint = { hinted: false, delegated: false }
+      leadMark = ledger.leadCost ?? 0
+      leadWindow = []
+      leadTurnNow = emptyLeadTurn()
       stopMapTimer()
       stopStatsTimer()
       try {
@@ -754,7 +785,11 @@ export const register: Register = (on, options) => {
       } catch { /* no stall detection, everything else works */ }
     }
     const r = await next(e)
-    try { projectId = projectKey((r as { cwd?: unknown } | undefined)?.cwd) } catch { projectId = '' }
+    try {
+      const cwd = (r as { cwd?: unknown } | undefined)?.cwd
+      projectId = projectKey(cwd)
+      leadRoot = typeof cwd === 'string' ? cwd : undefined
+    } catch { projectId = '' }
     if (watching()) {
       try {
         await $.tool.register({
@@ -797,8 +832,8 @@ export const register: Register = (on, options) => {
     if (arg === 'reset') {
       // The category cache is kept: it maps task text to a label, which is a fact about the text, not something learned
       // from outcomes, and clearing it would only cost new classification calls.
-      await storeQueue(async () => { await $.store.delete(STATS_KEY); await $.store.delete(PROJECTS_KEY) })
-      return { text: 'Learned stats cleared (per-category and per-project statistics). The session history and the task category cache are kept.' }
+      await storeQueue(async () => { await $.store.delete(STATS_KEY); await $.store.delete(PROJECTS_KEY); await $.store.delete(AGENT_TYPES_KEY) })
+      return { text: 'Learned stats cleared (per-category and per-project statistics, remembered agent types). The session history and the task category cache are kept.' }
     }
     if (arg === 'reset history') {
       await storeQueue(async () => { await $.store.delete(SESSIONS_KEY) })
@@ -830,10 +865,14 @@ export const register: Register = (on, options) => {
     const planText = plan ? '\n\n' + plan : ''
     const reported = claudeCostLine(await readClaudeCost($), ledger)
     const lowered = formatLoweredStarts(agents.values())
+    // While the delegation hint applies: shown, and no subagent that writes has been started since.
+    const leadNote = mode === 'active' && leadHint.hinted && !leadHint.delegated
+      ? 'Delegation hint: shown this session. The lead wrote a large job by itself; asking it to split the work into subagents lets the ladder start parts on cheaper models (option delegationHint).'
+      : ''
     const pausedText = paused.length === 0 ? '' : '\n\nPaused (resume with /escalator resume <id>|all):\n' +
       paused.map((a) => `- ${agentLabel(a)} (${a.category}, ${a.tier})`).join('\n')
     const hint = await adviceHint($, await currentAdvice($))
-    return { text: `Mode: ${mode}\n` + report(ledger, baseline) + (reported ? '\n' + reported : '') + (lowered ? '\n' + lowered : '') + planText + pausedText + (hint ? '\n\n' + hint : '') +
+    return { text: `Mode: ${mode}\n` + report(ledger, baseline) + (reported ? '\n' + reported : '') + (lowered ? '\n' + lowered : '') + (leadNote ? '\n' + leadNote : '') + planText + pausedText + (hint ? '\n\n' + hint : '') +
       '\n\nMore: /escalator stats, /escalator map (live agent network), /escalator history, /escalator config, /escalator help' }
   })
 
@@ -943,18 +982,23 @@ export const register: Register = (on, options) => {
     let ev = e
     const plan = await taskCategory($, e)
     const category = plan.category
-    // `model` is what the Agent call asked for; when it is absent the agent definition or the parent decides, and
-    // the types give no way to tell those two apart: only a present `model` counts as an explicit choice.
+    // `model` is what the Agent call asked for: the lead's choice. When it is absent the agent definition or the parent
+    // decides; `isEngineType` tells the two apart (Claude Code's own types inherit, any other has a definition file).
     const named = typeof e.model === 'string' && e.model !== ''
-    const parentTier = tierOf(named ? e.model : e.parentModel)
+    const type = e.subagentType ?? ''
+    const engine = isEngineType(e)
+    const parentTier = tierOf(e.parentModel)
     const explicit = config.respectExplicitModel && mode !== 'baseline' && named
-    // startTier auto: a call that names no model starts on its category's tier, never above what the agent type runs
-    // on by itself (the parent's model for general-purpose, else the model its definition was seen to resolve to).
-    const auto = config.startTier === 'auto' && mode !== 'baseline' && !named
-    const own = auto ? ownTierOf(e.subagentType ?? '', parentTier, agents.values()) : undefined
+    const own = named ? undefined : ownTierOf(type, parentTier, agents.values(), await rememberedOwnTier($, type, engine), engine)
+    // Who chose the model decides where the agent may start (see `startChoice`); baseline mode starts everyone the same.
+    const start = mode === 'baseline'
+      ? { asked: tierOf(named ? e.model : e.parentModel), floor: tierOf(named ? e.model : e.parentModel), learn: true }
+      : startChoice({ category, parentTier, ...(named ? { called: tierOf(e.model) } : {}), engine, ...(own !== undefined ? { own } : {}),
+        startTier: config.startTier, respectExplicit: config.respectExplicitModel })
     // The tier the agent would run on without the mod: the reference for the lower start and for every rewrite.
-    const asked = own ?? parentTier
-    const floor = auto ? autoStartTier(category, parentTier, own === undefined ? null : own) : asked
+    const asked = start.asked
+    const floor = start.floor
+    const fixed = !start.learn
     // Set when the model stays as the call left it (no model named, none rewritten): the result tells the type's own tier.
     let untouched = !named
     let lowered: Tier | undefined
@@ -965,24 +1009,25 @@ export const register: Register = (on, options) => {
         ? { tier: baseline, reason: 'requested' as const, learned: baseline }
         : recommendScopedWithExploration(stats, projects, projectId, category, floor, {
           now: await clockNow($), halfLifeMs: halfLifeMs(), explore: config.explore, byCost: config.learnByCost,
-          ...(config.explore > 0 && !explicit ? { rand: explorationRandom() } : {}),
+          ...(config.explore > 0 && !fixed ? { rand: explorationRandom() } : {}),
         })
       // In observe mode the model stays as asked: exploring is only logged, the learned tier is what "would" happen.
-      const exploring = !explicit && choice.reason === 'explore'
-      const best = explicit ? asked : exploring && mode === 'observe' ? choice.learned : choice.tier
+      const exploring = !fixed && choice.reason === 'explore'
+      const best = fixed ? asked : exploring && mode === 'observe' ? choice.learned : choice.tier
       const label = spawnName(e) ?? category
       if (best !== asked) {
         if (mode !== 'observe') { ev = { ...e, model: best }; untouched = false }
         const would = mode === 'observe'
-        if (auto && floor !== asked && LADDER.indexOf(best) < LADDER.indexOf(asked)) {
+        if (start.lowers !== undefined && LADDER.indexOf(best) < LADDER.indexOf(asked)) {
           if (!would) lowered = asked
-          await $.ui.log(`${label}: ${would ? 'would start' : 'started'} on ${best}, asked ${asked} (startTier auto)`)
+          const why = start.lowers === 'ceiling' ? 'startTier auto, model in the call is a ceiling' : 'startTier auto'
+          await $.ui.log(`${label}: ${would ? 'would start' : 'started'} on ${best}, asked ${asked} (${why})`)
         } else {
           await $.ui.log(`${label}: ${asked} -> ${best}${would ? ' (would)' : ''}`)
         }
       }
       if (explicit && choice.learned !== asked) await $.ui.log(`${label}: kept the requested ${asked} (explicit), learning suggested ${choice.learned}`)
-      if (!explicit && choice.basis === 'cost') await $.ui.log(`${label}: chosen by cost per accepted run (${costLine(scopedStats(stats, projects, projectId, category, await clockNow($), halfLifeMs()), category, floor, await clockNow($))})`)
+      if (!fixed && choice.basis === 'cost') await $.ui.log(`${label}: chosen by cost per accepted run (${costLine(scopedStats(stats, projects, projectId, category, await clockNow($), halfLifeMs()), category, floor, await clockNow($))})`)
       if (exploring) {
         await $.ui.log(mode === 'observe'
           ? `${label}: would explore ${choice.tier} for ${category} (learned ${choice.learned})`
@@ -1001,6 +1046,7 @@ export const register: Register = (on, options) => {
         ...(untouched && typeof r.model === 'string' && r.model !== '' ? { ownTier: tierOf(r.model) } : {}),
       }
       agents.set(r.agentId, name === undefined ? fresh : { ...fresh, name })
+      if (fresh.ownTier !== undefined) await rememberOwnTier($, type, fresh.ownTier, engine)
       ledger = addAgent(ledger, category)
       if (plan.refine) {
         const id = r.agentId
@@ -1016,7 +1062,7 @@ export const register: Register = (on, options) => {
           recFor(r.agentId, (_a, at) => ({ k: 'spawn', a, at, asked, tier: fresh.startTier, ...(explicit ? { x: 1 as const } : {}) }))
         }
       } catch { /* the recording is optional */ }
-      feed($, { type: 'spawn', agentId: r.agentId, label: name ?? category, model: String(r.model ?? '') })
+      feed($, { type: 'spawn', agentId: r.agentId, label: name ?? category, model: String(r.model ?? ''), ...(lowered !== undefined ? { lowered } : {}) })
       await save($)
     }
     return r
@@ -1069,10 +1115,17 @@ export const register: Register = (on, options) => {
       const queued = takeNotes(id)
       if (queued.length > 0) r = { ...r, context: [...(r.context ?? []), ...queued] } as typeof r
     }
-    if (tracked && config.reviewRate > 0 && r.isError !== true && r.deny === undefined) noteEdit(id, e as unknown as Record<string, unknown>)
+    if (tracked && config.reviewRate > 0 && r.isError !== true && r.deny === undefined) {
+      noteEdit(id, e as unknown as Record<string, unknown>)
+      noteReport(id, e as unknown as Record<string, unknown>)
+    }
     if (config.reworkWindowMinutes > 0 && r.isError !== true && r.deny === undefined) {
       if (tracked) noteWritten(id, e as unknown as Record<string, unknown>)
       else if (id === undefined) await noteLeadEdit($, e as unknown as Record<string, unknown>)
+    }
+    // The lead's own successful calls feed the delegation hint (the lead has no agentId).
+    if (id === undefined && (mode === 'active' || mode === 'observe') && config.delegationHint && r.isError !== true && r.deny === undefined) {
+      await noteLeadWork($, e as unknown as Record<string, unknown>)
     }
     if (noteTask(tracked ? id : undefined, e as unknown as Record<string, unknown>, r)) await save($)
     // What the detector reads from the result, read once: the recorder keeps it and observe scores it.
@@ -1208,6 +1261,7 @@ export const register: Register = (on, options) => {
   // 4. End of an agent's run: learn from it and refresh the running report.
   on('turn.complete', async ($, e, next) => {
     const id = e.agentId
+    if (id === undefined) await leadTurnEnd($)
     if (id !== undefined && labelPending.has(id)) await settleLabel($, id)
     const a = id ? agents.get(id) : undefined
     feed($, { type: 'complete', ...(id ? { agentId: id } : {}) })
@@ -1221,11 +1275,11 @@ export const register: Register = (on, options) => {
           const wasEscalated = escalated(a, config.levels)
           const argv = splitCommand(config.verifyCommand)
           // Read loosely: older published types may not declare these fields.
-          const turn = e as { turnId?: unknown; isAborted?: unknown }
+          const turn = e as { turnId?: unknown; isAborted?: unknown; answer?: unknown }
           const key = runKey(id, turn.turnId)
           trackRun(a, key, written, lastNow, turn.isAborted === true)
           // Before the outcome is recorded, so the run is known as sampled when it is.
-          startReview($, a, turn.turnId, turn.isAborted === true)
+          startReview($, a, turn.turnId, turn.isAborted === true, turn.answer)
           if (argv.length === 0) {
             await recordOutcome($, a, wasEscalated, false, key)
           } else {
@@ -1470,6 +1524,25 @@ async function writeStats($: EngineInterface, s: { stats: Stats; projects: Proje
   if (Object.keys(s.projects).length > 0) await $.store.set(PROJECTS_KEY, s.projects)
 }
 
+// The own tier of an agent type remembered by earlier sessions (store key `agentTypes`), the fallback of `ownTierOf`
+// until this session has seen the type. Claude Code's inheriting types and an empty type have none. Never throws.
+async function rememberedOwnTier($: EngineInterface, type: string, engine: boolean): Promise<Tier | undefined> {
+  if (type === '' || (engine && INHERITING_TYPES.includes(type))) return undefined
+  try { return storedOwnTier(parseAgentTypes(await $.store.get(AGENT_TYPES_KEY)), type) } catch { return undefined }
+}
+
+// Remembers the own tier seen for an agent type, when it differs from the one remembered. Never throws.
+async function rememberOwnTier($: EngineInterface, type: string, tier: Tier, engine: boolean): Promise<void> {
+  if (type === '' || (engine && INHERITING_TYPES.includes(type))) return
+  try {
+    await storeQueue(async () => {
+      const types = parseAgentTypes(await $.store.get(AGENT_TYPES_KEY))
+      if (storedOwnTier(types, type) === tier) return
+      await $.store.set(AGENT_TYPES_KEY, rememberAgentType(types, type, tier, (await clockNow($)) ?? 0))
+    })
+  } catch { /* the memory is optional */ }
+}
+
 // Records one finished run: its cost (the agent's requests and consults of the run, not the review), and whether it
 // was accepted. A review that already landed counts in the acceptance here; one that has not is told how the run
 // was counted (see reviewRun), so a late low score moves the run to not accepted exactly once.
@@ -1520,6 +1593,18 @@ function noteEdit(id: string, input: Record<string, unknown>): void {
     const list = editedFiles.get(id) ?? []
     if (!list.includes(path) && list.length < REVIEW_LIMITS.maxTracked) editedFiles.set(id, [...list, path])
   } catch { /* the review falls back to the whole diff */ }
+}
+
+// Remembers the report a tracked agent hands back with SubagentHandback (the last one wins, capped). The call itself
+// is never touched. Never throws.
+function noteReport(id: string, input: Record<string, unknown>): void {
+  try {
+    const report = reportText(handbackReport(input.tool, input))
+    if (report === undefined) return
+    reports.delete(id)
+    reports.set(id, report)
+    if (reports.size > MAX_REPORTS) reports.delete(reports.keys().next().value as string)
+  } catch { /* the review falls back to the final answer */ }
 }
 
 // Remembers the file a successful edit of a tracked agent wrote, normalised, for the rework check at the end of its run.
@@ -1587,26 +1672,69 @@ async function noteLeadEdit($: EngineInterface, input: Record<string, unknown>):
   } catch { /* the check must never disturb the lead */ }
 }
 
+// A successful call of the lead for the delegation hint: its writes join the turn in progress, and a subagent that
+// writes ends the hint for the session (saved at once: the flag must survive a reload). Never throws.
+async function noteLeadWork($: EngineInterface, input: Record<string, unknown>): Promise<void> {
+  try {
+    leadTurnNow = noteLeadCall(leadTurnNow, input.tool, input, leadRoot)
+    if (leadHint.delegated || !isWritingSpawn(input.tool, input)) return
+    leadHint = { ...leadHint, delegated: true }
+    await save($)
+  } catch { /* the hint is optional */ }
+}
+
+// The lead's turn ended: the turn joins the window with the cost its requests added, and the hint is shown once when the
+// window qualifies (DELEGA-ANALISI 1.3). Only the main loop calls it. Shown to the user only: a toast in active mode and
+// a log line, never a message to the lead. Never throws.
+async function leadTurnEnd($: EngineInterface): Promise<void> {
+  try {
+    const turn = leadTurnNow
+    const total = ledger.leadCost ?? 0
+    const spent = Math.max(0, total - leadMark)
+    leadMark = total
+    leadTurnNow = emptyLeadTurn()
+    if (!config.delegationHint || (mode !== 'active' && mode !== 'observe') || leadHint.hinted || leadHint.delegated) return
+    const now = await clockNow($)
+    if (now === undefined) return
+    leadWindow = pushTurn(leadWindow, { ...turn, cost: spent }, now)
+    const work = leadWork(leadWindow)
+    if (!shouldHint(work)) return
+    const text = hintText(work)
+    leadHint = { ...leadHint, hinted: true }
+    await save($)
+    try {
+      if (mode === 'active') await $.ui.toast(text)
+      await $.ui.log(mode === 'observe' ? `delegation hint (observe mode, not shown): ${text}` : `delegation hint: ${text}`)
+    } catch { /* the hint is best effort */ }
+  } catch { /* the hint must never disturb the lead */ }
+}
+
 async function flushReviews(): Promise<void> {
   while (pendingReviews.size > 0) await Promise.allSettled([...pendingReviews])
 }
 
 // End of a tracked agent's run: draws whether it is reviewed and, if so, queues the review in the background.
-// Only runs that started below the reference tier, in active or observe mode, and that were not aborted. The
-// edited files are taken for this run either way, so the next run of the same agent starts with none. Never throws.
-function startReview($: EngineInterface, a: AgentState, turnId: unknown, aborted: boolean): void {
+// Only runs that started below the reference tier, in active or observe mode, and that were not aborted. A run that
+// edited files is reviewed on its diff; one that edited none on its report: the message it handed back to the lead,
+// else its final answer (`answer`, from turn.complete). The edited files and the report are taken for this run
+// either way, so the next run of the same agent starts with none. Never throws.
+function startReview($: EngineInterface, a: AgentState, turnId: unknown, aborted: boolean, answer?: unknown): void {
   try {
     const files = editedFiles.get(a.id) ?? []
     editedFiles.delete(a.id)
+    const handed = reports.get(a.id)
+    reports.delete(a.id)
     if (!watching() || aborted || config.reviewRate <= 0 || !isCheaper(a.startTier, baseline)) return
     // A run that edited no file (read-only work, or edits made only through the shell) has no diff of its own: the
-    // working tree would show other agents' or the lead's changes. It is not reviewed and costs no call.
-    if (files.length === 0) return
+    // working tree would show other agents' or the lead's changes. Its report is reviewed instead; with no report
+    // (nothing handed back, a reply too short to judge) it is not reviewed and costs no call.
+    const report = files.length === 0 ? handed ?? reportText(answer) : undefined
+    if (files.length === 0 && report === undefined) return
     const key = runKey(a.id, turnId)
     if (!sampleRun(config.reviewRate, sessionTag, key)) return
     reviewRuns.set(key, {})
     if (reviewRuns.size > MAX_REVIEWED_RUNS) reviewRuns.delete(reviewRuns.keys().next().value as string)
-    const p: Promise<void> = reviewQueue(() => reviewRun($, a, files, key))
+    const p: Promise<void> = reviewQueue(() => reviewRun($, a, files, key, report))
       .catch(() => undefined)
       // Without a score there is nothing to wait for: the entry goes (with a score it stays until the run is recorded).
       .finally(() => { if (reviewRuns.get(key)?.score === undefined) reviewRuns.delete(key); pendingReviews.delete(p) })
@@ -1629,10 +1757,10 @@ async function reviewDiff($: EngineInterface, files: readonly string[]): Promise
   }
 }
 
-// One sampled review: the agent's diff and task to the review model with the rubric, its score recorded in the
-// stats of the run's category and start tier, its cost in the ledger like a consult. A refused or unscored reply
-// records nothing. Never throws.
-async function reviewRun($: EngineInterface, a: AgentState, files: readonly string[], key: string): Promise<void> {
+// One sampled review: the agent's diff (or, for a run that edited no file, its `report`) and task to the review model
+// with the matching rubric, its score recorded in the stats of the run's category and start tier, its cost in the
+// ledger like a consult. A refused or unscored reply records nothing. Never throws.
+async function reviewRun($: EngineInterface, a: AgentState, files: readonly string[], key: string, report?: string): Promise<void> {
   try {
     const model = config.reviewModel || config.senior
     if (refusedSeniors.includes(tierOf(model))) return
@@ -1640,18 +1768,26 @@ async function reviewRun($: EngineInterface, a: AgentState, files: readonly stri
       try { await $.ui.log(`${agentLabel(a)} (${a.category}): review skipped: consult budget reached`, { to: 'debug' }) } catch { /* diagnostics only */ }
       return
     }
-    const { diff, scoped } = await reviewDiff($, files)
-    if (!diff) {
-      try { await $.ui.log(`${agentLabel(a)} (${a.category}): review skipped: no diff`, { to: 'debug' }) } catch { /* diagnostics only */ }
-      return
+    const task = a.taskTitle ? `${a.taskTitle}\n\n${a.task}` : a.task
+    const onReport = files.length === 0 && report !== undefined
+    let prompt: string
+    if (onReport) prompt = buildReportReviewPrompt({ task, report })
+    else {
+      const { diff, scoped } = await reviewDiff($, files)
+      if (!diff) {
+        try { await $.ui.log(`${agentLabel(a)} (${a.category}): review skipped: no diff`, { to: 'debug' }) } catch { /* diagnostics only */ }
+        return
+      }
+      prompt = buildReviewPrompt({ task, diff, scoped })
     }
-    const prompt = buildReviewPrompt({ task: a.taskTitle ? `${a.taskTitle}\n\n${a.task}` : a.task, diff, scoped })
+    const system = onReport ? REPORT_REVIEW_SYSTEM : REVIEW_SYSTEM
+    const what = onReport ? 'report review' : 'review'
     let text = ''
     let why = 'no reply'
     const costBefore = ledger.consultCost
     try {
       // The engine answers { isAnswered, text, usage }; the published 2.1.277 types still say string.
-      const reply = await $.model.complete({ model, system: REVIEW_SYSTEM, prompt, maxTokens: 400 }) as ModelReply
+      const reply = await $.model.complete({ model, system, prompt, maxTokens: 400 }) as ModelReply
       text = typeof reply === 'string' ? reply : reply.isAnswered ? reply.text : ''
       if (typeof reply !== 'string' && !reply.isAnswered) {
         why = reply.reason ?? 'refused'
@@ -1659,7 +1795,7 @@ async function reviewRun($: EngineInterface, a: AgentState, files: readonly stri
         if (reply.reason === 'api-error' && isModelRefusal({ status: reply.status, error: reply.error })) refusedSeniors = refuseTier(refusedSeniors, tierOf(model))
       }
       const usage = typeof reply === 'string' ? undefined : asUsage(reply.usage)
-      ledger = addConsult(ledger, { usage, promptChars: prompt.length + REVIEW_SYSTEM.length, replyChars: text.length }, tierOf(model), config, a.category)
+      ledger = addConsult(ledger, { usage, promptChars: prompt.length + system.length, replyChars: text.length }, tierOf(model), config, a.category)
       await save($)
     } catch (err) {
       why = String((err as { message?: unknown } | undefined)?.message ?? err).slice(0, 200)
@@ -1668,7 +1804,7 @@ async function reviewRun($: EngineInterface, a: AgentState, files: readonly stri
     const reviewCost = Math.max(0, ledger.consultCost - costBefore)
     recFor(a.id, (ra, at) => ({ k: 'review', a: ra, at, score: review?.score ?? 0, c: Math.round(reviewCost * 1e6) / 1e6 }))
     if (!review) {
-      try { await $.ui.log(`${agentLabel(a)} (${a.category}): review gave no score (${text ? 'no SCORE line' : why})`) } catch { /* best effort */ }
+      try { await $.ui.log(`${agentLabel(a)} (${a.category}): ${what} gave no score (${text ? 'no SCORE line' : why})`) } catch { /* best effort */ }
       return
     }
     await storeQueue(async () => {
@@ -1695,8 +1831,8 @@ async function reviewRun($: EngineInterface, a: AgentState, files: readonly stri
     if (review.score < config.minReviewScore) markQualityFailed(a.id)
     try {
       const reasons = review.reasons.length > 0 ? `: ${review.reasons.join('; ')}` : ''
-      await $.ui.log(`${agentLabel(a)} (${a.category}): review ${review.score}/5${reasons}`.slice(0, 600))
-      if (review.score <= 2) await $.ui.toast(`${shortName(a)}: review ${review.score}/5`)
+      await $.ui.log(`${agentLabel(a)} (${a.category}): ${what} ${review.score}/5${reasons}`.slice(0, 600))
+      if (review.score <= 2) await $.ui.toast(`${shortName(a)}: ${what} ${review.score}/5`)
     } catch { /* the note is best effort */ }
   } catch { /* a failing review must never disturb the session */ }
 }
@@ -1786,7 +1922,7 @@ const COMMAND_HELP = [
   '/escalator resume <id>|all: resume agents paused at the human level',
   '/escalator replay [option=value ...]: replay the recorded sessions with other options (thresholds, graceSteps, levels, ...) and compare, without any model call',
   '/escalator replay sweep option=values ...: replay the recorded sessions over a grid of options (ranges lo..hi or lo..hi:step, lists a,b,c, alternatives of levels separated by |; at most 200 combinations) and rank them by false positives and stuck agents caught',
-  '/escalator reset: forget the learned stats (history and category cache are kept)',
+  '/escalator reset: forget the learned stats and the remembered agent types (history and category cache are kept)',
   '/escalator reset history: clear the recorded session history',
   '/escalator reset recordings: clear the sessions recorded for replay (option recordSessions)',
   '/escalator help: this list',

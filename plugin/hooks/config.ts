@@ -31,16 +31,17 @@ export type Config = {
   effortBoost: Effort               // lowest effort the effort level raises a request to (it always goes at least one step up)
   learningHalfLifeDays: number      // days after which learned evidence counts half; 0 = never fades
   notifyLead: boolean               // message the lead (main conversation) when an agent is swapped up or needs a human
+  delegationHint: boolean           // tell the user once per session when the lead does a large multi-file job alone
   reviewRate: number                // share (0 to 1) of the runs of cheap models reviewed by a senior model; 0 = off
   reviewModel: string               // model that reviews a sampled run; empty = the senior model
   explore: number                   // weight (0 to 1) of exploring a tier below the learned one at spawn; 0 = off
-  respectExplicitModel: boolean     // a model asked for in the Agent call is never changed at spawn by learning or exploration
+  respectExplicitModel: boolean     // a model named in the Agent call is kept exactly at spawn; off: it is a ceiling for the start
   learnByCost: boolean              // pick the start tier by cost per accepted run once there is enough cost data
   modelCategories: boolean          // classify tasks with a small model (one short call per uncached spawn) instead of keywords only
   minReviewScore: number            // lowest review score (1 to 5) of an accepted run
   reworkWindowMinutes: number       // minutes after a cheap agent's run during which a lead edit of its files counts as rework; 0 = off
   recordSessions: number            // sessions whose observation stream is recorded for /escalator replay (newest kept); 0 = off
-  startTier: StartTier              // auto: a spawn that names no model starts on the tier of its category; requested: as asked
+  startTier: StartTier              // auto: a Claude Code type with no model, or a model named in the call, starts on its category's tier; requested: as asked
 }
 
 export type StartTier = 'auto' | 'requested'
@@ -89,6 +90,8 @@ export const DEFAULT_CONFIG: Config = {
   effortStep: false,
   effortBoost: 'high',
   notifyLead: true,
+  // Zero tokens and no change to the lead: a notice to the user only, so on by default.
+  delegationHint: true,
   learningHalfLifeDays: 30,
   modelOverrides: {},
   verifyCommand: '',
@@ -247,6 +250,7 @@ function optionValues(c: Config): [string, unknown][] {
     ['verifyCommand', c.verifyCommand], ['verifyTimeoutSeconds', c.verifyTimeoutSeconds],
     ['maxConsultsPerAgent', c.maxConsultsPerAgent], ['maxConsultsPerSession', c.maxConsultsPerSession],
     ['consultBudgetUsd', c.consultBudgetUsd], ['pauseAtHuman', c.pauseAtHuman], ['notifyLead', c.notifyLead],
+    ['delegationHint', c.delegationHint],
     ['deescalateAfter', c.deescalateAfter], ['learningHalfLifeDays', c.learningHalfLifeDays],
     ['reviewRate', c.reviewRate], ['reviewModel', c.reviewModel], ['explore', c.explore],
     ['respectExplicitModel', c.respectExplicitModel], ['learnByCost', c.learnByCost], ['modelCategories', c.modelCategories],
@@ -332,6 +336,7 @@ export function parseConfig(raw: Raw | undefined, fallback: Config = DEFAULT_CON
       effortStep,
       effortBoost: parseEffort(o.effortBoost, d.effortBoost),
       notifyLead: bool(o.notifyLead, d.notifyLead),
+      delegationHint: bool(o.delegationHint, d.delegationHint),
       learningHalfLifeDays: halfLife !== undefined && halfLife >= 0 ? halfLife : d.learningHalfLifeDays,
       reviewRate: rate !== undefined && rate >= 0 && rate <= 1 ? rate : d.reviewRate,
       explore: explore !== undefined && explore >= 0 && explore <= 1 ? explore : d.explore,

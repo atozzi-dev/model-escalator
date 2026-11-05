@@ -35,9 +35,9 @@ export type Cell = {
 export type Stats = Record<string, Partial<Record<Tier, Cell>>>
 
 // Keyword categories, tried in this order on the description. Labels and their order are the original ones, with
-// 'review' (new) inserted before 'explore' and 'feature' (new) last, so a description that landed in a label before
-// still does, except one that also says "review"/"audit" and nothing earlier in the list (it was 'explore' or 'other').
-// The patterns grew and now stop at word edges.
+// 'review' (new) after 'ui' and 'feature' (new) after it, and 'explore' moved last: with `startTier: auto` it starts on
+// haiku, so it is the lowest-priority label and only wins when no other label matches ("Read the design and
+// implement X" is a feature). The patterns grew and now stop at word edges.
 const KEYWORDS: [RegExp, string][] = [
   [/\b(?:test\w*|specs?|coverage|e2e|jest|vitest|pytest|tdd|assert\w*)\b/i, 'tests'],
   [/\b(?:fix\w*|bugs?|bugfix\w*|debug\w*|errors?|crash\w*|fail\w*|broken|regress\w*|defects?|exceptions?|stack ?traces?|hotfix\w*|repair\w*|flaky)\b/i, 'bugfix'],
@@ -46,8 +46,8 @@ const KEYWORDS: [RegExp, string][] = [
   [/\b(?:migrat\w*|schemas?|databases?|db|sql\w*|postgres\w*|queries|query|datasets?|csv|etl)\b/i, 'data'],
   [/\b(?:ui|ux|css|scss|tailwind|components?|layouts?|styl(?:e|es|ing)|front-?end|buttons?|modals?|responsive|svg|html|themes?)\b/i, 'ui'],
   [/\b(?:review\w*|audit\w*|critique|assess\w*|vet|proofread\w*)\b/i, 'review'],
-  [/\b(?:search\w*|find\w*|explor\w*|research\w*|read|reads|investigat\w*|survey\w*|inspect\w*|map|locate|trace|analy[sz]\w*|summari[sz]\w*|understand\w*|look(?:ing)? (?:up|into|for|at))\b/i, 'explore'],
   [/\b(?:implement\w*|add|adds|adding|creat\w*|build|develop\w*|introduc\w*|new|features?|wire|wiring|extend\w*|support)\b/i, 'feature'],
+  [/\b(?:search\w*|find\w*|explor\w*|research\w*|read|reads|investigat\w*|survey\w*|inspect\w*|map|locate|trace|analy[sz]\w*|summari[sz]\w*|understand\w*|look(?:ing)? (?:up|into|for|at))\b/i, 'explore'],
 ]
 
 // The agent type read as words ("security-reviewer" -> security, reviewer). Strong hints win over the description:
@@ -66,10 +66,13 @@ function typeHint(subagentType: string, table: [RegExp, string][]): string | und
   return undefined
 }
 
-// The label whose pattern appears first in the brief (a brief opens with what the task is: "Implement ... test first").
+// The label whose pattern appears first in the brief (a brief opens with what the task is: "Implement ... test first"),
+// never 'explore': a brief often opens with what to read before the work ("Read the spec, then implement ..."), so its
+// head is no evidence of read-only work. The first other label found in the head, if any.
 function firstLabel(text: string): string | undefined {
   let best: { at: number; label: string } | undefined
   for (const [re, label] of KEYWORDS) {
+    if (label === 'explore') continue
     const at = text.search(re)
     if (at >= 0 && (best === undefined || at < best.at)) best = { at, label }
   }
@@ -77,7 +80,10 @@ function firstLabel(text: string): string | undefined {
 }
 
 // `type:label`. The label comes from, in order: the agent type when it names a role (reviewer, tester, writer), the
-// description (keyword rows in order), a weak type hint (explorer), the first words of the prompt, else 'other'.
+// description (keyword rows in order, explore last), a weak type hint (explorer, scout, the built-in Explore), the first
+// words of the prompt (never explore), else 'other'. Explore starts on haiku with `startTier: auto` (see `AUTO_START`),
+// so it needs clear evidence of read-only work: a description that names nothing but reading, or the agent type. A task
+// that is unclear gets 'other' and starts on the model it asked for.
 export function categorize(subagentType: string, description: string, prompt?: string): string {
   let label: string | undefined
   try {
@@ -95,15 +101,19 @@ export function categorize(subagentType: string, description: string, prompt?: s
 
 // --- Auto start tier (option `startTier: auto`) ---
 //
-// Learning and exploration only move up from the tier they are given, and most agents inherit the lead's model, so
-// without a lower start nothing would ever run on a cheaper model. With `startTier: auto`, a spawn whose Agent call
-// names no model starts on a tier chosen by the category's label: the cheapest model that usually does that kind of
-// work well. The escalation ladder and the quality rule (`QUALITY`) catch the tasks where it does not.
-// - `explore` on haiku: searching, reading and summarising. Its quality is not measured either (no diff), but a miss
-//   costs little: the lead reads the findings and acts on them itself.
+// Learning and exploration only move up from the tier they are given, and most agents inherit the lead's model (or get
+// the one the lead names, often the strongest), so without a lower start nothing would ever run on a cheaper model.
+// With `startTier: auto`, a spawn of a Claude Code agent type with no model in the call, and any spawn whose call names
+// a model, starts on a tier chosen by the category's label (see `startChoice`): the cheapest model that usually does
+// that kind of work well. The escalation ladder and the quality rule (`QUALITY`) catch the tasks where it does not.
+// - `explore` on haiku: searching, reading and summarising. A read-only run has no diff, so it is judged on its final
+//   report when sampled for review (`reviewRate`), like any other run; a miss costs little, since the lead reads the
+//   findings and acts on them itself. Haiku is the most aggressive start, so `categorize` gives explore only on clear
+//   signs of read-only work (the description or the agent type), never from the head of the brief alone.
 // - code, tests, docs, data and ui on sonnet: work that verification, sampled reviews and rework can check.
-// - `review`, `other` and any other label start as asked: a review's findings are the result, and no verification,
-//   diff review or rework can tell a review that missed an issue; an unknown kind of task has no evidence at all.
+// - `review`, `other` and any other label start as asked: a review's findings are the result. A sampled review is
+//   judged on its report like any read-only run, but a review that missed an issue still looks fine to the checks,
+//   so reviews are not lowered; an unknown kind of task has no evidence at all.
 export const AUTO_START: Readonly<Record<string, Tier>> = {
   explore: 'haiku', bugfix: 'sonnet', feature: 'sonnet', refactor: 'sonnet', tests: 'sonnet', docs: 'sonnet', data: 'sonnet', ui: 'sonnet',
 }
@@ -129,19 +139,113 @@ export function autoStartTier(category: string, asked: Tier, own: Tier | null = 
   return cheaper(target, ref)
 }
 
-// Agent types known to run on the parent's model when the call names none (their definition names no model).
-export const INHERITING_TYPES: readonly string[] = ['general-purpose']
+// Agent types of Claude Code known to run on the parent's model when the call names none (their definition says
+// `inherit`; seen in the built-in definitions of Claude Code 2.1.295).
+export const INHERITING_TYPES: readonly string[] = ['general-purpose', 'Explore', 'Plan']
 
 // The tier an agent of `type` runs on by itself when the call names no model: the parent's for an inheriting type,
-// else the latest `ownTier` seen on an agent of that type in this session (`agents` in spawn order), else undefined.
-export function ownTierOf(type: string, parentTier: Tier, agents: Iterable<{ category: string; ownTier?: Tier }>): Tier | undefined {
-  if (INHERITING_TYPES.includes(type)) return parentTier
+// else the latest `ownTier` seen on an agent of that type in this session (`agents` in spawn order), else the tier
+// remembered for the type in the store (`remembered`), else undefined. A session observation always wins. `engine`
+// says whether Claude Code provides the type: a definition file that takes the name of a built-in is not known to
+// inherit.
+export function ownTierOf(
+  type: string, parentTier: Tier, agents: Iterable<{ category: string; ownTier?: Tier }>, remembered?: Tier, engine = true,
+): Tier | undefined {
+  if (engine && INHERITING_TYPES.includes(type)) return parentTier
   let seen: Tier | undefined
   for (const a of agents) {
     const i = a.category.lastIndexOf(':')
     if (a.ownTier !== undefined && i >= 0 && a.category.slice(0, i) === type) seen = a.ownTier
   }
-  return seen
+  return seen ?? remembered
+}
+
+// Claude Code's own agent types (its built-in definitions). The list may need updating with new versions of Claude
+// Code: an unknown new built-in is treated as a definition, the safe side (never started lower).
+export const BUILTIN_TYPES: readonly string[] = ['general-purpose', 'Explore', 'Plan', 'statusline-setup', 'claude-code-guide', 'web-fetch', 'claude']
+const BUILTIN_LOWER = new Set(BUILTIN_TYPES.map((t) => t.toLowerCase()))
+
+// Whether the agent type of a spawn is Claude Code's own: a built-in type (matched without case) or an in-process
+// teammate, unless `provider` names a plugin other than the engine (a plugin's agent that takes a built-in name). The
+// provider alone is not enough: the engine also loads the user's own definitions (`.claude/agents/`), which may report
+// it as well, so any other type name counts as a definition. A missing or malformed provider does not block a built-in.
+export function isEngineType(e: { subagentType?: unknown; isTeammate?: unknown; provider?: unknown }): boolean {
+  const type = typeof e.subagentType === 'string' ? e.subagentType.toLowerCase() : ''
+  if (e.isTeammate !== true && !BUILTIN_LOWER.has(type)) return false
+  const p = e.provider
+  const plugin = typeof p === 'object' && p !== null ? (p as { plugin?: unknown }).plugin : undefined
+  return !(typeof plugin === 'string' && plugin !== 'engine')
+}
+
+// --- Who chose the model of a spawn ---
+//
+// Where a spawn starts depends on who chose its model:
+// - a model named in the Agent call is the lead's choice. With `respectExplicitModel` it is kept exactly. Otherwise,
+//   with `startTier: auto`, it is a ceiling: the start is the category tier (`autoStartTier`), never above the named
+//   model, whatever the agent type (the call overrides the definition).
+// - no model named, and the type is Claude Code's own (a built-in or a teammate, see `isEngineType`): nobody chose the
+//   model, the agent inherits it. `startTier: auto` starts it on its category tier, never above the tier the type
+//   runs on by itself.
+// - no model named, and the type comes from a definition file (the user's or a plugin's), or is not known to be
+//   Claude Code's own: a person chose that model in the file. It is never lowered; learning may only move it up from the tier the
+//   definition runs on, and leaves the spawn alone while that tier is not known.
+// `startTier: requested` turns every lower start off. `own`: the tier the type runs on by itself when known (see
+// `ownTierOf`). The result: `asked`, the tier the agent would run on without the mod (the reference of a rewrite);
+// `floor`, where learning and exploration start (never above `asked`); `learn`, whether they may move the start at
+// all; `lowers`, the rule that starts the agent below `asked`, when it does.
+export type StartChoice = { asked: Tier; floor: Tier; learn: boolean; lowers?: 'auto' | 'ceiling' }
+
+export function startChoice(i: {
+  category: string; parentTier: Tier; called?: Tier; engine: boolean; own?: Tier; startTier: 'auto' | 'requested'; respectExplicit: boolean
+}): StartChoice {
+  const auto = i.startTier === 'auto'
+  if (i.called !== undefined) {
+    if (i.respectExplicit) return { asked: i.called, floor: i.called, learn: false }
+    const floor = auto ? autoStartTier(i.category, i.called) : i.called
+    return floor === i.called ? { asked: i.called, floor, learn: true } : { asked: i.called, floor, learn: true, lowers: 'ceiling' }
+  }
+  if (!i.engine) return i.own === undefined ? { asked: i.parentTier, floor: i.parentTier, learn: false } : { asked: i.own, floor: i.own, learn: true }
+  if (!auto) return { asked: i.parentTier, floor: i.parentTier, learn: true }
+  const asked = i.own ?? i.parentTier
+  const floor = autoStartTier(i.category, i.parentTier, i.own ?? null)
+  return floor === asked ? { asked, floor, learn: true } : { asked, floor, learn: true, lowers: 'auto' }
+}
+
+// --- Remembered agent types (store key `agentTypes`) ---
+//
+// The own tier of each agent type seen in past sessions, so the first spawn of a type in a new session already knows
+// it (see `ownTierOf`): an engine type that does not inherit can start on sonnet for code, and a definition can be
+// moved up by learning from the tier it runs on. One entry per type: the tier and when it was last seen. At most
+// AGENT_TYPES_LIMIT types; the least recently seen go first. Parsed defensively: anything malformed is ignored.
+export const AGENT_TYPES_LIMIT = 100
+const MAX_TYPE_CHARS = 200
+
+export type AgentTypes = Record<string, { tier: Tier; seenAt: number }>
+
+export function parseAgentTypes(raw: unknown): AgentTypes {
+  const out: AgentTypes = {}
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return out
+  for (const [type, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (type === '' || type === '__proto__' || type.length > MAX_TYPE_CHARS || typeof v !== 'object' || v === null) continue
+    const { tier, seenAt } = v as { tier?: unknown; seenAt?: unknown }
+    if (!LADDER.includes(tier as Tier) || typeof seenAt !== 'number' || !Number.isFinite(seenAt)) continue
+    out[type] = { tier: tier as Tier, seenAt }
+  }
+  return out
+}
+
+// The map with `type` set to `tier` as seen at `seenAt`, bounded to AGENT_TYPES_LIMIT by dropping the oldest.
+export function rememberAgentType(types: AgentTypes, type: string, tier: Tier, seenAt: number): AgentTypes {
+  const next: AgentTypes = { ...types, [type]: { tier, seenAt } }
+  const keys = Object.keys(next)
+  if (keys.length <= AGENT_TYPES_LIMIT) return next
+  const oldest = keys.sort((a, b) => next[a]!.seenAt - next[b]!.seenAt).slice(0, keys.length - AGENT_TYPES_LIMIT)
+  for (const k of oldest) delete next[k]
+  return next
+}
+
+export function storedOwnTier(types: AgentTypes, type: string): Tier | undefined {
+  return Object.prototype.hasOwnProperty.call(types, type) ? types[type]!.tier : undefined
 }
 
 // One line for the session report: how many runs `startTier: auto` started below the asked tier, and how many of them

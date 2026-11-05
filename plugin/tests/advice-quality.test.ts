@@ -105,16 +105,36 @@ test('cheaper runs without any active signal are not measured', async () => {
   expect(one(st, BARE).quality).toBe('unmeasured')
 })
 
-test('read-only work is never measured, even with cheaper runs, reviews and a verifyCommand', async () => {
+test('read-only work is measured only by reviews of the cheaper tier reports', async () => {
   for (const category of ['security-reviewer:review', 'scout:explore']) {
     let st = runs({}, category, 'opus', 30, 0.94)
     st = runs(st, category, 'sonnet', 8)
     st = reviews(st, category, 'sonnet', [5, 5, 5, 5])
     const a = one(st, { verify: true, reviewRate: 0.5 })
-    expect(a.quality).toBe('unmeasured')
-    expect(a.strength).toBe('moderate')
-    expect(a.qualityNote).toContain('read-only')
+    expect(a.quality).toBe('measured')
+    expect(a.signal).toBe('reviews')
+    expect(a.strength).toBe('strong')
+    expect(a.qualityNote).toBe('reviews of the reports of sonnet runs average 5.0')
+    // Clean runs with no report reviews: a verifyCommand or rework says nothing about read-only work.
+    const bare = one(runs(runs({}, category, 'opus', 30, 0.94), category, 'sonnet', 8), { verify: true, reworkWindowMinutes: 30 })
+    expect(bare.quality).toBe('unmeasured')
+    expect(bare.strength).toBe('moderate')
+    expect(bare.qualityNote).toContain('read-only')
   }
+})
+
+test('read-only work is guarded by sampled report reviews, unmeasured without them', async () => {
+  const st = runs({}, 'scout:explore', 'opus', 20)
+  const g = one(st, { reviewRate: 0.25 })
+  expect(g.quality).toBe('guarded')
+  expect(g.guard).toBe('reviews')
+  expect(g.qualityNote).toBe('if sonnet does worse, sampled senior reviews of its reports (reviewRate) would show it and learning would move this category back up')
+  const off = one(st, { verify: true })
+  expect(off.quality).toBe('unmeasured')
+  expect(off.qualityNote).toBe('read-only work: only its reports can be reviewed, and reviewRate is off')
+  const high = one(st, { reviewRate: 0.25, baseline: 'sonnet' })
+  expect(high.quality).toBe('unmeasured')
+  expect(high.qualityNote).toContain('below the lead')
 })
 
 // --- guarded: no evidence yet, a check that would catch a drop after the switch ---
@@ -186,7 +206,7 @@ const sample = (over: Partial<Advice> = {}): Advice => ({
 
 const unmeasured = (over: Partial<Advice> = {}): Advice => sample({
   category: 'security-reviewer:review', strength: 'moderate', quality: 'unmeasured', signal: undefined, cheaperRuns: undefined,
-  qualityNote: 'read-only work: no files to review, test or rework', ...over,
+  qualityNote: 'read-only work: only its reports can be reviewed, and reviewRate is off', ...over,
 })
 
 const guarded = (over: Partial<Advice> = {}): Advice => sample({
@@ -223,9 +243,14 @@ test('an unmeasured line says plainly what the mod cannot tell', async () => {
   const out = formatAdvice([unmeasured()])
   expect(out.lines[0]).toBe(
     'security-reviewer:review never got stuck in 18 runs on opus. On sonnet it would cost about $0.47 instead of $0.94 ' +
-    'per run, but the mod cannot tell whether it would find the same issues (read-only work: no files to review, test or ' +
-    'rework). Try sonnet on a few runs and compare the results yourself.')
+    'per run, but the mod cannot tell whether it would find the same issues (read-only work: only its reports can be ' +
+    'reviewed, and reviewRate is off). Turn on reviewRate to review the reports of sonnet runs, or try sonnet on a few ' +
+    'runs and compare the results yourself.')
   expect(out.hint).toBe('')
+  // With reviewRate on, read-only work is unmeasured only when the cheaper model is not below the lead's.
+  const on = formatAdvice([unmeasured({ qualityNote: 'x' })], { reviewRate: 0.25 }).lines[0]!
+  expect(on).toContain('Try sonnet on a few runs and compare the results yourself.')
+  expect(on).not.toContain('Turn on reviewRate')
 })
 
 test('an unmeasured line without costs uses the price ratio', async () => {

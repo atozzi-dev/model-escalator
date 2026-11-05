@@ -100,8 +100,16 @@ function failedAttempts(a: AgentState): string[] {
   })
 }
 
+// The tier row: the tier now, the tier it started on (what the call, the definition or the mod's start chose), and the
+// tier asked when startTier auto started it lower.
+function tierValue(a: AgentState & { lowered?: Tier }): string {
+  const asked = a.lowered === undefined ? undefined : `asked ${a.lowered}, startTier auto`
+  if (a.tier === a.startTier) return asked === undefined ? `${a.tier} (since the start)` : `${a.tier} (started lower: ${asked})`
+  return asked === undefined ? `${a.tier} (started on ${a.startTier})` : `${a.tier} (started on ${a.startTier}, ${asked})`
+}
+
 export type DetailInput = {
-  agent: AgentState
+  agent: AgentState & { lowered?: Tier }   // lowered: the tier asked, when startTier auto started the agent below it
   node?: GraphNode                 // absent when the map folded the agent away
   events: readonly GraphEvent[]
   consult: Gate
@@ -111,10 +119,9 @@ export type DetailInput = {
 export function buildDetail(i: DetailInput): NodeDetail {
   const a = i.agent
   const status = a.paused ? 'paused' : i.node?.status ?? 'done'
-  const tier = a.tier === a.startTier ? `${a.tier} (as requested)` : `${a.tier} (requested ${a.startTier})`
   const rows = [
     { label: 'Category', value: a.category },
-    { label: 'Tier', value: tier },
+    { label: 'Tier', value: tierValue(a) },
     { label: 'State', value: status },
     { label: 'Difficulty', value: `level ${a.level}, score ${(Math.round(a.score * 10) / 10).toString()}` },
     { label: 'Cost', value: i.node ? money(i.node.cost) : 'unknown' },

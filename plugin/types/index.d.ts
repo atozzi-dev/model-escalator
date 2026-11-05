@@ -107,6 +107,8 @@ declare module 'claude-code' {
           readonly retired?: readonly string[]
         }
         drawnSeq?: number
+        // The delegation hint of this session: shown once (hinted), never again once the lead spawned a writing subagent.
+        leadHint?: { hinted: boolean; delegated: boolean }
       }
       // Set once the cheaper-model hint was shown in this session, so a module reload does not show it twice.
       'advice-hinted': boolean
