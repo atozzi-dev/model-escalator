@@ -2,7 +2,7 @@
 // that reads the agent's diff, the rubrics and the prompts sent to the review model (a diff for a run that edited
 // files, the final report for a read-only run), the parser of its verdict, and the formatting of the review counters
 // kept in the learned stats. Nothing here calls the host. Never throws.
-import { tierRank, type Tier } from './detector'
+import { readOnlyCommand, tierRank, type Tier } from './detector'
 import { redactSecrets, truncateMiddle } from './dossier'
 import type { Cell, Stats } from './learning'
 
@@ -70,6 +70,34 @@ export function editedPath(tool: unknown, input: Record<string, unknown>): strin
   if (!field) return undefined
   const v = input?.[field]
   return typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined
+}
+
+const SHELL_TOOLS = ['Bash', 'PowerShell']
+// Commands that touch nothing by themselves (a redirect or `tee` in the same command is still checked).
+const HARMLESS = new Set(['cd', 'pwd', 'echo', 'true', 'which', 'test', '['])
+
+// Whether a shell tool call may have written a file: any command that is not a plain reader (`readOnlyCommand`), checked
+// for every part of a `&&` / `||` / `;` chain, and any output redirect or `tee`. Conservative: when in doubt it says
+// yes, so a run is never called read-only because of it. False for other tools and for input with no command. Never throws.
+export function mayWriteThroughShell(tool: unknown, input: Record<string, unknown>): boolean {
+  try {
+    if (typeof tool !== 'string' || !SHELL_TOOLS.includes(tool)) return false
+    const cmd = input?.command
+    if (typeof cmd !== 'string' || cmd.trim() === '') return false
+    // Redirects to a descriptor or to the null device write nothing.
+    const bare = cmd.replace(/\d*>&\d+/g, ' ').replace(/(?:&|\d*)>>?\s*(?:\/dev\/null|nul)\b/gi, ' ')
+    if (bare.includes('>') || /(?:^|[\s|;&])tee(?:\s|$)/.test(bare)) return true
+    for (const part of bare.split(/&&|\|\||;|\n/)) {
+      const p = part.trim()
+      if (p === '') continue
+      const first = (p.split(/\s+/)[0] ?? '').toLowerCase()
+      if (HARMLESS.has(first)) continue
+      if (!readOnlyCommand(p)) return true
+    }
+    return false
+  } catch {
+    return true
+  }
 }
 
 // Read-only diff of the working tree and index against HEAD, with the stat on top. External diff drivers and

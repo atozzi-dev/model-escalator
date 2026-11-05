@@ -3,7 +3,7 @@ import { resetState } from '../hooks/register'
 import { parseConfig } from '../hooks/config'
 import { record, recordReview, type Stats } from '../hooks/learning'
 import {
-  buildReportReviewPrompt, buildReviewPrompt, diffArgv, editedPath, formatReviews, handbackReport, isCheaper, parseReview,
+  buildReportReviewPrompt, buildReviewPrompt, diffArgv, editedPath, formatReviews, handbackReport, isCheaper, mayWriteThroughShell, parseReview,
   REPORT_REVIEW_SYSTEM, reportText, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun,
 } from '../hooks/review'
 
@@ -92,6 +92,24 @@ test('REPORT_REVIEW_SYSTEM: a report rubric that cannot rerun the search, ignore
   expect(parseReview('SCORE: 3\n- vague about where the cache lives')).toEqual({ score: 3, reasons: ['vague about where the cache lives'] })
 })
 
+test('mayWriteThroughShell: a shell command that may write is told from one that only reads', () => {
+  const w = (cmd: string, tool = 'Bash') => mayWriteThroughShell(tool, { command: cmd })
+  expect(w("printf 'div() { echo $(($1/$2)); }' >> lib.sh && source ./lib.sh && div 7 2 && bash test.sh")).toBe(true)
+  expect(w('echo hi > out.txt')).toBe(true)
+  expect(w('cat a.txt | tee b.txt')).toBe(true)
+  expect(w('sed -i s/a/b/ f.ts')).toBe(true)
+  expect(w('ls && rm -rf build')).toBe(true)
+  expect(w('npm test')).toBe(true)
+  expect(w('Set-Content x.txt hi', 'PowerShell')).toBe(true)
+  for (const c of ['grep -rn readCache src', 'cat src/a.ts', 'ls -la', 'git status', 'git log --oneline | head -5', 'cd src && grep foo a.ts',
+    'grep foo a.ts 2>&1', 'cat a.ts 2>/dev/null', 'find . -name "*.ts" ; ls']) expect(w(c)).toBe(false)
+  // Not a shell tool, or no command: nothing written through a shell.
+  expect(mayWriteThroughShell('Edit', { command: 'rm x' })).toBe(false)
+  expect(mayWriteThroughShell('Grep', { pattern: 'x' })).toBe(false)
+  expect(mayWriteThroughShell('Bash', {})).toBe(false)
+  expect(mayWriteThroughShell('Bash', undefined as never)).toBe(false)
+})
+
 test('handbackReport: the message of a SubagentHandback call, nothing for other tools', () => {
   expect(handbackReport('SubagentHandback', { message: 'Found it in src/a.ts:12' })).toBe('Found it in src/a.ts:12')
   expect(handbackReport('SubagentHandback', { message: '   ' })).toBeUndefined()
@@ -177,7 +195,7 @@ function wire(on: any, env: Record<string, string>, opts: {
   const h: H = { calls: [], runs: [], logs: [], debug: [], toasts: [], prompts: [] }
   let n = 0
   on('agent.spawn', (_$: unknown, e: any) => { h.prompts.push(String(e.prompt)); return { model: e.model ?? 'haiku', agentId: 'a' + ++n } })
-  on('tool.call', () => ({ result: 'ok' }) as never)
+  on('tool.call', (_$: unknown, e: any) => (String(e.command ?? '').includes('bash test.sh') ? { result: 'FAIL: unrelated', isError: true } : { result: 'ok' }) as never)
   on('turn.complete', () => ({ text: 'done' }) as never)
   on('process.run', async (_$: unknown, e: any) => {
     h.runs.push({ argv: e.argv, timeoutMs: e.init?.timeoutMs })
@@ -310,6 +328,61 @@ test('a read-only run is reviewed on its handed-back report: report rubric, task
   const stats = await command($, 'stats')
   expect(stats).toMatch(/general-purpose:explore haiku: average 4\.0\/5 over 1 review/)
   expect(await command($, 'report')).toContain('senior consults: 1')
+})
+
+// A run that wrote only through the shell is not a read-only run.
+test('a run that wrote through a shell command is not called read-only: no report review, no call', { options: RATE }, async ($, on) => {
+  const h = wire(on, {})
+  await $.session.start({ cwd: '/work' } as never)
+  const id = await spawn($, 'sonnet', 'Add a function div A B to lib.sh')
+  await $.tool.call({ tool: 'Read', file_path: 'lib.sh', agentId: id } as never)
+  await $.tool.call({ tool: 'Read', file_path: 'test.sh', agentId: id } as never)
+  // The command fails (an unrelated test, see wire), yet it may have written the file.
+  await $.tool.call({ tool: 'Bash', command: "printf 'div() { echo $(($1/$2)); }' >> lib.sh && source ./lib.sh && div 7 2 && bash test.sh", agentId: id } as never)
+  await handback($, id, 'I added div to lib.sh: div 7 2 prints 3. One unrelated test in test.sh still fails.')
+  await finish($, id, { answer: 'x' })
+  await sleep(120)
+  expect(h.calls.length).toBe(0)
+  expect(h.runs.length).toBe(0)
+  expect(h.debug.some((l) => l.includes('review skipped: files changed through the shell are not attributed'))).toBe(true)
+  expect(await command($, 'stats')).not.toContain('average')
+})
+
+test('shell writes do not leak into the next run of the same agent', { options: RATE }, async ($, on) => {
+  const h = wire(on, {})
+  await $.session.start({ cwd: '/work' } as never)
+  const id = await scout($, 'haiku')
+  await $.tool.call({ tool: 'Bash', command: 'echo x > a.txt', agentId: id } as never)
+  await finish($, id, { answer: REPORT })
+  await $.tool.call({ tool: 'Grep', pattern: 'readCache', agentId: id } as never)
+  await finish($, id, { turnId: 't2', answer: REPORT })
+  await until(() => h.calls.length > 0)
+  expect(h.calls.length).toBe(1)
+  expect(h.calls[0]!.system).toBe(REPORT_REVIEW_SYSTEM)
+})
+
+test('a run that only reads through the shell still gets the read-only report review', { options: RATE }, async ($, on) => {
+  const h = wire(on, {})
+  await $.session.start({ cwd: '/work' } as never)
+  const id = await scout($, 'haiku')
+  for (const command of ['grep -rn readCache src', 'cat src/loader.ts', 'ls -la src', 'git status'])
+    await $.tool.call({ tool: 'Bash', command, agentId: id } as never)
+  await handback($, id, REPORT)
+  await finish($, id, { answer: 'x' })
+  await until(() => h.calls.length > 0)
+  expect(h.calls[0]!.system).toBe(REPORT_REVIEW_SYSTEM)
+  expect(h.calls[0]!.prompt).toContain('changed no file')
+})
+
+test('a run with an Edit and a shell write is still reviewed on its diff', { options: RATE }, async ($, on) => {
+  const h = wire(on, {})
+  await $.session.start({ cwd: '/work' } as never)
+  const id = await spawn($)
+  await edit($, id, 'src/a.ts')
+  await $.tool.call({ tool: 'Bash', command: 'echo x >> notes.txt', agentId: id } as never)
+  await finish($, id)
+  await until(() => h.calls.length > 0)
+  expect(h.calls[0]!.system).toBe(REVIEW_SYSTEM)
 })
 
 test('without a hand-back, the final answer of a read-only run is its report', { options: RATE }, async ($, on) => {
