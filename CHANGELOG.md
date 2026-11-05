@@ -4,6 +4,21 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Added
+
+- Sampled reviews (`reviewRate`) now cover read-only runs. A cheaper run that edited no file is reviewed on the report it handed back to the lead, with a rubric for reports: it answers the task, is grounded in evidence, covers the scope and flags what it could not check. The report is capped and redacted like a diff. A report review judges the report, not facts the reviewer cannot check.
+- The map, the agent detail and the terminal view show when `startTier: auto` started a worker below the model asked.
+- The model that a custom agent type runs on by itself is remembered between sessions, so its first task in a session can start lower too. `/escalator reset` clears it.
+- Delegation hint (option `delegationHint`, on by default): once per session, when the lead writes a large multi-file job by itself and starts no subagent that writes, a toast suggests splitting the work into subagents. It is shown only to you, never to Claude, and costs no tokens.
+
+### Fixed
+
+- With `startTier: auto`, a task starts on Haiku only when its description or agent type says it is read-only work. Briefs that open with "Read …", and descriptions that also name other work, no longer start on Haiku.
+
+### Changed
+
+- Cheaper-model suggestions for review and exploration categories can now be guarded or measured by reviews of the cheaper model's reports.
+
 ## [1.4.1] - 2026-11-05
 
 ### Fixed
