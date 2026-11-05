@@ -11,7 +11,7 @@ import { cacheGet, cachePut, cacheKey, classifierInput, combineCategory, LABELS,
 import { autoStartTier, categorize, costPerAccepted, formatLoweredStarts, formatStats, isAccepted, mulberry32, ownTierOf, parseProjects, projectKey, recommendScopedWithExploration, recordReviewScoped, recordReworkScoped, recordScoped, scopedStats, type Projects, type Stats } from './learning'
 import { emptyGraph, LEAD_ID, reduce, SENIOR_ID, type GraphInput, type GraphState } from './graph'
 import { layoutGraph, type LayoutMemory } from './layout'
-import { renderSvg } from './render-svg'
+import { renderSvgSized } from './render-svg'
 import { renderTree } from './render-text'
 import { createQueue } from './queue'
 import { buildDetail, consultGate, findAgent, selectorChips, swapGate } from './node-detail'
@@ -868,7 +868,8 @@ export const register: Register = (on, options) => {
         out = Box({ flexDirection: 'column', children: panel ? [...rows, panel] : rows })
       } else {
         const { Svg, Box, Text, Button } = $.ui.resolve(e)
-        const svg = Svg({ source: renderSvg(g, layout, { lastSeq: drawnSeq, now }), alt, isInteractive: true })
+        const drawn = renderSvgSized(g, layout, { lastSeq: drawnSeq, now })
+        const svg = Svg({ source: drawn.source, height: drawn.height, alt, isInteractive: true })
         drawnSeq = g.seq
         const panel = nodePanel($, { Box, Text, Button } as UiKit, false)
         out = panel ? Box({ flexDirection: 'column', gap: 1, children: [svg, panel] }) : svg

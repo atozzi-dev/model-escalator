@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { emptyGraph, reduce, type GraphInput, type GraphState } from '../hooks/graph'
 import { layoutGraph } from '../hooks/layout'
-import { escapeXml, renderSvg, SVG_MAX, type RenderOptions } from '../hooks/render-svg'
+import { escapeXml, renderSvg, renderSvgSized, SVG_MAX, type RenderOptions } from '../hooks/render-svg'
 
 const base = (): GraphState => emptyGraph('claude-opus-5-5', 0)
 const run = (inputs: GraphInput[], from: GraphState = base()): GraphState => inputs.reduce((s, i) => reduce(s, i), from)
@@ -80,17 +80,45 @@ test('the svg declares its namespace, viewBox and size', () => {
   expectWellFormed(svg)
 })
 
-// The pane is a side panel, often 400 to 800 px wide: the drawing must not need a horizontal scroll and must
-// shrink, keeping its proportions, when the pane is narrower than the drawing.
-test('the drawing fits a side pane and scales down instead of scrolling', () => {
+// The pane size is not ours to know: the root fills whatever frame it gets and always shows the whole drawing
+// (scales down in a narrow pane, never grows past its natural height in a wide one).
+const rootOf = (svg: string): string => svg.slice(0, svg.indexOf('>'))
+function expectFits(svg: string): void {
+  const root = rootOf(svg)
+  expect(root).toContain('width="100%"')
+  expect(root).toContain('height="100%"')
+  expect(root).toContain('preserveAspectRatio="xMidYMin meet"')
+  expect(root).toContain('style="display:block;width:100%;height:100%"')
+  expect(root).toMatch(/viewBox="0 0 \d+(\.\d+)? \d+(\.\d+)?"/)
+}
+
+test('the drawing fills its frame and always fits whole', () => {
   for (const n of [0, 4, 30]) {
     const g = run(Array.from({ length: n }, (_, i) => spawn('w' + i, i + 1)))
     const svg = draw(g)
-    expect(Number(svg.match(/<svg [^>]*\swidth="(\d+)"/)?.[1])).toBeLessThanOrEqual(480)
-    const root = svg.slice(0, svg.indexOf('>'))
-    expect(root).toContain('max-width:100%')
-    expect(root).toContain('height:auto')
+    expectFits(svg)
+    expect(rootOf(svg)).not.toContain('max-width')
+    expect(svg).toMatch(/viewBox="0 0 (\d+) (\d+)"/)
+    const [, w, h] = svg.match(/viewBox="0 0 (\d+(?:\.\d+)?) (\d+(?:\.\d+)?)"/) ?? []
+    expect(Number(w)).toBeLessThanOrEqual(480)
+    expect(svg).toContain(`<rect class="bg" width="${w}" height="${h}"/>`)
   }
+})
+
+test('renderSvgSized reports the natural size, also on the degraded paths', () => {
+  const g = run(Array.from({ length: 6 }, (_, i) => spawn('w' + i, i + 1)))
+  const l = layoutGraph(g)
+  for (const budget of [undefined, 6000, 1]) {
+    const r = renderSvgSized(g, l, budget === undefined ? {} : { budget })
+    expect(r.source).toBe(renderSvg(g, l, budget === undefined ? {} : { budget }))
+    expect(r.source.length).toBeLessThan(SVG_MAX)
+    expectFits(r.source)
+    expect(r.source).toContain(`viewBox="0 0 ${r.width} ${r.height}"`)
+    expect(r.height).toBeGreaterThan(0)
+  }
+  const lead = renderSvgSized(g, l, { budget: 1 })
+  expect(lead.source).toContain('data-detail="lead"')
+  expect(lead.height).toBeLessThan(renderSvgSized(g, l).height)
 })
 
 test('the legend is a compact footer under the drawing', () => {
