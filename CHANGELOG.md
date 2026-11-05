@@ -4,11 +4,13 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-05
+
 ### Added
 
 - Sampled reviews (`reviewRate`) now cover read-only runs. A cheaper run that edited no file is reviewed on the report it handed back to the lead, with a rubric for reports: it answers the task, is grounded in evidence, covers the scope and flags what it could not check. The report is capped and redacted like a diff. A report review judges the report, not facts the reviewer cannot check.
 - The map, the agent detail and the terminal view show when `startTier: auto` started a worker below the model asked.
-- The model that a custom agent type runs on by itself is remembered between sessions, so its first task in a session can start lower too. `/escalator reset` clears it.
+- The model each agent type runs on by itself is remembered between sessions, so a Claude Code agent type with its own model is never started above it, and learning moves a custom agent up from its own model from the first task of a session. `/escalator reset` clears it.
 - Delegation hint (option `delegationHint`, on by default): once per session, when the lead writes a large multi-file job by itself and starts no subagent that writes, a toast suggests splitting the work into subagents. It is shown only to you, never to Claude, and costs no tokens.
 
 ### Fixed
@@ -17,6 +19,8 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ### Changed
 
+- The start depends on who chose the model. An agent from a definition file (yours in `.claude/agents/` or a plugin's) with no model in the Agent call is never started lower: a person chose its model. Claude Code's own agent types (general-purpose, Explore, Plan and others) and teammates still start on their category's model.
+- With `startTier: auto`, a model named in the Agent call is the lead's choice and is now a ceiling, not a fixed start: a coding task asked on Opus starts on Sonnet and can climb back. `respectExplicitModel` keeps it exactly.
 - Cheaper-model suggestions for review and exploration categories can now be guarded or measured by reviews of the cheaper model's reports.
 
 ## [1.4.1] - 2026-11-05
