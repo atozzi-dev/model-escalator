@@ -35,9 +35,9 @@ export type Cell = {
 export type Stats = Record<string, Partial<Record<Tier, Cell>>>
 
 // Keyword categories, tried in this order on the description. Labels and their order are the original ones, with
-// 'review' (new) inserted before 'explore' and 'feature' (new) last, so a description that landed in a label before
-// still does, except one that also says "review"/"audit" and nothing earlier in the list (it was 'explore' or 'other').
-// The patterns grew and now stop at word edges.
+// 'review' (new) after 'ui' and 'feature' (new) after it, and 'explore' moved last: with `startTier: auto` it starts on
+// haiku, so it is the lowest-priority label and only wins when no other label matches ("Read the design and
+// implement X" is a feature). The patterns grew and now stop at word edges.
 const KEYWORDS: [RegExp, string][] = [
   [/\b(?:test\w*|specs?|coverage|e2e|jest|vitest|pytest|tdd|assert\w*)\b/i, 'tests'],
   [/\b(?:fix\w*|bugs?|bugfix\w*|debug\w*|errors?|crash\w*|fail\w*|broken|regress\w*|defects?|exceptions?|stack ?traces?|hotfix\w*|repair\w*|flaky)\b/i, 'bugfix'],
@@ -46,8 +46,8 @@ const KEYWORDS: [RegExp, string][] = [
   [/\b(?:migrat\w*|schemas?|databases?|db|sql\w*|postgres\w*|queries|query|datasets?|csv|etl)\b/i, 'data'],
   [/\b(?:ui|ux|css|scss|tailwind|components?|layouts?|styl(?:e|es|ing)|front-?end|buttons?|modals?|responsive|svg|html|themes?)\b/i, 'ui'],
   [/\b(?:review\w*|audit\w*|critique|assess\w*|vet|proofread\w*)\b/i, 'review'],
-  [/\b(?:search\w*|find\w*|explor\w*|research\w*|read|reads|investigat\w*|survey\w*|inspect\w*|map|locate|trace|analy[sz]\w*|summari[sz]\w*|understand\w*|look(?:ing)? (?:up|into|for|at))\b/i, 'explore'],
   [/\b(?:implement\w*|add|adds|adding|creat\w*|build|develop\w*|introduc\w*|new|features?|wire|wiring|extend\w*|support)\b/i, 'feature'],
+  [/\b(?:search\w*|find\w*|explor\w*|research\w*|read|reads|investigat\w*|survey\w*|inspect\w*|map|locate|trace|analy[sz]\w*|summari[sz]\w*|understand\w*|look(?:ing)? (?:up|into|for|at))\b/i, 'explore'],
 ]
 
 // The agent type read as words ("security-reviewer" -> security, reviewer). Strong hints win over the description:
@@ -66,10 +66,13 @@ function typeHint(subagentType: string, table: [RegExp, string][]): string | und
   return undefined
 }
 
-// The label whose pattern appears first in the brief (a brief opens with what the task is: "Implement ... test first").
+// The label whose pattern appears first in the brief (a brief opens with what the task is: "Implement ... test first"),
+// never 'explore': a brief often opens with what to read before the work ("Read the spec, then implement ..."), so its
+// head is no evidence of read-only work. The first other label found in the head, if any.
 function firstLabel(text: string): string | undefined {
   let best: { at: number; label: string } | undefined
   for (const [re, label] of KEYWORDS) {
+    if (label === 'explore') continue
     const at = text.search(re)
     if (at >= 0 && (best === undefined || at < best.at)) best = { at, label }
   }
@@ -77,7 +80,10 @@ function firstLabel(text: string): string | undefined {
 }
 
 // `type:label`. The label comes from, in order: the agent type when it names a role (reviewer, tester, writer), the
-// description (keyword rows in order), a weak type hint (explorer), the first words of the prompt, else 'other'.
+// description (keyword rows in order, explore last), a weak type hint (explorer, scout, the built-in Explore), the first
+// words of the prompt (never explore), else 'other'. Explore starts on haiku with `startTier: auto` (see `AUTO_START`),
+// so it needs clear evidence of read-only work: a description that names nothing but reading, or the agent type. A task
+// that is unclear gets 'other' and starts on the model it asked for.
 export function categorize(subagentType: string, description: string, prompt?: string): string {
   let label: string | undefined
   try {
@@ -101,7 +107,8 @@ export function categorize(subagentType: string, description: string, prompt?: s
 // work well. The escalation ladder and the quality rule (`QUALITY`) catch the tasks where it does not.
 // - `explore` on haiku: searching, reading and summarising. A read-only run has no diff, so it is judged on its final
 //   report when sampled for review (`reviewRate`), like any other run; a miss costs little, since the lead reads the
-//   findings and acts on them itself.
+//   findings and acts on them itself. Haiku is the most aggressive start, so `categorize` gives explore only on clear
+//   signs of read-only work (the description or the agent type), never from the head of the brief alone.
 // - code, tests, docs, data and ui on sonnet: work that verification, sampled reviews and rework can check.
 // - `review`, `other` and any other label start as asked: a review's findings are the result. A sampled review is
 //   judged on its report like any read-only run, but a review that missed an issue still looks fine to the checks,

@@ -84,6 +84,7 @@ Most subagents inherit the lead's model, and learning only ever raises a start, 
 | bugfix, feature, refactor, tests, docs, data, ui | sonnet |
 | review, other | the model asked (the lead's, or the agent definition's) |
 
+- Exploration starts on haiku only when the description or the agent type says the task is read-only work: in the description any other category wins over explore, and the start of the prompt never makes a task explore (a brief that opens with "Read the spec, then ..." is not read-only work).
 - A model named in the Agent call is always kept by this rule, whatever `respectExplicitModel` says.
 - The start is never above the model the agent would have run on: an agent definition that names haiku stays on haiku. For agent types other than `general-purpose` the mod cannot read the definition's model in advance, so the first code task of each such type in a session runs on what its definition picks, and the mod remembers it; explore tasks go to haiku from the first one.
 - Reviews and tasks of unknown kind stay on the model asked: tests, a review of a diff or rework cannot check them, and a review of a report (below) judges the report, not what it missed.

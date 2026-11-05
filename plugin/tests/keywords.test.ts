@@ -37,7 +37,8 @@ const CASES: Case[] = [
   ['general-purpose', 'Build the settings modal', 'Use the existing components.', 'ui'],
   ['general-purpose', 'Task A', 'Implement the export command and wire it into the help text.', 'feature'],
   ['general-purpose', 'Task B', 'Write tests for the queue module. Cover overflow.', 'tests'],
-  ['general-purpose', 'Task C', 'Investigate why the build is slow and report back.', 'explore'],
+  // the head of a brief alone is never enough to start on haiku: the next label in it ("build") is taken instead
+  ['general-purpose', 'Task C', 'Investigate why the build is slow and report back.', 'feature'],
   ['general-purpose', 'Task D', 'Audit the permissions of the scripts.', 'review'],
   ['general-purpose', 'Introduce a retry option', '', 'feature'],
   ['general-purpose', 'zzz qqq', 'nothing useful here', 'other'],
@@ -95,6 +96,42 @@ test('only the head of the prompt counts, and code blocks are left out', async (
   const far = 'lorem '.repeat(100) + 'implement a feature'
   expect(categorize('t', 'Task', far)).toBe('t:other')
   expect(categorize('t', 'Task', '```\nfix everything\n```\nplease implement the cache')).toBe('t:feature')
+})
+
+// Exploration starts on haiku, the most aggressive choice: the explore label needs clear evidence of read-only work.
+test('in the description explore is the lowest label: any other label wins whatever its position', async () => {
+  expect(categorize('t', 'Read the design and implement the cache')).toBe('t:feature')
+  expect(categorize('t', 'Look at the parser and fix the crash')).toBe('t:bugfix')
+  expect(categorize('t', 'Analyze the module and simplify it')).toBe('t:refactor')
+  expect(categorize('t', 'Read the code and write the docs')).toBe('t:docs')
+  expect(categorize('t', 'Trace the slow queries')).toBe('t:data')
+  expect(categorize('t', 'Map the modal styles')).toBe('t:ui')
+  expect(categorize('t', 'Read the diff and audit it')).toBe('t:review')
+  expect(categorize('t', 'Search for flaky specs')).toBe('t:tests')
+  // explore alone still is explore
+  expect(categorize('t', 'Read the loader and report back')).toBe('t:explore')
+  expect(categorize('t', 'Map the repo structure')).toBe('t:explore')
+})
+
+test('the other rows keep their order in the description', async () => {
+  expect(categorize('t', 'fix db test')).toBe('t:tests')
+  expect(categorize('t', 'fix the readme')).toBe('t:bugfix')
+  expect(categorize('t', 'review and implement')).toBe('t:review')
+})
+
+test('the prompt head never yields explore: the next label in the head, else other', async () => {
+  const brief = 'Task B.3 of internal/ROADMAP.md: delegation suggestion. Read internal/DELEGA-ANALISI.md and CLAUDE.md, then implement the hint test first.'
+  expect(categorize('task-worker-sonnet', 'B.3 delegation suggestion', brief)).toBe('task-worker-sonnet:feature')
+  expect(categorize('t', 'Task C', 'Read the parser, look at the call sites, then fix the crash.')).toBe('t:bugfix')
+  expect(categorize('t', 'Task C', 'Investigate why the login is slow and report back.')).toBe('t:other')
+  expect(categorize('general-purpose', 'Task C', 'Read CLAUDE.md and map the hooks.')).toBe('general-purpose:other')
+})
+
+test('explore still comes from the agent type when the description says nothing', async () => {
+  expect(categorize('Explore', 'Where does the retry logic live', 'Read the hooks and report back.')).toBe('Explore:explore')
+  expect(categorize('Explore', 'zzz', 'implement nothing')).toBe('Explore:explore')
+  expect(categorize('code-scout', 'Task 9', 'Read the hooks.')).toBe('code-scout:explore')
+  expect(categorize('Explore', 'Fix the login bug')).toBe('Explore:bugfix')
 })
 
 test('categorize never throws on odd input', async () => {
