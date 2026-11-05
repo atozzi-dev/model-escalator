@@ -4,6 +4,10 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Fixed
+
+- The agent map no longer gets cut off in the desktop app: the drawing fits whole at any pane size. It scales down when the pane is narrow and never grows past its natural size when the pane is wide.
+
 ## [1.4.0] - 2026-11-02
 
 ### Added
