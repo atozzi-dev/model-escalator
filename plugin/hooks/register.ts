@@ -17,7 +17,7 @@ import { renderTree } from './render-text'
 import { createQueue } from './queue'
 import { buildDetail, consultGate, findAgent, selectorChips, swapGate } from './node-detail'
 import { buildStatsView, columnWidths, fitView, type ViewCell } from './stats-view'
-import { buildReportReviewPrompt, buildReviewPrompt, diffArgv, editedPath, formatReviews, handbackReport, isCheaper, parseReview, REPORT_REVIEW_SYSTEM, reportText, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun } from './review'
+import { buildReportReviewPrompt, buildReviewPrompt, diffArgv, editedPath, formatReviews, handbackReport, isCheaper, mayWriteThroughShell, parseReview, REPORT_REVIEW_SYSTEM, reportText, REVIEW_LIMITS, REVIEW_SYSTEM, sampleRun } from './review'
 import { parseSnapshot, type Snapshot, type TrackedAgent } from './state'
 import { addAgent, addConsult, addEscalation, addIntervention, addStep, asUsage, cost as stepCost, emptyLedger, planBlock, report, reportByCategory, savings, statusLine, claudeCostLine, claudeCostUsd, type Ledger, type Usage } from './savings'
 
@@ -59,6 +59,9 @@ const pendingReviews = new Set<Promise<void>>()
 // Files each tracked agent edited during its current run, as it named them: the review diff is limited to them.
 // Module state only: after a reload the review falls back to the whole working tree diff.
 const editedFiles = new Map<string, string[]>()
+// Agents that ran a shell command that may have written a file during their current run: such a run is not read-only,
+// and has no diff of its own to review. Module state only, cleared at the end of the run.
+const shellWriters = new Set<string>()
 // The report each tracked agent handed back to the lead during its current run (its last SubagentHandback message,
 // capped): a run that edited no file is reviewed on it. Module state only, like the edited files; at most
 // MAX_REPORTS agents, the oldest dropped first.
@@ -419,6 +422,7 @@ export function resetState(): void {
   reviewQueue = createQueue()
   pendingReviews.clear()
   editedFiles.clear()
+  shellWriters.clear()
   reports.clear()
   reviewRuns.clear()
   writtenFiles.clear()
@@ -1119,6 +1123,8 @@ export const register: Register = (on, options) => {
       noteEdit(id, e as unknown as Record<string, unknown>)
       noteReport(id, e as unknown as Record<string, unknown>)
     }
+    // A failed command may still have written: shell writes count whatever the result.
+    if (tracked && config.reviewRate > 0 && r.deny === undefined) noteShellWrite(id, e as unknown as Record<string, unknown>)
     if (config.reworkWindowMinutes > 0 && r.isError !== true && r.deny === undefined) {
       if (tracked) noteWritten(id, e as unknown as Record<string, unknown>)
       else if (id === undefined) await noteLeadEdit($, e as unknown as Record<string, unknown>)
@@ -1595,6 +1601,15 @@ function noteEdit(id: string, input: Record<string, unknown>): void {
   } catch { /* the review falls back to the whole diff */ }
 }
 
+// Remembers that a tracked agent ran a shell command that may write (at most MAX_REPORTS agents). Never throws.
+function noteShellWrite(id: string, input: Record<string, unknown>): void {
+  try {
+    if (!mayWriteThroughShell(input.tool, input)) return
+    shellWriters.add(id)
+    if (shellWriters.size > MAX_REPORTS) shellWriters.delete(shellWriters.values().next().value as string)
+  } catch { /* the run is then treated as read-only */ }
+}
+
 // Remembers the report a tracked agent hands back with SubagentHandback (the last one wins, capped). The call itself
 // is never touched. Never throws.
 function noteReport(id: string, input: Record<string, unknown>): void {
@@ -1722,12 +1737,19 @@ function startReview($: EngineInterface, a: AgentState, turnId: unknown, aborted
   try {
     const files = editedFiles.get(a.id) ?? []
     editedFiles.delete(a.id)
+    const wroteViaShell = shellWriters.delete(a.id)
     const handed = reports.get(a.id)
     reports.delete(a.id)
     if (!watching() || aborted || config.reviewRate <= 0 || !isCheaper(a.startTier, baseline)) return
     // A run that edited no file (read-only work, or edits made only through the shell) has no diff of its own: the
     // working tree would show other agents' or the lead's changes. Its report is reviewed instead; with no report
     // (nothing handed back, a reply too short to judge) it is not reviewed and costs no call.
+    // A run that ran a shell command that may write is not read-only either, and its changes cannot be attributed to
+    // it (the working tree mixes other agents' and the lead's work): it is not reviewed and costs no call.
+    if (files.length === 0 && wroteViaShell) {
+      Promise.resolve($.ui.log(`${agentLabel(a)} (${a.category}): review skipped: files changed through the shell are not attributed`, { to: 'debug' })).catch(() => undefined)
+      return
+    }
     const report = files.length === 0 ? handed ?? reportText(answer) : undefined
     if (files.length === 0 && report === undefined) return
     const key = runKey(a.id, turnId)

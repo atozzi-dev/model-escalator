@@ -4,6 +4,12 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-11-05
+
+### Fixed
+
+- A run that changed files only through shell commands (for example `printf ... >> file`) is no longer reviewed as read-only work. Its report was scored down for claiming changes the reviewer could not see, which counted as a false quality failure. Such runs are now left unreviewed.
+
 ## [1.5.0] - 2026-11-05
 
 ### Added
