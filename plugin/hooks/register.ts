@@ -1042,6 +1042,22 @@ export const register: Register = (on, options) => {
       if (mode === 'active') ev = { ...ev, prompt: withAnnouncement(ev.prompt, sessionTag) }
     } catch { /* keep the original prompt */ }
     const r = await next(ev)
+    // A known agent id is the lead continuing the same agent (SendMessage): the engine raises another spawn for it with
+    // the follow-up text as the prompt. The agent keeps what it is (category, start tier, lowered start, escalation flag,
+    // task, name, ladder state): its runs, its escalation and its reviews stay in the tables of the task it was given.
+    // Starting it over from the follow-up message would file the run under a category made from that message, lose
+    // the escalation flag and count the agent twice.
+    const prior = r.agentId ? agents.get(r.agentId) : undefined
+    if (r.agentId && prior) {
+      try {
+        if (recordingOn()) {
+          const a = addRecAgent(recording!, { id: r.agentId, label: prior.name ?? '', cat: prior.category, tier: prior.startTier })
+          recFor(r.agentId, (_a, at) => ({ k: 'spawn', a, at, asked: prior.lowered ?? prior.startTier, tier: prior.startTier, ...(explicit ? { x: 1 as const } : {}) }))
+        }
+      } catch { /* the recording is optional */ }
+      await save($)
+      return r
+    }
     if (r.agentId) {
       const name = spawnName(e)
       const made: TrackedAgent = newAgent(r.agentId, category, r.model, e.prompt)
