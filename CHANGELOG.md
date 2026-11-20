@@ -4,6 +4,8 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-11-20
+
 ### Fixed
 
 - A resumed agent (continued with a new message from the lead) no longer loses its category, start tier and escalation flag. Its runs, escalations and late review scores now count in the category of the task it was first given, not in one made up from the follow-up message, so the quality rule sees them.
