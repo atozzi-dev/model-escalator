@@ -38,12 +38,14 @@ jobs:
           mkdir -p .claude-plugin/types
           curl -fsSL -o .claude-plugin/types/claude-code.d.ts \
             https://raw.githubusercontent.com/anthropics/claude-code/main/mods/types/claude-code.d.ts
-          # The published types are written by a specific Claude Code release.
+          # Older published copies start with the Claude Code release that wrote
+          # them; the current one has no version line and tracks the latest API.
           types_version=$(head -n 1 .claude-plugin/types/claude-code.d.ts \
             | sed -nE 's#^// Written by Claude Code ([0-9]+\.[0-9]+\.[0-9]+)\.?[[:space:]]*$#\1#p')
           if [ -z "$types_version" ]; then
-            echo "::error title=Type check::Cannot read the version from the first line of the published types"
-            exit 1
+            echo "::notice title=Type check::The published types name no version; checking against them as the latest API"
+            tsc -p .
+            exit 0
           fi
           newest=$(printf '%s\n%s\n' "$types_version" "$CLAUDE_CODE_VERSION" | sort -V | tail -n 1)
           if [ "$newest" = "$types_version" ]; then
