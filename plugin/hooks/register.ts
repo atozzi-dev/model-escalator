@@ -1979,7 +1979,7 @@ async function configCommand($: any): Promise<string> {
     `Baseline: ${baseline} (from ${baseSrc})`,
     'Options:',
     ...describeConfig(config).map((l) => '  ' + l),
-    'Change them from /config, or in settings under pluginConfigs with the key model-escalator (or model-escalator@inline).',
+    'Change them from /config, or in your user settings under pluginConfigs with the key model-escalator (or model-escalator@inline); project settings are not read.',
     'The mode comes from the MODEL_ESCALATOR_MODE and MODEL_ESCALATOR_BASELINE environment variables.',
   ].join('\n')
 }

@@ -53,6 +53,7 @@ test('config shows the defaults and where to change them', async ($, on) => {
   expect(text).toContain('seniorModel: opus')
   expect(text).toContain('/config')
   expect(text).toContain('pluginConfigs')
+  expect(text).toContain('project settings are not read')
   expect(text).not.toContain('(changed')
 })
 

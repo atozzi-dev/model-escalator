@@ -208,7 +208,7 @@ The example is a fictional session drawn by the mod's own renderer (`plugin/hook
 
 ## Configuration
 
-Options are set from `/config` or under `pluginConfigs` in your settings (key `model-escalator`). A change applies after the mod reloads. An invalid value falls back to the default, and values outside their range are clamped or ignored as noted. `/escalator config` shows every value in force and marks the ones that differ from the default.
+Options are set from `/config` or under `pluginConfigs` in your user settings (key `model-escalator`). Claude Code reads plugin options only from user, `--settings` and managed settings: a `pluginConfigs` entry in a project's `.claude/settings.json` or `settings.local.json` is ignored. A change applies after the mod reloads. An invalid value falls back to the default, and values outside their range are clamped or ignored as noted. `/escalator config` shows every value in force and marks the ones that differ from the default.
 
 | Option | Default | Meaning |
 |---|---|---|
